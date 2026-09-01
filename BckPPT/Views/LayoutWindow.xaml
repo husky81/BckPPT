@@ -1,0 +1,43 @@
+<Window
+    x:Class="CellBox2.BckPPT.Views.LayoutWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Title="레이아웃" Width="760" Height="500"
+    WindowStartupLocation="CenterOwner"
+    Background="#1A1A1A"
+    Icon="/Assets/icon.ico"
+    PreviewMouseWheel="Window_PreviewMouseWheel">
+
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <!-- 툴바 -->
+        <Border Grid.Row="0" Background="#252526" Padding="8,5"
+                BorderBrush="#3C3C3C" BorderThickness="0,0,0,1">
+            <DockPanel>
+                <TextBlock x:Name="SlideCounter" DockPanel.Dock="Right"
+                           Foreground="#666" FontFamily="Segoe UI" FontSize="11"
+                           VerticalAlignment="Center" Margin="0,0,4,0"/>
+                <Button DockPanel.Dock="Right" Style="{StaticResource DarkBtn}"
+                        Click="GoToSlide_Click" Padding="5,3" Margin="0,0,6,0"
+                        ToolTip="PPT에서 이 슬라이드로 이동">
+                    <TextBlock Text="&#x27A1;" FontSize="13"/>
+                </Button>
+                <TextBlock x:Name="SlideTitle" Foreground="#AAA"
+                           FontFamily="Segoe UI" FontSize="12"
+                           VerticalAlignment="Center"/>
+            </DockPanel>
+        </Border>
+
+        <!-- 캔버스 영역 -->
+        <Border Grid.Row="1" Margin="10" Background="#2D2D30"
+                BorderBrush="#3C3C3C" BorderThickness="1" CornerRadius="3">
+            <Viewbox Stretch="Uniform" Margin="8">
+                <Canvas x:Name="LayoutCanvas"/>
+            </Viewbox>
+        </Border>
+    </Grid>
+</Window>

@@ -1,0 +1,141 @@
+<Window
+    x:Class="CellBox2.BckPPT.Views.TextInspectWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Title="텍스트 확인" Width="620" Height="420"
+    WindowStartupLocation="CenterOwner"
+    Background="{StaticResource AppBg}"
+    Icon="/Assets/icon.ico">
+
+    <Grid Margin="0">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- 헤더 -->
+        <Border Grid.Row="0" Background="{StaticResource HeaderBg}"
+                Padding="12,8" BorderBrush="{StaticResource BorderBr}" BorderThickness="0,0,0,1">
+            <DockPanel>
+                <Button DockPanel.Dock="Right" Style="{StaticResource DarkBtn}"
+                        Click="CopyAll_Click" Padding="7,4" ToolTip="전체 텍스트 복사">
+                    <TextBlock Text="복사" FontSize="12"/>
+                </Button>
+                <TextBlock x:Name="HeaderText" Style="{StaticResource H1}"
+                           VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+            </DockPanel>
+        </Border>
+
+        <!-- 줄 목록 -->
+        <Border Grid.Row="1" Margin="8" Background="{StaticResource PanelBg}"
+                BorderBrush="{StaticResource BorderBr}" BorderThickness="1" CornerRadius="3">
+            <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="0">
+                <ItemsControl x:Name="LinesList">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <Border Padding="10,5" BorderBrush="{StaticResource BorderBr}"
+                                    BorderThickness="0,0,0,1">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="28"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+
+                                    <!-- 줄 번호 -->
+                                    <TextBlock Grid.Column="0"
+                                               Text="{Binding LineNumber}"
+                                               Foreground="{StaticResource SubTextBr}"
+                                               FontFamily="Consolas" FontSize="11"
+                                               VerticalAlignment="Center"/>
+
+                                    <!-- 불릿 -->
+                                    <StackPanel Grid.Column="1" Orientation="Horizontal"
+                                                VerticalAlignment="Center">
+                                        <Border Width="{Binding IndentMargin}"/>
+                                        <TextBlock Text="{Binding BulletText}"
+                                                   Foreground="#E0A060"
+                                                   FontFamily="Segoe UI" FontSize="12"
+                                                   Margin="0,0,4,0"
+                                                   Visibility="{Binding HasBullet, Converter={StaticResource BoolToVis}}"/>
+                                    </StackPanel>
+
+                                    <!-- 텍스트 -->
+                                    <TextBlock Grid.Column="2"
+                                               Text="{Binding Text}"
+                                               Foreground="{StaticResource TextBr}"
+                                               FontFamily="Segoe UI" FontSize="12"
+                                               VerticalAlignment="Center"
+                                               TextWrapping="NoWrap"
+                                               TextTrimming="CharacterEllipsis"
+                                               Margin="0,0,8,0"/>
+
+                                    <!-- 줄넘김 아이콘 + 라벨 -->
+                                    <StackPanel Grid.Column="3" Orientation="Horizontal"
+                                                VerticalAlignment="Center" MinWidth="100">
+                                        <TextBlock Text="{Binding BreakIcon}"
+                                                   FontSize="14" VerticalAlignment="Center"
+                                                   Margin="0,0,5,0">
+                                            <TextBlock.Style>
+                                                <Style TargetType="TextBlock">
+                                                    <Setter Property="Foreground" Value="{StaticResource SubTextBr}"/>
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding BreakType}" Value="AutoWrap">
+                                                            <Setter Property="Foreground" Value="{StaticResource AccentBr}"/>
+                                                        </DataTrigger>
+                                                        <DataTrigger Binding="{Binding BreakType}" Value="Enter">
+                                                            <Setter Property="Foreground" Value="{StaticResource WarnBr}"/>
+                                                        </DataTrigger>
+                                                        <DataTrigger Binding="{Binding BreakType}" Value="ShiftEnter">
+                                                            <Setter Property="Foreground" Value="{StaticResource SuccessBr}"/>
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </TextBlock.Style>
+                                        </TextBlock>
+                                        <TextBlock Text="{Binding BreakLabel}"
+                                                   FontFamily="Segoe UI" FontSize="10"
+                                                   VerticalAlignment="Center">
+                                            <TextBlock.Style>
+                                                <Style TargetType="TextBlock">
+                                                    <Setter Property="Foreground" Value="{StaticResource SubTextBr}"/>
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding BreakType}" Value="AutoWrap">
+                                                            <Setter Property="Foreground" Value="{StaticResource AccentBr}"/>
+                                                        </DataTrigger>
+                                                        <DataTrigger Binding="{Binding BreakType}" Value="Enter">
+                                                            <Setter Property="Foreground" Value="{StaticResource WarnBr}"/>
+                                                        </DataTrigger>
+                                                        <DataTrigger Binding="{Binding BreakType}" Value="ShiftEnter">
+                                                            <Setter Property="Foreground" Value="{StaticResource SuccessBr}"/>
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </TextBlock.Style>
+                                        </TextBlock>
+                                    </StackPanel>
+                                </Grid>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </ScrollViewer>
+        </Border>
+
+        <!-- 범례 -->
+        <Border Grid.Row="2" Background="{StaticResource PanelBg}"
+                BorderBrush="{StaticResource BorderBr}" BorderThickness="0,1,0,0"
+                Padding="12,6">
+            <StackPanel Orientation="Horizontal">
+                <TextBlock Text="\u2192 auto" Foreground="{StaticResource AccentBr}"
+                           FontFamily="Segoe UI" FontSize="11" Margin="0,0,16,0"/>
+                <TextBlock Text="\u21B5 Enter" Foreground="{StaticResource WarnBr}"
+                           FontFamily="Segoe UI" FontSize="11" Margin="0,0,16,0"/>
+                <TextBlock Text="\u2193 Shift+Enter" Foreground="{StaticResource SuccessBr}"
+                           FontFamily="Segoe UI" FontSize="11"/>
+            </StackPanel>
+        </Border>
+    </Grid>
+</Window>

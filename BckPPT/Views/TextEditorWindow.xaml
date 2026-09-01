@@ -1,0 +1,71 @@
+<Window
+    x:Class="CellBox2.BckPPT.Views.TextEditorWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Title="텍스트 치환" Width="700" Height="580"
+    WindowStartupLocation="CenterOwner"
+    Background="#1E1E1E"
+    Icon="/Assets/icon.ico">
+
+    <Grid Margin="12">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- LLM 프롬프트 + 복사 버튼 -->
+        <Border Grid.Row="0" Background="#252526" BorderBrush="#3C3C3C" BorderThickness="1"
+                CornerRadius="3" Padding="10,8" Margin="0,0,0,8">
+            <DockPanel>
+                <Button DockPanel.Dock="Right" Content="프롬프트+텍스트 복사"
+                        Style="{StaticResource AccentBtn}" Margin="10,0,0,0"
+                        VerticalAlignment="Top" Click="CopyAll_Click"
+                        ToolTip="LLM 프롬프트와 텍스트 목록을 함께 클립보드에 복사"/>
+                <TextBox x:Name="PromptBox" IsReadOnly="True"
+                         TextWrapping="Wrap" BorderThickness="0"
+                         FontFamily="Segoe UI" FontSize="11.5"
+                         Foreground="#9CDCFE" Background="Transparent"
+                         Cursor="Arrow"/>
+            </DockPanel>
+        </Border>
+
+        <!-- 안내 -->
+        <TextBlock Grid.Row="1" Margin="0,0,0,6" TextWrapping="Wrap"
+                   Foreground="#858585" FontSize="11" FontFamily="Segoe UI">
+            1) 위 버튼으로 복사 → LLM에 붙여넣기 → 수정 요청
+            2) LLM 결과를 아래에 붙여넣기 (기존 내용 지우고)
+            3) 적용 클릭
+        </TextBlock>
+
+        <!-- 에디터 -->
+        <TextBox Grid.Row="2" x:Name="Editor"
+                 AcceptsReturn="True" AcceptsTab="True"
+                 TextWrapping="Wrap"
+                 VerticalScrollBarVisibility="Auto"
+                 HorizontalScrollBarVisibility="Disabled"
+                 FontFamily="Consolas" FontSize="13"
+                 Foreground="#D4D4D4" Background="#252526"
+                 CaretBrush="#D4D4D4"
+                 BorderBrush="#3C3C3C" BorderThickness="1"
+                 Padding="8,6"/>
+
+        <!-- 버튼 -->
+        <DockPanel Grid.Row="3" Margin="0,10,0,0">
+            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                <Button Content="적용" Padding="16,6" Margin="0,0,8,0"
+                        Style="{StaticResource AccentBtn}"
+                        Click="Apply_Click"/>
+                <Button Content="취소" Padding="16,6"
+                        Style="{StaticResource DarkBtn}"
+                        Click="Cancel_Click"/>
+            </StackPanel>
+            <Button Content="텍스트만 복사" Padding="12,6"
+                    Style="{StaticResource DarkBtn}"
+                    Click="CopyTextOnly_Click"
+                    ToolTip="에디터 내용만 클립보드에 복사"
+                    HorizontalAlignment="Left"/>
+        </DockPanel>
+    </Grid>
+</Window>

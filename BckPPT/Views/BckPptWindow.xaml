@@ -1,0 +1,366 @@
+<Window
+    x:Class="CellBox2.BckPPT.Views.BckPptWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:models="clr-namespace:CellBox2.BckPPT.Models"
+    xmlns:vm="clr-namespace:CellBox2.BckPPT.ViewModels"
+    Title="BckPPT" Width="960" Height="660" x:Name="MainWindow"
+    Icon="/Assets/icon.ico"
+    WindowStartupLocation="CenterScreen"
+    Background="{StaticResource AppBg}">
+
+    <Window.Resources>
+        <Style x:Key="DiagRow" TargetType="Border">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="BorderBrush" Value="{StaticResource BorderBr}"/>
+            <Setter Property="BorderThickness" Value="0,0,0,1"/>
+            <Setter Property="Padding" Value="8,4"/>
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding IsOverflow}" Value="True">
+                    <Setter Property="Background" Value="{StaticResource OverflowRowBg}"/>
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+
+        <Style x:Key="FontRow" TargetType="Border">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="BorderBrush" Value="{StaticResource BorderBr}"/>
+            <Setter Property="BorderThickness" Value="0,0,0,1"/>
+            <Setter Property="Padding" Value="8,4"/>
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding IsAllowed}" Value="False">
+                    <Setter Property="Background" Value="{StaticResource OverflowRowBg}"/>
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+
+        <Style x:Key="SlideBadge" TargetType="TextBlock" BasedOn="{StaticResource Caption}">
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding HasOverflow}" Value="True">
+                    <Setter Property="Foreground" Value="{StaticResource WarnBr}"/>
+                    <Setter Property="FontWeight" Value="SemiBold"/>
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+    </Window.Resources>
+
+    <Grid Margin="0">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- ══════════════════════════════════════════════════════
+             헤더
+             ══════════════════════════════════════════════════════ -->
+        <Border Grid.Row="0" Background="{StaticResource HeaderBg}"
+                Padding="12,8" BorderBrush="{StaticResource BorderBr}" BorderThickness="0,0,0,1">
+            <DockPanel>
+                <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+
+                    <!-- 되돌리기 -->
+                    <Button Style="{StaticResource DarkBtn}" Margin="0,0,4,0"
+                            Command="{Binding UndoCommand}"
+                            ToolTip="마지막 텍스트 치환을 되돌립니다"
+                            Padding="7,4">
+                        <TextBlock Text="↩" FontSize="14"/>
+                    </Button>
+
+                    <!-- AutoFit -->
+                    <Button Style="{StaticResource DarkBtn}" Margin="0,0,4,0"
+                            Command="{Binding AutoFitAllCommand}"
+                            IsEnabled="{Binding IsNotBusy}"
+                            ToolTip="overflow 중인 모든 shape의 글꼴 크기를 자동으로 줄입니다"
+                            Padding="7,4">
+                        <TextBlock Text="AutoFit" FontSize="12"/>
+                    </Button>
+
+                    <!-- 규칙 치환 -->
+                    <Button Style="{StaticResource DarkBtn}" Margin="0,0,4,0"
+                            Click="RulesReplace_Click"
+                            IsEnabled="{Binding IsNotBusy}"
+                            ToolTip="저장된 Find/Replace 규칙을 전체 파일에 적용합니다"
+                            Padding="7,4">
+                        <TextBlock Text="규칙 치환" FontSize="12"/>
+                    </Button>
+
+                    <!-- 텍스트 치환 -->
+                    <Button Style="{StaticResource DarkBtn}" Margin="0,0,4,0"
+                            Click="TextReplace_Click"
+                            ToolTip="선택된 슬라이드의 텍스트를 번호 목록으로 열기&#x0a;→ LLM에게 수정 요청 후 결과 붙여넣고 적용"
+                            Padding="7,4">
+                        <TextBlock Text="텍스트 치환" FontSize="12"/>
+                    </Button>
+
+                    <!-- CSV 내보내기 -->
+                    <Button Style="{StaticResource DarkBtn}" Margin="0,0,4,0"
+                            Command="{Binding ExportCsvCommand}"
+                            IsEnabled="{Binding IsNotBusy}"
+                            ToolTip="현재 표시된 shape 목록을 CSV로 내보냅니다"
+                            Padding="7,4">
+                        <TextBlock Text="CSV" FontSize="12"/>
+                    </Button>
+
+                    <!-- 이력 -->
+                    <Button Style="{StaticResource DarkBtn}" Margin="0,0,4,0"
+                            Click="History_Click"
+                            ToolTip="변경 이력 보기" Padding="7,4">
+                        <TextBlock Text="이력" FontSize="12"/>
+                    </Button>
+
+                    <!-- 글꼴 필터 -->
+                    <ComboBox ItemsSource="{Binding AvailableFonts}"
+                              SelectedItem="{Binding SelectedFontFilter}"
+                              MinWidth="110" MaxWidth="180" Margin="0,0,4,0"
+                              ToolTip="PPT에서 사용된 글꼴 목록&#x0a;선택하면 해당 글꼴이 적용된 shape와 슬라이드만 표시">
+                        <ComboBox.ItemTemplate>
+                            <DataTemplate>
+                                <TextBlock>
+                                    <TextBlock.Style>
+                                        <Style TargetType="TextBlock">
+                                            <Setter Property="Text" Value="{Binding}"/>
+                                            <Setter Property="Foreground" Value="{StaticResource TextBr}"/>
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding}" Value="">
+                                                    <Setter Property="Text" Value="전체 글꼴"/>
+                                                    <Setter Property="Foreground" Value="{StaticResource SubTextBr}"/>
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </TextBlock.Style>
+                                </TextBlock>
+                            </DataTemplate>
+                        </ComboBox.ItemTemplate>
+                    </ComboBox>
+
+                    <!-- 새로고침 -->
+                    <Button Style="{StaticResource DarkBtn}"
+                            Command="{Binding RefreshCommand}"
+                            Click="Refresh_Click"
+                            IsEnabled="{Binding IsNotBusy}"
+                            ToolTip="PowerPoint에서 열린 파일 목록을 다시 스캔하고 재분석"
+                            Padding="7,4">
+                        <TextBlock Text="&#x1F504;" FontSize="14"/>
+                    </Button>
+                </StackPanel>
+
+                <!-- 파일 선택 -->
+                <ComboBox ItemsSource="{Binding Presentations}"
+                          SelectedItem="{Binding SelectedPresentation}"
+                          VerticalAlignment="Center"
+                          HorizontalAlignment="Left"
+                          MinWidth="200" MaxWidth="400">
+                    <ComboBox.ItemTemplate>
+                        <DataTemplate>
+                            <TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis"/>
+                        </DataTemplate>
+                    </ComboBox.ItemTemplate>
+                </ComboBox>
+            </DockPanel>
+        </Border>
+
+        <!-- ══════════════════════════════════════════════════════
+             본문
+             ══════════════════════════════════════════════════════ -->
+        <Grid Grid.Row="1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="195" MinWidth="120" MaxWidth="350"/>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+
+            <!-- 좌측: 슬라이드 목록 -->
+            <Border Grid.Column="0" Background="{StaticResource PanelBg}">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+                    <DockPanel Grid.Row="0" Margin="10,8,10,4">
+                        <TextBlock Text="슬라이드" Style="{StaticResource Caption}" FontWeight="SemiBold"/>
+                    </DockPanel>
+                    <!-- 분석 진행 텍스트 (분석 중일 때만 표시) -->
+                    <TextBlock Grid.Row="1"
+                               Text="{Binding AnalysisProgressText}"
+                               Margin="10,0,10,4" FontSize="10"
+                               Foreground="#666" TextTrimming="CharacterEllipsis"
+                               Visibility="{Binding IsAnalyzing, Converter={StaticResource BoolToVis}}"/>
+                    <ListBox Grid.Row="2" Style="{StaticResource DarkListBox}"
+                             ItemContainerStyle="{StaticResource DarkListBoxItem}"
+                             ItemsSource="{Binding SlideItems}"
+                             SelectedItem="{Binding SelectedSlide}"
+                             ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                             SelectionChanged="SlideList_SelectionChanged">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate DataType="{x:Type models:SlideListItem}">
+                                <DockPanel>
+                                    <DockPanel.ContextMenu>
+                                        <ContextMenu>
+                                            <MenuItem Header="레이아웃 보기" Click="LayoutMenuItem_Click"/>
+                                        </ContextMenu>
+                                    </DockPanel.ContextMenu>
+                                    <TextBlock DockPanel.Dock="Right" Text="{Binding OverflowBadge}"
+                                               Style="{StaticResource SlideBadge}" Margin="4,0,0,0"/>
+                                    <TextBlock Text="{Binding DisplayText}" FontSize="11"
+                                               TextTrimming="CharacterEllipsis">
+                                        <TextBlock.Style>
+                                            <Style TargetType="TextBlock">
+                                                <Style.Triggers>
+                                                    <!-- skeleton 상태: 흐릿한 이탤릭 -->
+                                                    <DataTrigger Binding="{Binding IsAnalyzing}" Value="True">
+                                                        <Setter Property="Foreground" Value="#555"/>
+                                                        <Setter Property="FontStyle"  Value="Italic"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </TextBlock.Style>
+                                    </TextBlock>
+                                </DockPanel>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                </Grid>
+            </Border>
+
+            <!-- 스플리터 -->
+            <GridSplitter Grid.Column="1" Width="4" HorizontalAlignment="Center"
+                          VerticalAlignment="Stretch" Background="{StaticResource BorderBr}"
+                          Cursor="SizeWE"/>
+
+            <!-- 우측: Shape 목록 -->
+            <Grid Grid.Column="2">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+
+                    <!-- 컬럼 헤더 -->
+                    <Border Grid.Row="0" Background="{StaticResource HeaderBg}" Padding="8,5">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="26"/>
+                                <ColumnDefinition Width="42"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="36"/>
+                                <ColumnDefinition Width="36"/>
+                                <ColumnDefinition Width="50"/>
+                                <ColumnDefinition Width="46"/>
+                                <ColumnDefinition Width="36"/>
+                                <ColumnDefinition Width="36"/>
+                                <ColumnDefinition Width="28"/>
+                                <ColumnDefinition Width="90"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0" Text="S."     Style="{StaticResource ColHeader}" ToolTip="슬라이드 번호"
+                                       Visibility="{Binding SlideColumnVisibility}"/>
+                            <TextBlock Grid.Column="1" Text="구분"   Style="{StaticResource ColHeader}" ToolTip="역할 분류 (우클릭으로 변경)"/>
+                            <TextBlock Grid.Column="2" Text="텍스트" Style="{StaticResource ColHeader}"/>
+                            <TextBlock Grid.Column="3" Text="Pt"     Style="{StaticResource ColHeader}" ToolTip="글꼴 크기 (pt)"/>
+                            <TextBlock Grid.Column="4" Text="TL"     Style="{StaticResource ColHeader}" ToolTip="텍스트 길이 (반각 기준)"/>
+                            <TextBlock Grid.Column="5" Text="BoundH" Style="{StaticResource ColHeader}" ToolTip="텍스트 렌더링 높이"/>
+                            <TextBlock Grid.Column="6" Text="BoxH"   Style="{StaticResource ColHeader}" ToolTip="텍스트 상자 높이"/>
+                            <TextBlock Grid.Column="7" Text="Lines"  Style="{StaticResource ColHeader}"/>
+                            <TextBlock Grid.Column="8" Text="LineH"  Style="{StaticResource ColHeader}" ToolTip="줄당 평균 높이"/>
+                            <TextBlock Grid.Column="9" Text=""       Style="{StaticResource ColHeader}"/>
+                            <TextBlock Grid.Column="10" Text="Shape" Style="{StaticResource ColHeader}" Foreground="#555"/>
+                        </Grid>
+                    </Border>
+
+                    <!-- Shape 트리 -->
+                    <TreeView Grid.Row="1" x:Name="ShapeTree"
+                              ItemsSource="{Binding RootNodes}"
+                              AllowDrop="True"
+                              ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                              SelectedItemChanged="ShapeTree_SelectedItemChanged"
+                              PreviewMouseLeftButtonDown="ShapeTree_PreviewMouseLeftButtonDown"
+                              PreviewMouseLeftButtonUp="ShapeTree_PreviewMouseLeftButtonUp"
+                              PreviewMouseMove="ShapeTree_PreviewMouseMove"
+                              DragOver="ShapeTree_DragOver"
+                              DragLeave="ShapeTree_DragLeave"
+                              Drop="ShapeTree_Drop"
+                              KeyDown="ShapeTree_KeyDown">
+                        <TreeView.ItemTemplate>
+                            <HierarchicalDataTemplate ItemsSource="{Binding Children}">
+                                <Grid>
+                                    <Grid.ContextMenu>
+                                        <ContextMenu>
+                                            <MenuItem Header="텍스트 확인" Click="TextInspect_Click"/>
+                                            <MenuItem Header="문단종류">
+                                                <MenuItem Header="단원"       Tag="Chapter"    Click="RoleAssign_Click"/>
+                                                <MenuItem Header="제목"       Tag="Title"      Click="RoleAssign_Click"/>
+                                                <Separator/>
+                                                <MenuItem Header="개요 1"     Tag="Outline1"   Click="RoleAssign_Click"/>
+                                                <MenuItem Header="개요 2"     Tag="Outline2"   Click="RoleAssign_Click"/>
+                                                <MenuItem Header="개요 3"     Tag="Outline3"   Click="RoleAssign_Click"/>
+                                                <Separator/>
+                                                <MenuItem Header="목록 항목"  Tag="ListItem"   Click="RoleAssign_Click"/>
+                                                <MenuItem Header="본문"       Tag="Body"       Click="RoleAssign_Click"/>
+                                                <MenuItem Header="그림 제목"  Tag="Caption"    Click="RoleAssign_Click"/>
+                                                <MenuItem Header="페이지 번호" Tag="PageNumber" Click="RoleAssign_Click"/>
+                                                <MenuItem Header="바닥글"     Tag="Footer"     Click="RoleAssign_Click"/>
+                                                <Separator/>
+                                                <MenuItem Header="콘텐츠 이미지" Tag="ContentImage"    Click="RoleAssign_Click"/>
+                                                <MenuItem Header="장식용 이미지" Tag="DecorativeImage" Click="RoleAssign_Click"/>
+                                                <MenuItem Header="불릿 아이콘"   Tag="BulletIcon"     Click="RoleAssign_Click"/>
+                                            </MenuItem>
+                                            <MenuItem Header="새로고침" Click="ShapeRefresh_Click"/>
+                                            <MenuItem Header="Dev Info 복사" Click="CopyDevInfo_Click"/>
+                                        </ContextMenu>
+                                    </Grid.ContextMenu>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="26"/>
+                                        <ColumnDefinition Width="42"/>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="36"/>
+                                        <ColumnDefinition Width="36"/>
+                                        <ColumnDefinition Width="50"/>
+                                        <ColumnDefinition Width="46"/>
+                                        <ColumnDefinition Width="36"/>
+                                        <ColumnDefinition Width="36"/>
+                                        <ColumnDefinition Width="28"/>
+                                        <ColumnDefinition Width="90"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0" Text="{Binding Shape.SlideIndex}"       Style="{StaticResource Cell}"
+                                               Visibility="{Binding DataContext.SlideColumnVisibility, RelativeSource={RelativeSource AncestorType=TreeView}}"/>
+                                    <TextBlock Grid.Column="1" Text="{Binding RoleAbbr}" Style="{StaticResource Cell}" FontSize="10"/>
+                                    <TextBlock Grid.Column="2" Text="{Binding Shape.TextPreview}"      Style="{StaticResource Cell}" Foreground="{StaticResource SubTextBr}" TextTrimming="CharacterEllipsis"/>
+                                    <TextBlock Grid.Column="3" Text="{Binding Shape.FontSize}"         Style="{StaticResource Cell}"/>
+                                    <TextBlock Grid.Column="4" Text="{Binding Shape.HalfWidthLength}"  Style="{StaticResource Cell}"/>
+                                    <TextBlock Grid.Column="5" Text="{Binding Shape.BoundHeight}"      Style="{StaticResource Cell}"/>
+                                    <TextBlock Grid.Column="6" Text="{Binding Shape.BoxHeight}"        Style="{StaticResource Cell}"/>
+                                    <TextBlock Grid.Column="7" Text="{Binding Shape.LineCount}"        Style="{StaticResource Cell}"/>
+                                    <TextBlock Grid.Column="8" Text="{Binding Shape.LineHeight}"       Style="{StaticResource Cell}"/>
+                                    <TextBlock Grid.Column="9" Text="{Binding Shape.OverflowIcon}"     Style="{StaticResource Cell}"/>
+                                    <TextBlock Grid.Column="10" Text="{Binding Shape.ShapeName}"       Style="{StaticResource Cell}" Foreground="#555" TextTrimming="CharacterEllipsis"/>
+                                </Grid>
+                            </HierarchicalDataTemplate>
+                        </TreeView.ItemTemplate>
+                    </TreeView>
+                </Grid>
+
+                <!-- 빈 상태 -->
+                <TextBlock Text="파일을 선택하면 분석 결과가 여기에 표시됩니다."
+                           Style="{StaticResource Caption}"
+                           HorizontalAlignment="Center" VerticalAlignment="Center"
+                           Visibility="{Binding EmptyTableVisibility}"/>
+            </Grid>
+        </Grid>
+
+        <!-- ══════════════════════════════════════════════════════
+             상태 로그
+             ══════════════════════════════════════════════════════ -->
+        <Border Grid.Row="2" Background="{StaticResource PanelBg}"
+                BorderBrush="{StaticResource BorderBr}" BorderThickness="0,1,0,0"
+                Padding="10,4" MaxHeight="90">
+            <ItemsControl ItemsSource="{Binding StatusLog}">
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate>
+                        <TextBlock Text="{Binding}" Style="{StaticResource Caption}" Margin="0,1"/>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+        </Border>
+    </Grid>
+</Window>

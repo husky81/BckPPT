@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#4BA3F5"/>
+      <stop offset="100%" stop-color="#2178E8"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Rounded rectangle background -->
+  <rect x="0" y="0" width="512" height="512" rx="90" ry="90" fill="url(#bg)"/>
+
+  <!-- B (light blue, behind) -->
+  <text x="256" y="380" text-anchor="middle" font-family="Calibri, Arial, sans-serif" font-weight="bold" font-size="380" fill="#8EB4E3">B</text>
+
+  <!-- P (white, on top) -->
+  <text x="254" y="379" text-anchor="middle" font-family="Calibri, Arial, sans-serif" font-weight="bold" font-size="380" fill="#FFFFFF">P</text>
+</svg>
