@@ -1,9 +1,9 @@
 using System.Text;
 using System.Text.RegularExpressions;
-using CellBox2.BckPPT.Models;
-using CellBox2.BckPPT.ViewModels;
+using BckPPT.Models;
+using BckPPT.ViewModels;
 
-namespace CellBox2.BckPPT.Services;
+namespace BckPPT.Services;
 
 /// <summary>SPDX(Slide-MPDX) 추출 · 패치 적용 · 검증.</summary>
 public class SpdxService

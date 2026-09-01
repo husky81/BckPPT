@@ -10,14 +10,6 @@ param([switch]$BuildOnly)
 $ProjectDir = $PSScriptRoot
 $ExePath = "$ProjectDir\bin\x64\Debug\net8.0-windows\BckPPT.exe"
 
-# ── 기존 인스턴스 종료 (빌드 전에 파일 잠금 해제) ────────────────
-$existing = Get-Process -Name "BckPPT" -ErrorAction SilentlyContinue
-if ($existing) {
-    Write-Host "기존 BckPPT 인스턴스 종료 중..." -ForegroundColor Yellow
-    $existing | Stop-Process -Force
-    Start-Sleep -Milliseconds 500
-}
-
 # ── 소스 변경 감지 ────────────────────────────────────────────────
 $SourceFiles = Get-ChildItem -Path $ProjectDir -Recurse -Include "*.cs","*.xaml","*.csproj" `
     | Where-Object { $_.FullName -notmatch "\\(bin|obj)\\" }
@@ -44,7 +36,7 @@ if (-not (Test-Path $ExePath)) {
 if ($NeedsBuild) {
     dotnet build "$ProjectDir\BckPPT.csproj" -c Debug -p:Platform=x64 --nologo -v:minimal
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "빌드 실패" -ForegroundColor Red
+        Write-Host "빌드 실패. 실행 중인 이전 개발 빌드가 파일을 점유했다면 창을 닫고 다시 시도하세요." -ForegroundColor Red
         exit 1
     }
 }

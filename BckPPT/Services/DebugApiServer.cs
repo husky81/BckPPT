@@ -3,10 +3,10 @@ using System.Net;
 using System.Net.Http;
 using System.Text.Json;
 using System.Windows.Threading;
-using CellBox2.BckPPT.Models;
-using CellBox2.BckPPT.ViewModels;
+using BckPPT.Models;
+using BckPPT.ViewModels;
 
-namespace CellBox2.BckPPT.Services;
+namespace BckPPT.Services;
 
 /// <summary>localhost:38700 HTTP API — ViewModel 직접 제어로 디버깅 루프 지원.</summary>
 public class DebugApiServer

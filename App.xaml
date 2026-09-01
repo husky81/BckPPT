@@ -1,8 +1,8 @@
 <Application
-    x:Class="CellBox2.BckPptApp"
+    x:Class="BckPPT.BckPptApp"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-    StartupUri="BckPPT/Views/BckPptWindow.xaml">
+    ShutdownMode="OnMainWindowClose">
     <Application.Resources>
         <ResourceDictionary>
             <!-- ═══ Oky 다크 테마 색상 ═══ -->

@@ -1,6 +1,6 @@
-using CellBox2.BckPPT.Models;
+using BckPPT.Models;
 
-namespace CellBox2.BckPPT.Services;
+namespace BckPPT.Services;
 
 /// <summary>규칙 기반 Shape 역할 분류기.</summary>
 public static class ShapeRoleClassifier

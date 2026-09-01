@@ -5,18 +5,12 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
-using CellBox2.BckPPT.Models;
-using CellBox2.BckPPT.Services;
-using CellBox2.BckPPT.ViewModels;
+using BckPPT.Application;
+using BckPPT.Models;
+using BckPPT.Services;
+using BckPPT.ViewModels;
 
-namespace CellBox2.BckPPT.Views;
-
-/// <summary>WPF 디스패처 구현 — ViewModel이 Application.Current에 직접 의존하지 않도록.</summary>
-internal class WpfDispatcher : IUiDispatcher
-{
-    public void Post(Action action)
-        => Application.Current?.Dispatcher.BeginInvoke(action);
-}
+namespace BckPPT.Views;
 
 public partial class BckPptWindow : Window
 {
@@ -40,11 +34,20 @@ public partial class BckPptWindow : Window
     private bool _isMovingNode; // 노드 이동 중 네비게이션 억제
     private System.Windows.Documents.AdornerLayer? _adornerLayer;
 
-    public BckPptWindow()
+    private readonly DocumentSession _documentSession;
+
+    public BckPptWindow(BckPptViewModel viewModel, DocumentSession documentSession)
     {
-        var pptComService = new PptComService();
-        ViewModel = new BckPptViewModel(pptComService, new WpfDispatcher());
+        ViewModel = viewModel;
+        _documentSession = documentSession;
         DataContext = ViewModel;
+        ViewModel.PropertyChanged += (_, args) =>
+        {
+            if (args.PropertyName == nameof(ViewModel.SelectedPresentation) && ViewModel.SelectedPresentation is { } presentation)
+                _documentSession.Presentation = presentation;
+            if (args.PropertyName == nameof(ViewModel.SelectedSlide))
+                _documentSession.SelectedSlideIndex = ViewModel.SelectedSlide is { IsAll: false } slide ? slide.SlideIndex : null;
+        };
 
         InitializeComponent();
 
@@ -62,6 +65,15 @@ public partial class BckPptWindow : Window
         Loaded += (_, _) =>
         {
             ViewModel.RefreshCommand.Execute(null);
+            if (_documentSession.Presentation is { } selected)
+            {
+                Dispatcher.BeginInvoke(async () =>
+                {
+                    await Task.Delay(150);
+                    ViewModel.SelectedPresentation = ViewModel.Presentations.FirstOrDefault(
+                        p => string.Equals(p.Path, selected.Path, StringComparison.OrdinalIgnoreCase));
+                });
+            }
             _debugApi = new DebugApiServer(ViewModel, Dispatcher);
             _debugApi.Start();
         };

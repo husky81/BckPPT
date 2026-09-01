@@ -1,4 +1,4 @@
-namespace CellBox2.BckPPT.Models;
+namespace BckPPT.Models;
 
 public record PptPresentation(string Name, string Path, int SlideCount)
 {

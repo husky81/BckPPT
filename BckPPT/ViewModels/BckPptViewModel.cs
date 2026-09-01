@@ -3,10 +3,10 @@ using System.IO;
 using System.Text;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
-using CellBox2.BckPPT.Models;
-using CellBox2.BckPPT.Services;
+using BckPPT.Models;
+using BckPPT.Services;
 
-namespace CellBox2.BckPPT.ViewModels;
+namespace BckPPT.ViewModels;
 
 public partial class BckPptViewModel : ObservableObject
 {

@@ -3,9 +3,11 @@ obj/
 .vs/
 *.user
 *.suo
+.env
 
 # Local analysis and generated artifacts
 /tmp/
+/artifacts/
 
 # Project-specific research outputs (not BckPPT product source)
 /건설안전_후보Long-list_157개_평가표.xlsx

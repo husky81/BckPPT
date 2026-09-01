@@ -1,9 +1,9 @@
 <Window
-    x:Class="CellBox2.BckPPT.Views.BckPptWindow"
+    x:Class="BckPPT.Views.BckPptWindow"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-    xmlns:models="clr-namespace:CellBox2.BckPPT.Models"
-    xmlns:vm="clr-namespace:CellBox2.BckPPT.ViewModels"
+    xmlns:models="clr-namespace:BckPPT.Models"
+    xmlns:vm="clr-namespace:BckPPT.ViewModels"
     Title="BckPPT" Width="960" Height="660" x:Name="MainWindow"
     Icon="/Assets/icon.ico"
     WindowStartupLocation="CenterScreen"

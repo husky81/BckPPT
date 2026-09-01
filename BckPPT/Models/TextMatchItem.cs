@@ -1,6 +1,6 @@
 using CommunityToolkit.Mvvm.ComponentModel;
 
-namespace CellBox2.BckPPT.Models;
+namespace BckPPT.Models;
 
 public partial class TextMatchItem : ObservableObject
 {

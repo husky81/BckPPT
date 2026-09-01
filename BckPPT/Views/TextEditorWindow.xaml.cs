@@ -4,7 +4,7 @@ using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Interop;
 
-namespace CellBox2.BckPPT.Views;
+namespace BckPPT.Views;
 
 public partial class TextEditorWindow : Window
 {

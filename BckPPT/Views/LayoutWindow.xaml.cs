@@ -5,10 +5,10 @@ using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Shapes;
-using CellBox2.BckPPT.Models;
-using CellBox2.BckPPT.Services;
+using BckPPT.Models;
+using BckPPT.Services;
 
-namespace CellBox2.BckPPT.Views;
+namespace BckPPT.Views;
 
 public partial class LayoutWindow : Window
 {

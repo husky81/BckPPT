@@ -1,4 +1,4 @@
-namespace CellBox2.BckPPT.Models;
+namespace BckPPT.Models;
 
 /// <summary>SPDX(Slide-MPDX) 노드 하나. TSV 직렬화 + apply-back 메타.</summary>
 public record SpdxEntry(

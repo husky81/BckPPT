@@ -3,10 +3,10 @@ using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
-using CellBox2.BckPPT.Models;
+using BckPPT.Models;
 using Microsoft.Win32;
 
-namespace CellBox2.BckPPT.Services;
+namespace BckPPT.Services;
 
 public class PptComService : IPptComService
 {
@@ -800,6 +800,59 @@ public class PptComService : IPptComService
             finally { if (ownedByUs) SafeClose(prs); }
         });
 
+    public int DuplicateSlide(string presentationPath, int sourceSlideIndex, int insertAfterSlideIndex)
+        => RunOnSta(() =>
+        {
+            dynamic pptApp = GetOrCreateInstance();
+            dynamic? prs = FindOpenPresentation(pptApp, presentationPath);
+            bool ownedByUs = prs is null;
+            if (ownedByUs) prs = pptApp.Presentations.Open(presentationPath, MsoFalse, MsoFalse, MsoFalse);
+            try
+            {
+                int slideCount = (int)prs!.Slides.Count;
+                if (sourceSlideIndex < 1 || sourceSlideIndex > slideCount)
+                    throw new ArgumentOutOfRangeException(nameof(sourceSlideIndex));
+                if (insertAfterSlideIndex < 0 || insertAfterSlideIndex > slideCount)
+                    throw new ArgumentOutOfRangeException(nameof(insertAfterSlideIndex));
+                dynamic duplicated = prs.Slides[sourceSlideIndex].Duplicate();
+                int targetIndex = insertAfterSlideIndex + 1;
+                duplicated.MoveTo(targetIndex);
+                prs.Save();
+                return targetIndex;
+            }
+            finally { if (ownedByUs) SafeClose(prs); }
+        });
+
+    public int ImportSlide(string sourcePath, int sourceSlideIndex, string targetPath, int insertAfterSlideIndex)
+        => RunOnSta(() =>
+        {
+            dynamic pptApp = GetOrCreateInstance();
+            dynamic? source = FindOpenPresentation(pptApp, sourcePath);
+            dynamic? target = FindOpenPresentation(pptApp, targetPath);
+            bool ownsSource = source is null;
+            bool ownsTarget = target is null;
+            if (ownsSource) source = pptApp.Presentations.Open(sourcePath, MsoTrue, MsoFalse, MsoFalse);
+            if (ownsTarget) target = pptApp.Presentations.Open(targetPath, MsoFalse, MsoFalse, MsoFalse);
+            try
+            {
+                if (sourceSlideIndex < 1 || sourceSlideIndex > (int)source!.Slides.Count)
+                    throw new ArgumentOutOfRangeException(nameof(sourceSlideIndex));
+                if (insertAfterSlideIndex < 0 || insertAfterSlideIndex > (int)target!.Slides.Count)
+                    throw new ArgumentOutOfRangeException(nameof(insertAfterSlideIndex));
+                source.Slides[sourceSlideIndex].Copy();
+                dynamic pasted = target.Slides.Paste();
+                var targetIndex = insertAfterSlideIndex + 1;
+                pasted.MoveTo(targetIndex);
+                target.Save();
+                return targetIndex;
+            }
+            finally
+            {
+                if (ownsTarget) SafeClose(target);
+                if (ownsSource) SafeClose(source);
+            }
+        });
+
     // ── 단일 Shape 정보 읽기 ─────────────────────────────────────
 
     public PptSlideInfo? GetShapeInfo(string presentationPath, int slideIndex, string shapeName)
@@ -1027,19 +1080,21 @@ public class PptComService : IPptComService
         => Task.Run(() => RunOnSta(() =>
         {
             dynamic pptApp = GetOrCreateInstance();
-            dynamic prs = pptApp.Presentations.Open(
+            dynamic? existing = FindOpenPresentation(pptApp, presentationPath);
+            bool ownedByUs = existing is null;
+            dynamic prs = existing ?? pptApp.Presentations.Open(
                 presentationPath, MsoTrue, MsoFalse, MsoFalse);
             try
             {
                 string tempFile = Path.Combine(
                     Path.GetTempPath(),
-                    $"bckppt_thumb_{Path.GetFileNameWithoutExtension(presentationPath)}_{slideIndex}.png");
+                    $"bckppt_thumb_{Path.GetFileNameWithoutExtension(presentationPath)}_{slideIndex}_{Guid.NewGuid():N}.png");
                 // Export(path, filterName, scaleWidth, scaleHeight)
                 prs.Slides[slideIndex].Export(tempFile, "PNG", 960, 540);
                 return (string?)tempFile;
             }
             catch { return (string?)null; }
-            finally { SafeClose(prs); }
+            finally { if (ownedByUs) SafeClose(prs); }
         }));
 
     // ── 최근 파일 목록 ────────────────────────────────────────────

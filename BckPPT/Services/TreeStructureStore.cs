@@ -1,10 +1,10 @@
 using System.IO;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using CellBox2.BckPPT.Models;
+using BckPPT.Models;
 using System.Collections.ObjectModel;
 
-namespace CellBox2.BckPPT.Services;
+namespace BckPPT.Services;
 
 /// <summary>트리 구조를 JSON으로 저장/로드. %LOCALAPPDATA%\BckSoft\BckPPT\structures\</summary>
 public static class TreeStructureStore

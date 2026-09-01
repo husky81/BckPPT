@@ -1,0 +1,81 @@
+using System.Windows.Threading;
+using System.IO;
+using BckPPT.Services;
+using BckPPT.Llm;
+using BckPPT.PowerPoint;
+using BckPPT.Infrastructure;
+using BckPPT.Rag;
+using BckPPT.ViewModels;
+using BckPPT.Views;
+
+namespace BckPPT.Application;
+
+public sealed class AppCompositionRoot : IDisposable
+{
+    private readonly IPptComService _pptService = new PptComService();
+    private readonly IUiDispatcher _uiDispatcher;
+    private readonly DocumentSession _documentSession = new();
+    private readonly ILlmClient _llmClient;
+    private readonly ApprovalWorkflow _approvalWorkflow;
+    private readonly TemporaryArtifactStore _temporaryArtifacts = new();
+    private readonly PptIndexer _pptIndexer;
+    private readonly ExternalJobRegistry _externalJobs = new();
+    private ExternalCommandEndpoint? _externalEndpoint;
+    private readonly UpdateService _updateService = new();
+    private BckPptWindow? _editorWindow;
+
+    public AppCompositionRoot(Dispatcher dispatcher)
+    {
+        _uiDispatcher = new WpfDispatcher(dispatcher);
+        try { _llmClient = new GitokyLlmClient(GitokyLlmOptions.FromEnvironment(AppContext.BaseDirectory)); }
+        catch (Exception ex) { _llmClient = new UnavailableLlmClient(ex.Message); }
+        var databasePath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "BckSoft", "BckPPT", "templates.db");
+        var repository = new TemplateRepository(databasePath);
+        var retriever = new TemplateRetriever(repository);
+        _pptIndexer = new PptIndexer(repository);
+        _approvalWorkflow = new ApprovalWorkflow(_pptService,
+            new RenderValidator(_pptService, _temporaryArtifacts), new LayoutDecisionRouter(_pptService, retriever));
+    }
+
+    public AgentChatWindow CreateAgentChatWindow() =>
+        new(_documentSession, _pptService, _llmClient, _approvalWorkflow, _pptIndexer,
+            _externalJobs, _updateService, OpenEditorWindow);
+
+    public void StartExternalEndpoint(AgentChatWindow window)
+    {
+        _externalEndpoint = new ExternalCommandEndpoint(_externalJobs, request =>
+        {
+            window.Dispatcher.BeginInvoke(() => window.AcceptExternalRequest(request));
+            return Task.CompletedTask;
+        });
+        _externalEndpoint.Start();
+    }
+
+    private void OpenEditorWindow()
+    {
+        if (_editorWindow is { IsLoaded: true })
+        {
+            _editorWindow.Activate();
+            return;
+        }
+
+        var viewModel = new BckPptViewModel(_pptService, _uiDispatcher);
+        _editorWindow = new BckPptWindow(viewModel, _documentSession);
+        _editorWindow.Closed += (_, _) => _editorWindow = null;
+        _editorWindow.Show();
+    }
+
+    public void Dispose()
+    {
+        (_llmClient as IDisposable)?.Dispose();
+        _externalEndpoint?.Dispose();
+        _updateService.Dispose();
+        _temporaryArtifacts.Dispose();
+    }
+}
+
+public sealed class WpfDispatcher(Dispatcher dispatcher) : IUiDispatcher
+{
+    public void Post(Action action) => dispatcher.BeginInvoke(action);
+}

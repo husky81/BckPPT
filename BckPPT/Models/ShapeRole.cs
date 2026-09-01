@@ -1,6 +1,6 @@
 using System.Text.Json.Serialization;
 
-namespace CellBox2.BckPPT.Models;
+namespace BckPPT.Models;
 
 [JsonConverter(typeof(JsonStringEnumConverter))]
 public enum ShapeRole

@@ -1,7 +1,7 @@
 using System.Collections.ObjectModel;
 using CommunityToolkit.Mvvm.ComponentModel;
 
-namespace CellBox2.BckPPT.Models;
+namespace BckPPT.Models;
 
 /// <summary>TreeView용 shape 노드. 트리 구조(부모-자식) + 드래그 이동 지원.</summary>
 public partial class PptNode : ObservableObject

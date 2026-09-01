@@ -1,7 +1,7 @@
 using System.Windows;
-using CellBox2.BckPPT.Models;
+using BckPPT.Models;
 
-namespace CellBox2.BckPPT.Views;
+namespace BckPPT.Views;
 
 public partial class TextInspectWindow : Window
 {

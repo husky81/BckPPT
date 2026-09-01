@@ -1,6 +1,6 @@
-using CellBox2.BckPPT.Models;
+using BckPPT.Models;
 
-namespace CellBox2.BckPPT.Services;
+namespace BckPPT.Services;
 
 public interface IPptComService
 {
@@ -25,6 +25,8 @@ public interface IPptComService
     int  NormalizeFonts(string presentationPath);
     void ReplaceImage(string presentationPath, int slideIndex, float targetLeft, float targetTop, string newImagePath);
     void SetShapeText(string presentationPath, int slideIndex, string shapeName, string newText);
+    int DuplicateSlide(string presentationPath, int sourceSlideIndex, int insertAfterSlideIndex);
+    int ImportSlide(string sourcePath, int sourceSlideIndex, string targetPath, int insertAfterSlideIndex);
 
     /// <summary>설정된 ReplaceRules를 프레젠테이션 전체에 일괄 적용. 변경된 항목 목록 반환.</summary>
     IReadOnlyList<(int SlideIndex, string ShapeName, string OldText, string NewText)>

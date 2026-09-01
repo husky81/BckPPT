@@ -1,4 +1,4 @@
-namespace CellBox2.BckPPT.Models;
+namespace BckPPT.Models;
 
 public enum ShapeCategory { Text, Image, Other }
 

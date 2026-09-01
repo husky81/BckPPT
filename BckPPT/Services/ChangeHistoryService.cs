@@ -1,8 +1,8 @@
 using System.IO;
 using System.Text.Json;
-using CellBox2.BckPPT.Models;
+using BckPPT.Models;
 
-namespace CellBox2.BckPPT.Services;
+namespace BckPPT.Services;
 
 /// <summary>
 /// 변경 이력을 JSON Lines 형식으로 로컬 파일에 저장.

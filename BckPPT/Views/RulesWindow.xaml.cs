@@ -2,10 +2,10 @@ using System.Collections.ObjectModel;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Interop;
-using CellBox2.BckPPT.Models;
-using CellBox2.BckPPT.Services;
+using BckPPT.Models;
+using BckPPT.Services;
 
-namespace CellBox2.BckPPT.Views;
+namespace BckPPT.Views;
 
 public partial class RulesWindow : Window
 {

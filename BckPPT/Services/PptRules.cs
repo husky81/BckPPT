@@ -1,9 +1,9 @@
 using System.IO;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using CellBox2.BckPPT.Models;
+using BckPPT.Models;
 
-namespace CellBox2.BckPPT.Services;
+namespace BckPPT.Services;
 
 /// <summary>
 /// AutoFit 파라미터, 허용 글꼴, 치환 규칙 등을 외부 JSON 파일로 관리.

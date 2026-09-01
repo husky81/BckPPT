@@ -2,7 +2,7 @@ using System.Windows;
 using System.Windows.Documents;
 using System.Windows.Media;
 
-namespace CellBox2.BckPPT.Views;
+namespace BckPPT.Views;
 
 public class DropGuideAdorner : Adorner
 {

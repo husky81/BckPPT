@@ -1,8 +1,8 @@
 using System.IO;
 using System.Text.Json;
-using CellBox2.BckPPT.Models;
+using BckPPT.Models;
 
-namespace CellBox2.BckPPT.Services;
+namespace BckPPT.Services;
 
 /// <summary>
 /// Shape 역할 라벨을 JSON Lines로 저장.
