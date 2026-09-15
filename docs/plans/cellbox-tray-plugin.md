@@ -432,3 +432,108 @@ https://<release-bucket>/
 2단계에서 `plugin.json` 규약과 폴더 교체가 맞는다는 게 확인됐으므로, 나머지는 그 위에 얹는 일입니다.
 3단계는 `package-plugin.ps1 -InstallLocal`이 손으로 하는 일(프로세스 종료 → `.old` 이름 변경 →
 전개 → 실패 시 되돌리기)을 트레이 안으로 옮기는 것과 같습니다 — 다운로드와 SHA-256 검증이 앞에 붙습니다.
+
+## 9. 다음 세션 인계 (2026-09-15 기준)
+
+### 9.1 어디까지 됐나
+
+| 단계 | 상태 |
+|---|---|
+| 1 · 소스 중복 제거 | 완료 (2절) |
+| 2 · 플러그인 규약 검증 | 완료 (2-1절) — 패키징 → 수동 설치 → 트레이 인식 → 실행까지 실제로 확인 |
+| 3 · 관리 UI | **코드 완료** (5.4절) — 다만 아래 9.3이 남아 "업데이트·재설치"가 아직 실동작 미검증 |
+| 4 · 스토어 | 미착수 |
+
+커밋 (둘 다 `main`, **원격에 푸시 필요**):
+
+```
+BckPPT      b62be46  docs: 계획서에 3단계 결과 반영
+            20182ef  feat: BckPPT를 CellBox 플러그인 패키지로 묶는다
+cellbox2    e3ebfd10 test(tray): --ui-test-plugins-page 플래그
+            19ef635e feat(tray): 플러그인 설치·제거·업데이트 관리 UI
+            14f9ee62 feat(tray): 플러그인 목록 기반 메뉴로 교체
+            70ddd60a chore: 번들된 BckPPT 소스 제거   ← 1단계
+```
+
+### 9.2 다른 기계에서 이어받기
+
+두 레포가 다 필요합니다. 경로는 형제 폴더를 전제로 적었습니다.
+
+```powershell
+# 1. 빌드 확인
+cd <repo>\BckPPT       ; dotnet test BckPPT.Tests\BckPPT.Tests.csproj
+cd <repo>\cellbox2\apps\tray ; dotnet test CellBox2.Tests\CellBox2.Tests.csproj
+
+# 2. 플러그인 패키지 만들고 로컬에 설치 (약 3분, zip 75MB)
+cd <repo>\BckPPT ; .\scripts\package-plugin.ps1 -InstallLocal
+
+# 3. 플러그인 페이지 바로 열기 (트레이 메뉴를 누를 필요 없음)
+cd <repo>\cellbox2\apps\tray
+dotnet build CellBox2\CellBox2.csproj
+.\CellBox2\bin\x64\Debug\net8.0-windows10.0.22621.0\CellBox2.exe --ui-test-plugins-page --no-engine
+```
+
+> `dotnet test`에 `-p:Platform=x64`를 붙이면 BckPPT 테스트 3개가 실패합니다.
+> 픽스처 경로(`Assets\icon.pptx`)를 `bin\Debug\...` 기준으로 계산하는 오래된 가정 탓이며,
+> 플러그인 작업과는 무관합니다. 붙이지 않으면 37개 전부 통과합니다.
+
+> 디버그 빌드는 설치본 트레이와 **단일 인스턴스·동기화 엔진이 겹칩니다.**
+> 설치본(`%LOCALAPPDATA%\CellBox2\tray\CellBox2.exe`)을 먼저 종료하거나 `--no-engine`으로 띄우세요.
+
+### 9.3 남은 작업 A — 릴리스 매니페스트 업로드 (3단계 완결, 먼저)
+
+관리 UI의 `업데이트 확인` · `재설치`는 `plugin.json`의 `updateManifestUrl`을 읽습니다.
+지금 그 주소(`https://releases.cellbox.ai/plugins/bckppt/latest.json`)에는 아무것도 없어서
+버튼을 누르면 네트워크 오류가 카드에 표시됩니다. **코드가 아니라 버킷이 비어서입니다.**
+
+```
+plugins/bckppt/latest.json        ← artifacts/latest.json 그대로
+plugins/bckppt/bckppt-2.1.0.zip   ← artifacts/bckppt-2.1.0.zip 그대로
+```
+
+`package-plugin.ps1`이 이미 두 파일을 그 형식으로 뱉습니다(`-BaseUrl`로 주소를 바꿀 수 있음).
+올린 뒤 확인할 것:
+
+1. 설치된 2.1.0에서 `업데이트 확인` → "최신 버전입니다."
+2. `BckPPT.csproj`의 `<Version>`을 2.2.0으로 올려 다시 패키징·업로드 →
+   `업데이트 확인` → "2.2.0 사용 가능" → `업데이트` → 카드가 v2.2.0으로 바뀌는지
+3. `latest.json`의 `sha256`을 한 글자 고쳐 두고 `재설치` → **설치가 중단되고 기존 폴더가 그대로인지**
+
+3번이 핵심입니다. 검증 실패 시 되돌리기가 실제로 도는지 보는 유일한 방법입니다.
+
+### 9.4 남은 작업 B — 4단계 스토어
+
+| 대상 | 작업 |
+|---|---|
+| 릴리스 버킷 | `plugins/index.json` 카탈로그 신설 (6.1절 형식) |
+| `apps/web` | `src/app/store/page.tsx` — `index.json`을 읽어 카드 렌더링 |
+| 웹 → 데스크톱 | `cellbox://plugin/install?id=bckppt` 링크. CellBox 미설치면 다운로드 페이지로 |
+| `DeepLinkHandler` | `plugin/install` 경로 처리 → 설정 창 플러그인 페이지 + 설치 시작 |
+| 설치관리자 | `cellbox://` 스킴 등록 (이미 `DeepLinkRegistrar`가 HKCU 폴백을 함 — 확인만) |
+| `PluginsPage` | "설치 가능" 섹션 — 카탈로그에서 미설치 항목만. 카드 UI는 그대로 재사용 |
+
+`PluginService`는 `InstallAsync(대상폴더, 매니페스트)`라 신규 설치도 그대로 됩니다.
+폴더 이름만 정하면 되는데, 카탈로그의 `id`를 쓰는 편이 자연스럽습니다.
+
+### 9.5 남은 작업 C — 그 밖에
+
+- **코드 서명**: 플러그인 zip 서명 + 트레이 쪽 검증. `apps/tray/Shared/AuthenticodeVerifier.cs`를
+  재사용할 수 있습니다. SHA-256만으로는 "버킷이 털리지 않았다"까지는 보장하지 못합니다.
+- **CI**: BckPPT 태그 푸시 → 패키징 → 버킷 업로드 → `index.json` 갱신.
+- **트레이 빈 상태 메뉴**: 지금은 `플러그인 둘러보기...`가 관리 페이지를 엽니다.
+  스토어가 생기면 스토어로 보내도 됩니다 (`TrayManager.RenderPluginMenu`).
+
+### 9.6 지뢰 목록
+
+실제로 밟았던 것들입니다.
+
+1. **stale 빌드 산출물** — `dotnet publish`는 증분 복사고, `obj\...\R2R`도 캐시입니다.
+   8.0.30 DLL이 8.0.31 패키지에 섞여 들어가 실행 즉시 죽었습니다.
+   패키징 스크립트가 매번 비웁니다. **수동으로 publish할 때는 직접 지우세요.**
+2. **PowerShell 5.1 인코딩** — BOM 없는 `.ps1`을 ANSI로 읽어 한글이 깨집니다.
+   `.ps1`은 BOM 포함 UTF-8로 저장하고, 내보내는 JSON은 BOM 없이 씁니다.
+3. **`x:Bind`로 `Uri` → `Image.Source`** — WinAppSDK 1.7 XAML 컴파일러가 진단 없이
+   종료 코드 1로 죽습니다(`MSB3073`만 남음). 뷰모델에서 `ImageSource`로 만들어 넘기세요.
+   XAML 쪽 빌드가 이유 없이 깨지면 바인딩을 하나씩 지워 이분 탐색하는 게 제일 빠릅니다.
+4. **`dataDirs`** — 매니페스트가 신고한 경로를 그대로 지우면 위험합니다.
+   `PluginService.IsSafeDataDir`가 사용자 프로필 아래 두 단계 이상만 허용합니다. 완화하지 마세요.
