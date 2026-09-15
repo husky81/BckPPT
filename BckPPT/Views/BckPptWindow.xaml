@@ -7,7 +7,8 @@
     Title="BckPPT" Width="960" Height="660" x:Name="MainWindow"
     Icon="/Assets/icon.ico"
     WindowStartupLocation="CenterScreen"
-    Background="{StaticResource AppBg}">
+    Background="{StaticResource AppBg}"
+    AllowDrop="True" DragOver="Window_DragOver" Drop="Window_Drop">
 
     <Window.Resources>
         <Style x:Key="DiagRow" TargetType="Border">
@@ -59,6 +60,30 @@
             <DockPanel>
                 <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
 
+                    <!-- 파일 열기 -->
+                    <Button Style="{StaticResource DarkBtn}" Margin="0,0,4,0"
+                            Click="OpenFile_Click"
+                            IsEnabled="{Binding IsNotBusy}"
+                            ToolTip="pptx 파일을 열어 작업 대상으로 삼습니다&#x0a;창에 파일을 끌어다 놓아도 됩니다"
+                            Padding="7,4">
+                        <TextBlock Text="열기" FontSize="12"/>
+                    </Button>
+
+                    <!-- 사본 작업 -->
+                    <CheckBox x:Name="WorkOnCopyBox" IsChecked="True" Margin="0,0,8,0"
+                              Style="{StaticResource DarkCheckBox}"
+                              VerticalAlignment="Center"
+                              Content="사본"
+                              ToolTip="켜면 원본을 복사한 뒤 사본을 열어 작업합니다&#x0a;원본이 PowerPoint에서 열려 있어도 안전합니다"/>
+
+                    <!-- 표시 해제 -->
+                    <Button Style="{StaticResource DarkBtn}" Margin="0,0,4,0"
+                            Command="{Binding ClearMarksCommand}"
+                            ToolTip="치환 표시로 넣은 빨간색을 원래 글자색으로 되돌립니다"
+                            Padding="7,4">
+                        <TextBlock Text="표시 해제" FontSize="12"/>
+                    </Button>
+
                     <!-- 되돌리기 -->
                     <Button Style="{StaticResource DarkBtn}" Margin="0,0,4,0"
                             Command="{Binding UndoCommand}"
@@ -88,7 +113,7 @@
                     <!-- 텍스트 치환 -->
                     <Button Style="{StaticResource DarkBtn}" Margin="0,0,4,0"
                             Click="TextReplace_Click"
-                            ToolTip="선택된 슬라이드의 텍스트를 번호 목록으로 열기&#x0a;→ LLM에게 수정 요청 후 결과 붙여넣고 적용"
+                            ToolTip="텍스트를 문단별 ID 목록으로 추출합니다&#x0a;직접 고치거나 에이전트 답변을 통째로 붙여넣으면 됩니다"
                             Padding="7,4">
                         <TextBlock Text="텍스트 치환" FontSize="12"/>
                     </Button>

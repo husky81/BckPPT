@@ -155,18 +155,61 @@ public partial class BckPptWindow : Window
     {
         if (ViewModel.SelectedPresentation is null) return;
 
-        var entries = ViewModel.GetTextsForCurrentView();
-        if (entries.Count == 0) return;
+        var entries = ViewModel.GetParagraphsForCurrentView();
+        if (entries.Count == 0)
+        {
+            MessageBox.Show("추출할 텍스트가 없습니다.", "텍스트 치환",
+                MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
 
         var slideTitle = ViewModel.SelectedSlide?.DisplayText ?? "전체";
-        var win = new TextEditorWindow(
-            ViewModel.SelectedPresentation.Path, entries, slideTitle);
-        win.Owner = this;
+        var win = new TextEditorWindow(entries, ViewModel.GetShapeLookup(), slideTitle)
+        {
+            Owner = this
+        };
 
         if (win.ShowDialog() == true && win.AppliedChanges is { Count: > 0 })
         {
-            await ViewModel.ApplyTextChangesAsync(win.AppliedChanges);
+            await ViewModel.ApplyParagraphChangesAsync(win.AppliedChanges, win.MarkRed);
         }
+    }
+
+    // ── 파일 탑재 ─────────────────────────────────────────────────
+
+    private async void OpenFile_Click(object sender, RoutedEventArgs e)
+    {
+        var dialog = new Microsoft.Win32.OpenFileDialog
+        {
+            Title  = "PPT 파일 열기",
+            Filter = "PowerPoint 파일 (*.pptx;*.ppt)|*.pptx;*.ppt|모든 파일 (*.*)|*.*",
+        };
+        if (dialog.ShowDialog() != true) return;
+
+        await ViewModel.OpenFileAsync(dialog.FileName, WorkOnCopyBox.IsChecked == true);
+    }
+
+    private void Window_DragOver(object sender, DragEventArgs e)
+    {
+        e.Effects = GetDroppedPptx(e) is null ? DragDropEffects.None : DragDropEffects.Copy;
+        e.Handled = true;
+    }
+
+    private async void Window_Drop(object sender, DragEventArgs e)
+    {
+        var path = GetDroppedPptx(e);
+        if (path is null) return;
+        e.Handled = true;
+        await ViewModel.OpenFileAsync(path, WorkOnCopyBox.IsChecked == true);
+    }
+
+    private static string? GetDroppedPptx(DragEventArgs e)
+    {
+        if (!e.Data.GetDataPresent(DataFormats.FileDrop)) return null;
+        if (e.Data.GetData(DataFormats.FileDrop) is not string[] paths) return null;
+        return paths.FirstOrDefault(p =>
+            p.EndsWith(".pptx", StringComparison.OrdinalIgnoreCase) ||
+            p.EndsWith(".ppt",  StringComparison.OrdinalIgnoreCase));
     }
 
     // ── 규칙 편집 + 치환 ──────────────────────────────────────────

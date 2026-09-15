@@ -800,6 +800,242 @@ public class PptComService : IPptComService
             finally { if (ownedByUs) SafeClose(prs); }
         });
 
+    // ── 문단 단위 치환 ───────────────────────────────────────────
+
+    /// <summary>
+    /// 도형 이름으로 TextFrame2를 찾는다. 테이블 셀 이름("Table 1 [R2C3]")도 처리.
+    /// SetShapeText·GetTextLineBreaks와 같은 규약을 쓴다.
+    /// </summary>
+    private static dynamic? ResolveTextFrame(dynamic slide, string shapeName)
+    {
+        var cellMatch = Regex.Match(shapeName, @"^(.+)\s+\[R(\d+)C(\d+)\]$");
+        if (cellMatch.Success)
+        {
+            string tableName = cellMatch.Groups[1].Value;
+            int    row       = int.Parse(cellMatch.Groups[2].Value);
+            int    col       = int.Parse(cellMatch.Groups[3].Value);
+            foreach (dynamic shape in FlattenShapes(slide.Shapes))
+            {
+                if ((string)shape.Name != tableName) continue;
+                if ((int)shape.HasTable != MsoTrue) break;
+                return shape.Table.Cell(row, col).Shape.TextFrame2;
+            }
+            return null;
+        }
+
+        foreach (dynamic shape in FlattenShapes(slide.Shapes))
+        {
+            if ((string)shape.Name != shapeName) continue;
+            if ((int)shape.HasTextFrame != MsoTrue) break;
+            return shape.TextFrame2;
+        }
+        return null;
+    }
+
+    /// <summary>문단의 현재 글자색을 읽는다. 테마색이 걸려 있으면 함께 보관한다.</summary>
+    private static ParagraphColorSnapshot ReadColor(
+        dynamic para, int slideIndex, string shapeName, int paragraphIndex)
+    {
+        int rgb = 0, theme = 0;
+        try { rgb   = (int)para.Font.Fill.ForeColor.RGB; }              catch { }
+        try { theme = (int)para.Font.Fill.ForeColor.ObjectThemeColor; } catch { }
+        return new ParagraphColorSnapshot(slideIndex, shapeName, paragraphIndex, rgb, theme);
+    }
+
+    public ParagraphEditResult SetParagraphTexts(
+        string presentationPath,
+        IReadOnlyList<ParagraphEdit> edits,
+        bool markRed)
+        => RunOnSta(() =>
+        {
+            var snapshots = new List<ParagraphColorSnapshot>();
+            var failures  = new List<string>();
+
+            dynamic pptApp = GetOrCreateInstance();
+            dynamic? prs   = FindOpenPresentation(pptApp, presentationPath);
+            bool ownedByUs = prs is null;
+            if (ownedByUs)
+                prs = pptApp.Presentations.Open(presentationPath, MsoFalse, MsoFalse, MsoFalse);
+            try
+            {
+                // 도형 단위로 묶어 Presentations.Open/Save를 한 번만 타게 한다.
+                foreach (var group in edits.GroupBy(e => (e.SlideIndex, e.ShapeName)))
+                {
+                    dynamic slide = prs!.Slides[group.Key.SlideIndex];
+                    dynamic? tf   = ResolveTextFrame(slide, group.Key.ShapeName);
+                    if (tf is null)
+                    {
+                        failures.Add($"{group.Key.SlideIndex}쪽 [{group.Key.ShapeName}] — 도형을 찾지 못함");
+                        continue;
+                    }
+
+                    dynamic tr = tf.TextRange;
+
+                    // 적용 순서가 곧 인덱스 정합성이다.
+                    //   1) 교체 — 문단 수를 바꾸지 않으므로 앞에서부터 해도 안전하다.
+                    //   2) 삭제·삽입 — 뒤에서부터 한 번에 처리한다.
+                    // 삭제와 삽입을 따로 돌리면 "p2 삭제 + p3 뒤 삽입"처럼 섞였을 때
+                    // 뒤 작업이 밀린 인덱스를 보게 된다. 큰 인덱스부터 내려오면
+                    // 아직 처리하지 않은 작업의 위치는 항상 그대로다.
+                    var ordered = group
+                        .Where(e => e.Kind == ParagraphEditKind.Replace)
+                        .OrderBy(e => e.ParagraphIndex)
+                        .Concat(group.Where(e => e.Kind != ParagraphEditKind.Replace)
+                                     .OrderByDescending(e => e.ParagraphIndex));
+
+                    foreach (var edit in ordered)
+                    {
+                        int paraNum = (int)tr.Paragraphs.Count;
+
+                        // 삽입의 인덱스 0은 "맨 앞에 넣기"를 뜻한다.
+                        int lowest = edit.Kind == ParagraphEditKind.Insert ? 0 : 1;
+                        if (edit.ParagraphIndex < lowest || edit.ParagraphIndex > paraNum)
+                        {
+                            failures.Add($"{edit.SlideIndex}쪽 [{edit.ShapeName}] " +
+                                         $"문단 {edit.ParagraphIndex} — 문단 수({paraNum})와 어긋남");
+                            continue;
+                        }
+                        try
+                        {
+                            switch (edit.Kind)
+                            {
+                                case ParagraphEditKind.Delete:
+                                    tr.Paragraphs(edit.ParagraphIndex, 1).Delete();
+                                    break;
+                                case ParagraphEditKind.Insert:
+                                    InsertParagraphAfter(tr, edit, markRed, snapshots);
+                                    break;
+                                default:
+                                    ReplaceParagraph(tr, edit, markRed, snapshots);
+                                    break;
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            failures.Add($"{edit.SlideIndex}쪽 [{edit.ShapeName}] " +
+                                         $"문단 {edit.ParagraphIndex} — {ex.Message}");
+                        }
+                    }
+                }
+                prs!.Save();
+            }
+            finally { if (ownedByUs) SafeClose(prs); }
+
+            return new ParagraphEditResult(snapshots, failures);
+        });
+
+    /// <summary>기존 문단의 텍스트만 교체. Bullet → Indent → Font 순서 복원은 필수다.</summary>
+    private static void ReplaceParagraph(
+        dynamic tr, ParagraphEdit edit, bool markRed, List<ParagraphColorSnapshot> snapshots)
+    {
+        dynamic para = tr.Paragraphs(edit.ParagraphIndex, 1);
+
+        // 문단 범위에는 끝의 \r이 포함되므로 비교 시 떼어낸다.
+        string current = ((string)para.Text).TrimEnd('\r');
+        if (current == edit.NewText && !markRed) return;
+
+        var snap = ReadColor(para, edit.SlideIndex, edit.ShapeName, edit.ParagraphIndex);
+
+        var bulletVisible = para.ParagraphFormat.Bullet.Visible;
+        var bulletChar    = para.ParagraphFormat.Bullet.Character;
+        var indentLevel   = para.ParagraphFormat.IndentLevel;
+        var fontName      = para.Font.Name;
+        var fontSize      = para.Font.Size;
+
+        para.Text = edit.NewText;
+
+        // 복원 순서를 바꾸면 불릿이 되살아나지 않는다.
+        para.ParagraphFormat.Bullet.Visible = bulletVisible;
+        if ((int)bulletVisible == MsoTrue)
+        {
+            try { para.ParagraphFormat.Bullet.Character = bulletChar; } catch { }
+        }
+        para.ParagraphFormat.IndentLevel = indentLevel;
+        try { para.Font.Name = fontName; } catch { }
+        try { para.Font.Size = fontSize; } catch { }
+
+        if (markRed)
+        {
+            snapshots.Add(snap);
+            // PowerPoint COM의 RGB는 BGR 순서다. 빨강은 0xFF0000이 아니라 255.
+            try { tr.Paragraphs(edit.ParagraphIndex, 1).Font.Fill.ForeColor.RGB = 255; } catch { }
+        }
+    }
+
+    /// <summary>
+    /// 기준 문단 뒤에 새 문단을 삽입한다. InsertAfter/InsertBefore가 이웃 텍스트의 서식을
+    /// 물려받으므로 정렬·글꼴·크기가 자동으로 보존된다.
+    /// ParagraphIndex가 0이면 맨 앞에 넣는다 (지웠던 첫 문단을 되살릴 때).
+    /// </summary>
+    private static void InsertParagraphAfter(
+        dynamic tr, ParagraphEdit edit, bool markRed, List<ParagraphColorSnapshot> snapshots)
+    {
+        dynamic inserted;
+        dynamic neighbor;
+        int     newIndex;
+
+        if (edit.ParagraphIndex == 0)
+        {
+            neighbor = tr.Paragraphs(1, 1);
+            inserted = neighbor.InsertBefore(edit.NewText + "\r");
+            newIndex = 1;
+        }
+        else
+        {
+            neighbor = tr.Paragraphs(edit.ParagraphIndex, 1);
+            // 마지막 문단은 끝에 \r이 없으므로 앞에 붙여야 한 문단이 더 생긴다.
+            inserted = ((string)neighbor.Text).EndsWith('\r')
+                ? neighbor.InsertAfter(edit.NewText + "\r")
+                : neighbor.InsertAfter("\r" + edit.NewText);
+            newIndex = edit.ParagraphIndex + 1;
+        }
+
+        if (!markRed) return;
+
+        var neighborColor = ReadColor(neighbor, edit.SlideIndex, edit.ShapeName, newIndex);
+        snapshots.Add(neighborColor);
+        try { inserted.Font.Fill.ForeColor.RGB = 255; } catch { }
+    }
+
+    public void RestoreParagraphColors(
+        string presentationPath, IReadOnlyList<ParagraphColorSnapshot> snapshots)
+        => RunOnSta(() =>
+        {
+            if (snapshots.Count == 0) return;
+
+            dynamic pptApp = GetOrCreateInstance();
+            dynamic? prs   = FindOpenPresentation(pptApp, presentationPath);
+            bool ownedByUs = prs is null;
+            if (ownedByUs)
+                prs = pptApp.Presentations.Open(presentationPath, MsoFalse, MsoFalse, MsoFalse);
+            try
+            {
+                foreach (var group in snapshots.GroupBy(s => (s.SlideIndex, s.ShapeName)))
+                {
+                    dynamic slide = prs!.Slides[group.Key.SlideIndex];
+                    dynamic? tf   = ResolveTextFrame(slide, group.Key.ShapeName);
+                    if (tf is null) continue;
+
+                    dynamic tr      = tf.TextRange;
+                    int     paraNum = (int)tr.Paragraphs.Count;
+                    foreach (var snap in group)
+                    {
+                        if (snap.ParagraphIndex < 1 || snap.ParagraphIndex > paraNum) continue;
+                        try
+                        {
+                            dynamic fore = tr.Paragraphs(snap.ParagraphIndex, 1).Font.Fill.ForeColor;
+                            // 테마색이 걸려 있던 문단은 RGB만 되돌리면 테마 연결이 끊긴다.
+                            if (snap.ObjectThemeColor > 0) fore.ObjectThemeColor = snap.ObjectThemeColor;
+                            else                           fore.RGB             = snap.Rgb;
+                        }
+                        catch { }
+                    }
+                }
+                prs!.Save();
+            }
+            finally { if (ownedByUs) SafeClose(prs); }
+        });
+
     public int DuplicateSlide(string presentationPath, int sourceSlideIndex, int insertAfterSlideIndex)
         => RunOnSta(() =>
         {

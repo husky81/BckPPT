@@ -1,122 +1,170 @@
 using System.Runtime.InteropServices;
 using System.Text;
-using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Interop;
+using BckPPT.Models;
+using BckPPT.Services;
 
 namespace BckPPT.Views;
 
+/// <summary>
+/// 문단마다 ID를 붙여 보여주고, 수정된 내용을 다시 받아들이는 창.
+///
+/// 입력은 두 가지를 모두 받는다.
+///  1) 목록을 이 창에서 직접 고치기
+///  2) 외부 에이전트의 답변을 통째로 붙여넣기
+/// 둘 다 같은 파서를 타므로 형식을 맞출 필요가 없다.
+/// </summary>
 public partial class TextEditorWindow : Window
 {
-    private readonly List<(int Seq, int SlideIndex, string ShapeName, string FullText)> _entries;
-    private readonly string _presentationPath;
-    private readonly StringBuilder _originalBody = new();
+    private readonly IReadOnlyList<ParagraphEntry>                 _entries;
+    private readonly Dictionary<(int, string), PptSlideInfo>       _shapeLookup;
+    private readonly string                                        _originalBody;
 
-    /// <summary>적용된 변경 목록 (OldText, NewText는 실제 줄바꿈 \r 포함). null이면 취소됨.</summary>
-    public List<(int SlideIndex, string ShapeName, string OldText, string NewText)>? AppliedChanges
-        { get; private set; }
+    /// <summary>사용자가 확인한 변경 목록. 취소하면 null.</summary>
+    public List<ParagraphChange>? AppliedChanges { get; private set; }
+
+    /// <summary>치환한 문단을 빨간색으로 표시할지.</summary>
+    public bool MarkRed { get; private set; } = true;
+
+    private const string Prompt =
+        "# 아래는 PPT의 문단별 텍스트입니다. 요청에 맞게 수정해 주세요.\n" +
+        "- 수정이 필요한 항목만 \"ID: 새 텍스트\" 형식으로 답해 주세요.\n" +
+        "- ID는 반드시 원본 그대로 유지해 주세요. (예: S1-12-3)\n" +
+        "- 문단을 지우려면 \"S1-12-3: (빈 문단)\" 으로 써 주세요.\n" +
+        "- 문단을 추가하려면 \"S1-12-3+: 새 문단\" 처럼 ID 뒤에 +를 붙여 주세요.\n" +
+        "- 문단 안에서 줄을 나누려면 \\n 으로 표시해 주세요.\n" +
+        "- 설명을 함께 써 주셔도 됩니다. ID가 붙은 줄만 반영됩니다.";
 
     public TextEditorWindow(
-        string presentationPath,
-        List<(int Seq, int SlideIndex, string ShapeName, string FullText)> entries,
+        IReadOnlyList<ParagraphEntry> entries,
+        Dictionary<(int, string), PptSlideInfo> shapeLookup,
         string slideTitle)
     {
         InitializeComponent();
-        _entries          = entries;
-        _presentationPath = presentationPath;
-        Title             = $"텍스트 치환 — {slideTitle}";
+        _entries     = entries;
+        _shapeLookup = shapeLookup;
+        Title        = $"텍스트 치환 — {slideTitle}";
 
         SourceInitialized += (_, _) =>
         {
-            var hwnd = new WindowInteropHelper(this).Handle;
+            var hwnd  = new WindowInteropHelper(this).Handle;
             int value = 1;
             DwmSetWindowAttribute(hwnd, 20, ref value, sizeof(int));
         };
 
-        PromptBox.Text =
-            "# 아래 PPT 슬라이드 텍스트를 사용자 요청에 맞게 수정해줘.\n" +
-            "- 텍스트 추가/삭제 불가, 기존 내용 수정만 가능\n" +
-            "- 수정이 필요한 항목만 \"번호: 수정내용\" 형식으로 작성\n" +
-            "- 번호는 반드시 원본과 동일하게 유지\n" +
-            "- 줄바꿈은 \\n으로 표시";
+        PromptBox.Text = Prompt;
 
-        // 번호:텍스트 목록 생성 (\r 계열을 모두 \\n으로 이스케이프)
-        foreach (var (seq, _, _, text) in entries)
+        var sb = new StringBuilder();
+        int lastShapeSeq = -1;
+        foreach (var entry in _entries)
         {
-            var escaped = EscapeNewlines(text);
-            _originalBody.AppendLine($"{seq}: {escaped}");
+            // 도형이 바뀔 때 빈 줄을 넣어 사람이 덩어리를 알아보게 한다.
+            if (lastShapeSeq >= 0 && entry.ShapeSeq != lastShapeSeq) sb.AppendLine();
+            lastShapeSeq = entry.ShapeSeq;
+            sb.AppendLine($"{entry.Id}: {Escape(entry.Text)}");
         }
-        Editor.Text = _originalBody.ToString();
+        _originalBody = sb.ToString();
+        Editor.Text   = _originalBody;
     }
 
-    // ── \r\n / \r / \n → \\n (표시용) ──────────────────────────
+    /// <summary>문단 안의 Shift+Enter를 한 줄로 보이게. 파서가 다시 \v로 되돌린다.</summary>
+    private static string Escape(string s) => s.Replace("\v", "\\n");
 
-    private static string EscapeNewlines(string s)
-        => s.Replace("\r\n", "\\n").Replace("\r", "\\n").Replace("\n", "\\n");
-
-    /// <summary>\\n → \r (PPT 내부 줄바꿈).</summary>
-    private static string UnescapeNewlines(string s)
-        => s.Replace("\\n", "\r");
-
-    // ── 적용 ─────────────────────────────────────────────────────
+    // ── 반영 ─────────────────────────────────────────────────────
 
     private void Apply_Click(object sender, RoutedEventArgs e)
     {
-        var changes = new List<(int SlideIndex, string ShapeName, string OldText, string NewText)>();
-        var lines   = Editor.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        var parsed  = PastedPlanParser.Parse(Editor.Text, _entries);
+        var byId    = _entries.ToDictionary(x => x.Id, StringComparer.OrdinalIgnoreCase);
+        var changes = new List<ParagraphChange>();
 
-        foreach (var line in lines)
+        foreach (var change in parsed.Changes)
         {
-            var trimmed = line.TrimEnd('\r');           // \r만 제거, 공백은 보존
-            var match   = Regex.Match(trimmed, @"^(\d+):\s*(.*)$");
-            if (!match.Success) continue;
+            if (!byId.TryGetValue(change.Id, out var entry)) continue;
 
-            int    seq           = int.Parse(match.Groups[1].Value);
-            string editedEscaped = match.Groups[2].Value;
+            // 바뀐 게 없으면 굳이 PowerPoint를 건드리지 않는다.
+            if (!change.Insert && change.NewText == entry.Text) continue;
 
-            var entry = _entries.FirstOrDefault(x => x.Seq == seq);
-            if (entry.ShapeName is null) continue;
-
-            // 원본 이스케이프와 비교 — 동일하면 스킵
-            var originalEscaped = EscapeNewlines(entry.FullText);
-            if (editedEscaped == originalEscaped) continue;
-
-            // 실제 적용할 텍스트 (\\n → \r)
-            string newText = UnescapeNewlines(editedEscaped);
-            changes.Add((entry.SlideIndex, entry.ShapeName, entry.FullText, newText));
+            changes.Add(new ParagraphChange
+            {
+                Id             = change.Id,
+                SlideIndex     = entry.SlideIndex,
+                ShapeName      = entry.ShapeName,
+                ParagraphIndex = entry.ParagraphIndex,
+                OldText        = change.Insert ? "" : entry.Text,
+                NewText        = change.NewText,
+                Kind           = change.Insert           ? ParagraphChangeKind.Insert
+                               : change.NewText.Length == 0 ? ParagraphChangeKind.Clear
+                               : ParagraphChangeKind.Replace,
+            });
         }
 
         if (changes.Count == 0)
         {
-            MessageBox.Show("변경된 항목이 없습니다.", "텍스트 치환",
+            var message = parsed.Warnings.Count > 0 || parsed.UnmatchedLines.Count > 0
+                ? "반영할 변경이 없습니다.\n\n" + string.Join("\n", parsed.Warnings.Take(5))
+                : "변경된 항목이 없습니다.";
+            MessageBox.Show(message, "텍스트 치환",
                 MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
 
-        // Diff 확인 (표시용은 이스케이프된 형태)
-        var diffSb = new StringBuilder();
-        diffSb.AppendLine($"{changes.Count}건 변경 확인:\n");
-        foreach (var (_, shapeName, oldText, newText) in changes)
+        AnnotateOverflow(changes);
+
+        var preview = new ChangePreviewWindow(changes, parsed.Warnings, parsed.UnmatchedLines)
         {
-            diffSb.AppendLine($"[{shapeName}]");
-            diffSb.AppendLine($"  - {EscapeNewlines(oldText)}");
-            diffSb.AppendLine($"  + {EscapeNewlines(newText)}");
-            diffSb.AppendLine();
-        }
-        diffSb.Append("적용하시겠습니까?");
+            Owner = this
+        };
+        if (preview.ShowDialog() != true || preview.Accepted is not { Count: > 0 }) return;
 
-        if (MessageBox.Show(diffSb.ToString(), "변경 내용 확인",
-                MessageBoxButton.YesNo, MessageBoxImage.Question)
-            != MessageBoxResult.Yes) return;
-
-        // 변경 목록만 전달 — 실제 적용은 ViewModel(ApplyTextChangesAsync)에서 담당
-        AppliedChanges = changes;
+        AppliedChanges = preview.Accepted;
+        MarkRed        = preview.MarkRed;
         DialogResult   = true;
         Close();
     }
 
+    /// <summary>
+    /// 도형 단위로 변경 후 문단 구성을 만들어 넘침을 예측한다.
+    /// 한 도형에 여러 문단이 바뀔 수 있으므로 개별 문단이 아니라 도형 전체로 봐야 한다.
+    /// </summary>
+    private void AnnotateOverflow(List<ParagraphChange> changes)
+    {
+        foreach (var group in changes.GroupBy(c => (c.SlideIndex, c.ShapeName)))
+        {
+            if (!_shapeLookup.TryGetValue(group.Key, out var shape)) continue;
+
+            var paragraphs = _entries
+                .Where(x => x.SlideIndex == group.Key.SlideIndex && x.ShapeName == group.Key.ShapeName)
+                .OrderBy(x => x.ParagraphIndex)
+                .Select(x => x.Text)
+                .ToList();
+
+            foreach (var change in group.Where(c => c.Kind != ParagraphChangeKind.Insert))
+            {
+                int i = change.ParagraphIndex - 1;
+                if (i >= 0 && i < paragraphs.Count) paragraphs[i] = change.NewText;
+            }
+            foreach (var change in group.Where(c => c.Kind == ParagraphChangeKind.Insert)
+                                        .OrderByDescending(c => c.ParagraphIndex))
+            {
+                int at = Math.Min(change.ParagraphIndex, paragraphs.Count);
+                paragraphs.Insert(at, change.NewText);
+            }
+
+            var warning = OverflowEstimator.Estimate(shape, paragraphs);
+            if (warning.Length == 0) continue;
+            foreach (var change in group) change.OverflowWarning = warning;
+        }
+    }
+
+    // ── 보조 ─────────────────────────────────────────────────────
+
+    private void Reset_Click(object sender, RoutedEventArgs e)
+        => Editor.Text = _originalBody;
+
     private void CopyAll_Click(object sender, RoutedEventArgs e)
-        => Clipboard.SetText(PromptBox.Text + "\n\n" + _originalBody.ToString());
+        => Clipboard.SetText(Prompt + "\n\n" + _originalBody);
 
     private void CopyTextOnly_Click(object sender, RoutedEventArgs e)
         => Clipboard.SetText(Editor.Text);

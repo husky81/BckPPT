@@ -32,6 +32,17 @@ public interface IPptComService
     IReadOnlyList<(int SlideIndex, string ShapeName, string OldText, string NewText)>
         ApplyRules(string presentationPath, IReadOnlyList<ReplaceRule> rules);
 
+    /// <summary>
+    /// 문단 단위로 텍스트를 교체·삽입한다. markRed가 켜지면 손댄 문단만 빨간색으로 표시하고
+    /// 원래 색을 스냅샷으로 돌려준다.
+    /// </summary>
+    ParagraphEditResult SetParagraphTexts(
+        string presentationPath, IReadOnlyList<ParagraphEdit> edits, bool markRed);
+
+    /// <summary>빨간색 표시를 스냅샷의 원래 글자색으로 되돌린다.</summary>
+    void RestoreParagraphColors(
+        string presentationPath, IReadOnlyList<ParagraphColorSnapshot> snapshots);
+
     /// <summary>단일 shape의 현재 텍스트·메트릭을 읽어 PptSlideInfo로 반환. 찾지 못하면 null.</summary>
     PptSlideInfo? GetShapeInfo(string presentationPath, int slideIndex, string shapeName);
 

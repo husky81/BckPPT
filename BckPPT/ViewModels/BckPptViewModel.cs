@@ -90,6 +90,9 @@ public partial class BckPptViewModel : ObservableObject
 
     private List<(int SlideIndex, string ShapeName, string OldText)>? _undoSnapshot;
 
+    /// <summary>문단 단위 치환의 역방향 지시. 새 치환을 적용할 때마다 다시 만든다.</summary>
+    private List<ParagraphEdit>? _paragraphUndo;
+
     // ── 표시 ─────────────────────────────────────────────────────
 
     public System.Windows.Visibility EmptyTableVisibility =>
@@ -114,7 +117,9 @@ public partial class BckPptViewModel : ObservableObject
 
     partial void OnSelectedPresentationChanged(PptPresentation? value)
     {
-        if (value is not null) _ = AnalyzeAsync(value.Path);
+        if (value is null) return;
+        HasMarks = MarkStore.Get(value.Path).Count > 0;
+        _ = AnalyzeAsync(value.Path);
     }
 
     partial void OnSelectedSlideChanged(SlideListItem? value)
@@ -421,6 +426,224 @@ public partial class BckPptViewModel : ObservableObject
             .Select((s, i) => (i + 1, s.SlideIndex, s.ShapeName, s.FullText))
             .ToList();
 
+    // ── 문단 단위 치환 ───────────────────────────────────────────
+
+    /// <summary>
+    /// 현재 보이는 도형들을 문단 단위로 펼쳐 ID를 붙인다.
+    /// 도형 순번은 이 목록을 만드는 시점에 확정되고, 창이 닫힐 때까지 고정된다.
+    /// </summary>
+    public List<ParagraphEntry> GetParagraphsForCurrentView()
+    {
+        var entries = new List<ParagraphEntry>();
+        int seq = 0;
+
+        foreach (var shape in CurrentShapes.Where(s => !s.IsEmpty && !s.IsImage))
+        {
+            seq++;
+            var paragraphs = SplitParagraphs(shape.FullText);
+            for (int i = 0; i < paragraphs.Count; i++)
+            {
+                entries.Add(new ParagraphEntry(
+                    ParagraphEntry.MakeId(shape.SlideIndex, seq, i + 1),
+                    shape.SlideIndex, shape.ShapeName, seq, i + 1,
+                    paragraphs[i]));
+            }
+        }
+        return entries;
+    }
+
+    /// <summary>
+    /// PowerPoint의 문단 구분은 \r 이다. \v(Shift+Enter)는 문단 안에 남는다.
+    /// 끝의 빈 조각 하나는 마지막 \r 때문에 생기므로 떼어낸다.
+    /// </summary>
+    public static List<string> SplitParagraphs(string fullText)
+    {
+        var parts = fullText.Replace("\n", "").Split('\r').ToList();
+        if (parts.Count > 1 && parts[^1].Length == 0) parts.RemoveAt(parts.Count - 1);
+        return parts;
+    }
+
+    /// <summary>현재 보이는 도형을 (슬라이드, 이름) 키로 찾기 위한 색인. 넘침 예측에 쓴다.</summary>
+    public Dictionary<(int, string), PptSlideInfo> GetShapeLookup()
+        => CurrentShapes
+            .GroupBy(s => (s.SlideIndex, s.ShapeName))
+            .ToDictionary(g => g.Key, g => g.First());
+
+    /// <summary>문단 단위 치환 적용. 손댄 문단은 빨간색으로 표시해 검토를 돕는다.</summary>
+    public async Task ApplyParagraphChangesAsync(IReadOnlyList<ParagraphChange> changes, bool markRed)
+    {
+        if (SelectedPresentation is null || changes.Count == 0) return;
+        IsBusy = true;
+        try
+        {
+            string path = SelectedPresentation.Path;
+            string name = SelectedPresentation.Name;
+
+            var edits = changes.Select(c => new ParagraphEdit(
+                c.SlideIndex, c.ShapeName, c.ParagraphIndex, c.NewText, ToEditKind(c.Kind)))
+                .ToList();
+
+            // 되돌리기는 적용하기 전에 만들어 둔다. 적용 후에는 인덱스가 밀려 계산이 어렵다.
+            _paragraphUndo = BuildUndoEdits(changes);
+            _undoSnapshot  = null;
+            CanUndo        = true;
+
+            var result = await Task.Run(() =>
+                _pptComService.SetParagraphTexts(path, edits, markRed));
+
+            if (markRed && result.Snapshots.Count > 0)
+            {
+                MarkStore.Add(path, result.Snapshots);
+                HasMarks = true;
+            }
+
+            ChangeHistoryService.AppendMany(changes.Select(c => new ChangeHistoryEntry(
+                DateTime.Now, name, "ParagraphReplace",
+                c.SlideIndex, $"{c.ShapeName} #{c.ParagraphIndex}",
+                c.OldText.Replace("\v", "\\n"),
+                c.NewText.Replace("\v", "\\n"))));
+
+            int applied = changes.Count - result.Failures.Count;
+            AddStatus($"✔ 문단 치환 {applied}건 적용" + (markRed ? " (빨간색 표시)" : ""));
+            foreach (var failure in result.Failures)
+                AddStatus($"✖ {failure}");
+
+            await AnalyzeAsync(path);
+        }
+        catch (Exception ex) { AddStatus($"✖ 치환 오류: {ex.Message}"); }
+        finally { IsBusy = false; }
+    }
+
+    /// <summary>
+    /// 빈 문단으로 만들라는 지시는 실제로는 삭제다.
+    /// PowerPoint에서 문단 텍스트를 비우면 문단 기호까지 사라져 다음 문단과 합쳐지기 때문에,
+    /// 어설프게 "빈 문단"인 척하지 않고 삭제로 다룬다.
+    /// </summary>
+    public static ParagraphEditKind ToEditKind(ParagraphChangeKind kind) => kind switch
+    {
+        ParagraphChangeKind.Insert => ParagraphEditKind.Insert,
+        ParagraphChangeKind.Clear  => ParagraphEditKind.Delete,
+        _                          => ParagraphEditKind.Replace,
+    };
+
+    /// <summary>
+    /// 적용을 취소하는 역방향 지시를 만든다.
+    ///
+    /// 되돌리기는 "적용 후" 문서를 상대하므로 원래 인덱스를 그대로 쓸 수 없다.
+    /// 앞쪽에서 문단이 지워졌으면 당겨지고, 삽입됐으면 밀린다. 그 보정이 Post() 다.
+    /// </summary>
+    public static List<ParagraphEdit> BuildUndoEdits(IReadOnlyList<ParagraphChange> changes)
+    {
+        var undo = new List<ParagraphEdit>();
+
+        foreach (var group in changes.GroupBy(c => (c.SlideIndex, c.ShapeName)))
+        {
+            var (slide, shape) = group.Key;
+            var inserted = group.Where(c => c.Kind == ParagraphChangeKind.Insert)
+                                .Select(c => c.ParagraphIndex).ToList();
+            var deleted  = group.Where(c => c.Kind == ParagraphChangeKind.Clear)
+                                .Select(c => c.ParagraphIndex).ToList();
+
+            int Post(int originalIndex)
+                => originalIndex
+                 - deleted.Count(d => d < originalIndex)
+                 + inserted.Count(s => s < originalIndex);
+
+            // 새로 넣었던 문단을 지운다. 삽입 결과물은 기준 문단 바로 뒤에 있다.
+            foreach (var change in group.Where(c => c.Kind == ParagraphChangeKind.Insert))
+                undo.Add(new ParagraphEdit(
+                    slide, shape, Post(change.ParagraphIndex) + 1, "", ParagraphEditKind.Delete));
+
+            // 지웠던 문단을 되살린다. 원본에서 바로 앞이던 문단 뒤에 넣는다.
+            // 첫 문단이었다면 인덱스 0, 즉 맨 앞에 넣는다.
+            foreach (var change in group.Where(c => c.Kind == ParagraphChangeKind.Clear))
+                undo.Add(new ParagraphEdit(
+                    slide, shape, Post(change.ParagraphIndex - 1), change.OldText,
+                    ParagraphEditKind.Insert));
+
+            // 단순 교체는 적용 후 위치에서 원문으로 되돌린다.
+            foreach (var change in group.Where(c => c.Kind == ParagraphChangeKind.Replace))
+                undo.Add(new ParagraphEdit(
+                    slide, shape, Post(change.ParagraphIndex), change.OldText,
+                    ParagraphEditKind.Replace));
+        }
+        return undo;
+    }
+
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(ClearMarksCommand))]
+    private bool _hasMarks;
+
+    /// <summary>빨간색 표시만 원래 색으로 되돌린다. 텍스트는 그대로 둔다.</summary>
+    [RelayCommand(CanExecute = nameof(HasMarks))]
+    private async Task ClearMarks()
+    {
+        if (SelectedPresentation is null) return;
+        IsBusy = true;
+        try
+        {
+            string path      = SelectedPresentation.Path;
+            var    snapshots = MarkStore.Get(path);
+            if (snapshots.Count == 0)
+            {
+                AddStatus("표시된 문단이 없습니다.");
+                HasMarks = false;
+                return;
+            }
+
+            await Task.Run(() => _pptComService.RestoreParagraphColors(path, snapshots));
+            MarkStore.Clear(path);
+            HasMarks = false;
+            AddStatus($"✔ 빨간색 표시 해제 ({snapshots.Count}건)");
+        }
+        catch (Exception ex) { AddStatus($"✖ 표시 해제 오류: {ex.Message}"); }
+        finally { IsBusy = false; }
+    }
+
+    // ── 파일 탑재 ────────────────────────────────────────────────
+
+    /// <summary>
+    /// pptx를 PowerPoint로 열어 작업 대상으로 삼는다.
+    /// workOnCopy가 켜지면 사본을 만들어 연다. 원본이 잠겨 있어도 안전하고,
+    /// 되돌릴 수 없는 실수로부터 원본을 지킨다.
+    /// </summary>
+    public async Task OpenFileAsync(string filePath, bool workOnCopy)
+    {
+        if (!File.Exists(filePath))
+        {
+            AddStatus($"✖ 파일 없음: {filePath}");
+            return;
+        }
+
+        IsBusy = true;
+        try
+        {
+            string target = filePath;
+            if (workOnCopy)
+            {
+                string dir   = Path.GetDirectoryName(filePath)!;
+                string stem  = Path.GetFileNameWithoutExtension(filePath);
+                string ext   = Path.GetExtension(filePath);
+                target = Path.Combine(dir, $"{stem}_{DateTime.Now:yyyyMMdd-HHmm}{ext}");
+                await Task.Run(() => File.Copy(filePath, target, overwrite: false));
+                AddStatus($"사본 생성: {Path.GetFileName(target)}");
+            }
+
+            await Task.Run(() => _pptComService.OpenPptxInPowerPoint(target));
+
+            var openList = await Task.Run(() => _pptComService.GetOpenPresentations());
+            Presentations = new ObservableCollection<PptPresentation>(openList);
+            SelectedPresentation =
+                openList.FirstOrDefault(p => string.Equals(p.Path, target, StringComparison.OrdinalIgnoreCase))
+                ?? openList.FirstOrDefault();
+
+            if (SelectedPresentation is not null)
+                HasMarks = MarkStore.Get(SelectedPresentation.Path).Count > 0;
+        }
+        catch (Exception ex) { AddStatus($"✖ 열기 오류: {ex.Message}"); }
+        finally { IsBusy = false; }
+    }
+
     /// <summary>텍스트 치환 적용. 적용 전 스냅샷을 저장해 Undo 가능하게 함.</summary>
     public async Task ApplyTextChangesAsync(
         List<(int SlideIndex, string ShapeName, string OldText, string NewText)> changes)
@@ -493,20 +716,42 @@ public partial class BckPptViewModel : ObservableObject
     [RelayCommand(CanExecute = nameof(CanUndo))]
     private async Task Undo()
     {
-        if (_undoSnapshot is null || SelectedPresentation is null) return;
+        if (SelectedPresentation is null) return;
+        if (_undoSnapshot is null && _paragraphUndo is null) return;
+
         IsBusy = true;
         try
         {
-            string path     = SelectedPresentation.Path;
-            var    snapshot = _undoSnapshot;
-            int count = await Task.Run(() =>
+            string path = SelectedPresentation.Path;
+            int    count;
+
+            if (_paragraphUndo is { Count: > 0 } paragraphUndo)
             {
-                foreach (var (slideIdx, shapeName, oldText) in snapshot)
-                    _pptComService.SetShapeText(path, slideIdx, shapeName, oldText);
-                return snapshot.Count;
-            });
-            _undoSnapshot = null;
-            CanUndo       = false;
+                // 색을 먼저 되돌린다. 문단을 지우고 나면 스냅샷의 인덱스가 어긋난다.
+                var marks = MarkStore.Get(path);
+                count = await Task.Run(() =>
+                {
+                    if (marks.Count > 0) _pptComService.RestoreParagraphColors(path, marks);
+                    _pptComService.SetParagraphTexts(path, paragraphUndo, markRed: false);
+                    return paragraphUndo.Count;
+                });
+                MarkStore.Clear(path);
+                HasMarks = false;
+            }
+            else
+            {
+                var snapshot = _undoSnapshot!;
+                count = await Task.Run(() =>
+                {
+                    foreach (var (slideIdx, shapeName, oldText) in snapshot)
+                        _pptComService.SetShapeText(path, slideIdx, shapeName, oldText);
+                    return snapshot.Count;
+                });
+            }
+
+            _undoSnapshot  = null;
+            _paragraphUndo = null;
+            CanUndo        = false;
             AddStatus($"↩ 되돌리기 완료 ({count}건)");
             await AnalyzeAsync(path);
         }

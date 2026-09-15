@@ -1,0 +1,151 @@
+<Window
+    x:Class="BckPPT.Views.ChangePreviewWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Title="변경 미리보기" Width="1040" Height="660"
+    WindowStartupLocation="CenterOwner"
+    Background="{StaticResource AppBg}"
+    Icon="/Assets/icon.ico">
+
+    <Window.Resources>
+        <Style x:Key="HeadCell" TargetType="TextBlock">
+            <Setter Property="Foreground" Value="{StaticResource SubTextBr}"/>
+            <Setter Property="FontSize"   Value="11"/>
+            <Setter Property="FontFamily" Value="Segoe UI"/>
+            <Setter Property="Margin"     Value="6,0"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+        </Style>
+        <Style x:Key="RowCell" TargetType="TextBlock">
+            <Setter Property="Foreground"   Value="{StaticResource TextBr}"/>
+            <Setter Property="FontSize"     Value="12"/>
+            <Setter Property="Margin"       Value="6,0"/>
+            <Setter Property="TextWrapping" Value="Wrap"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+        </Style>
+    </Window.Resources>
+
+    <Grid Margin="12">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- 요약 -->
+        <TextBlock Grid.Row="0" x:Name="SummaryText"
+                   Foreground="{StaticResource TextBr}" FontSize="13"
+                   FontFamily="Segoe UI" Margin="2,0,0,10"/>
+
+        <!-- 표 머리글 -->
+        <Border Grid.Row="1" Background="{StaticResource HeaderBg}"
+                BorderBrush="{StaticResource BorderBr}" BorderThickness="1,1,1,0"
+                Padding="0,6">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="34"/>
+                    <ColumnDefinition Width="92"/>
+                    <ColumnDefinition Width="190"/>
+                    <ColumnDefinition Width="70"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="150"/>
+                </Grid.ColumnDefinitions>
+                <CheckBox Grid.Column="0" x:Name="SelectAllBox" IsChecked="True"
+                          HorizontalAlignment="Center" VerticalAlignment="Center"
+                          Style="{StaticResource DarkCheckBox}"
+                          Checked="SelectAll_Changed" Unchecked="SelectAll_Changed"
+                          ToolTip="전체 선택 / 해제"/>
+                <TextBlock Grid.Column="1" Text="ID"     Style="{StaticResource HeadCell}"/>
+                <TextBlock Grid.Column="2" Text="위치"   Style="{StaticResource HeadCell}"/>
+                <TextBlock Grid.Column="3" Text="종류"   Style="{StaticResource HeadCell}"/>
+                <TextBlock Grid.Column="4" Text="이전"   Style="{StaticResource HeadCell}"/>
+                <TextBlock Grid.Column="5" Text="이후"   Style="{StaticResource HeadCell}"/>
+                <TextBlock Grid.Column="6" Text="넘침 예상" Style="{StaticResource HeadCell}"/>
+            </Grid>
+        </Border>
+
+        <!-- 변경 목록 -->
+        <Border Grid.Row="2" Background="{StaticResource PanelBg}"
+                BorderBrush="{StaticResource BorderBr}" BorderThickness="1">
+            <ScrollViewer VerticalScrollBarVisibility="Auto">
+                <ItemsControl x:Name="ChangeList">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <Border BorderBrush="{StaticResource BorderBr}" BorderThickness="0,0,0,1"
+                                    Padding="0,5">
+                                <Border.Style>
+                                    <Style TargetType="Border">
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding HasWarning}" Value="True">
+                                                <Setter Property="Background"
+                                                        Value="{StaticResource OverflowRowBg}"/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </Border.Style>
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="34"/>
+                                        <ColumnDefinition Width="92"/>
+                                        <ColumnDefinition Width="190"/>
+                                        <ColumnDefinition Width="70"/>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="150"/>
+                                    </Grid.ColumnDefinitions>
+
+                                    <CheckBox Grid.Column="0" IsChecked="{Binding IsSelected}"
+                                              HorizontalAlignment="Center" VerticalAlignment="Center"
+                                              Style="{StaticResource DarkCheckBox}"/>
+                                    <TextBlock Grid.Column="1" Text="{Binding Id}"
+                                               Style="{StaticResource RowCell}"
+                                               FontFamily="Consolas"
+                                               Foreground="{StaticResource AccentBr}"/>
+                                    <TextBlock Grid.Column="2" Text="{Binding Location}"
+                                               Style="{StaticResource RowCell}"
+                                               Foreground="{StaticResource SubTextBr}"/>
+                                    <TextBlock Grid.Column="3" Text="{Binding KindLabel}"
+                                               Style="{StaticResource RowCell}" FontSize="11"/>
+                                    <TextBlock Grid.Column="4" Text="{Binding OldDisplay}"
+                                               Style="{StaticResource RowCell}"
+                                               Foreground="{StaticResource SubTextBr}"/>
+                                    <TextBlock Grid.Column="5" Text="{Binding NewDisplay}"
+                                               Style="{StaticResource RowCell}"/>
+                                    <TextBlock Grid.Column="6" Text="{Binding OverflowWarning}"
+                                               Style="{StaticResource RowCell}" FontSize="11"
+                                               Foreground="{StaticResource WarnBr}"/>
+                                </Grid>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </ScrollViewer>
+        </Border>
+
+        <!-- 경고 -->
+        <Border Grid.Row="3" x:Name="WarningPanel" Visibility="Collapsed"
+                Background="{StaticResource PanelBg}" BorderBrush="{StaticResource WarnBr}"
+                BorderThickness="1" CornerRadius="3" Padding="10,8" Margin="0,8,0,0">
+            <ScrollViewer MaxHeight="110" VerticalScrollBarVisibility="Auto">
+                <TextBlock x:Name="WarningText" TextWrapping="Wrap"
+                           Foreground="{StaticResource WarnBr}" FontSize="11.5"
+                           FontFamily="Segoe UI"/>
+            </ScrollViewer>
+        </Border>
+
+        <!-- 버튼 -->
+        <DockPanel Grid.Row="4" Margin="0,10,0,0">
+            <CheckBox x:Name="MarkRedBox" IsChecked="True" Content="치환한 문단을 빨간색으로 표시"
+                      Style="{StaticResource DarkCheckBox}" VerticalAlignment="Center"
+                      ToolTip="적용 후 확인이 끝나면 본 창 밖의 '표시 해제' 버튼으로 원래 색을 되돌립니다"/>
+            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                <Button x:Name="ApplyButton" Content="반영" Padding="18,6" Margin="0,0,8,0"
+                        Style="{StaticResource AccentBtn}" Click="Apply_Click"/>
+                <Button Content="취소" Padding="18,6"
+                        Style="{StaticResource DarkBtn}" Click="Cancel_Click"/>
+            </StackPanel>
+        </DockPanel>
+    </Grid>
+</Window>

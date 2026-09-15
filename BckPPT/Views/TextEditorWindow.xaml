@@ -2,7 +2,7 @@
     x:Class="BckPPT.Views.TextEditorWindow"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-    Title="텍스트 치환" Width="700" Height="580"
+    Title="텍스트 치환" Width="760" Height="640"
     WindowStartupLocation="CenterOwner"
     Background="#1E1E1E"
     Icon="/Assets/icon.ico">
@@ -22,7 +22,7 @@
                 <Button DockPanel.Dock="Right" Content="프롬프트+텍스트 복사"
                         Style="{StaticResource AccentBtn}" Margin="10,0,0,0"
                         VerticalAlignment="Top" Click="CopyAll_Click"
-                        ToolTip="LLM 프롬프트와 텍스트 목록을 함께 클립보드에 복사"/>
+                        ToolTip="프롬프트와 문단 목록을 함께 클립보드에 복사"/>
                 <TextBox x:Name="PromptBox" IsReadOnly="True"
                          TextWrapping="Wrap" BorderThickness="0"
                          FontFamily="Segoe UI" FontSize="11.5"
@@ -34,17 +34,16 @@
         <!-- 안내 -->
         <TextBlock Grid.Row="1" Margin="0,0,0,6" TextWrapping="Wrap"
                    Foreground="#858585" FontSize="11" FontFamily="Segoe UI">
-            1) 위 버튼으로 복사 → LLM에 붙여넣기 → 수정 요청
-            2) LLM 결과를 아래에 붙여넣기 (기존 내용 지우고)
-            3) 적용 클릭
+            아래 목록을 직접 고쳐도 되고, 에이전트 답변을 통째로 붙여넣어도 됩니다.
+            ID가 붙은 줄만 반영되므로 설명·표·코드블록이 섞여 있어도 괜찮습니다.
         </TextBlock>
 
         <!-- 에디터 -->
         <TextBox Grid.Row="2" x:Name="Editor"
                  AcceptsReturn="True" AcceptsTab="True"
-                 TextWrapping="Wrap"
+                 TextWrapping="NoWrap"
                  VerticalScrollBarVisibility="Auto"
-                 HorizontalScrollBarVisibility="Disabled"
+                 HorizontalScrollBarVisibility="Auto"
                  FontFamily="Consolas" FontSize="13"
                  Foreground="#D4D4D4" Background="#252526"
                  CaretBrush="#D4D4D4"
@@ -54,18 +53,24 @@
         <!-- 버튼 -->
         <DockPanel Grid.Row="3" Margin="0,10,0,0">
             <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
-                <Button Content="적용" Padding="16,6" Margin="0,0,8,0"
+                <Button Content="반영" Padding="18,6" Margin="0,0,8,0"
                         Style="{StaticResource AccentBtn}"
-                        Click="Apply_Click"/>
-                <Button Content="취소" Padding="16,6"
+                        Click="Apply_Click"
+                        ToolTip="붙여넣은 내용을 해석해 변경 미리보기를 엽니다"/>
+                <Button Content="취소" Padding="18,6"
                         Style="{StaticResource DarkBtn}"
                         Click="Cancel_Click"/>
             </StackPanel>
-            <Button Content="텍스트만 복사" Padding="12,6"
-                    Style="{StaticResource DarkBtn}"
-                    Click="CopyTextOnly_Click"
-                    ToolTip="에디터 내용만 클립보드에 복사"
-                    HorizontalAlignment="Left"/>
+            <StackPanel Orientation="Horizontal">
+                <Button Content="원본 목록 복원" Padding="12,6" Margin="0,0,6,0"
+                        Style="{StaticResource DarkBtn}"
+                        Click="Reset_Click"
+                        ToolTip="에디터를 처음 추출한 문단 목록으로 되돌립니다"/>
+                <Button Content="텍스트만 복사" Padding="12,6"
+                        Style="{StaticResource DarkBtn}"
+                        Click="CopyTextOnly_Click"
+                        ToolTip="에디터 내용만 클립보드에 복사"/>
+            </StackPanel>
         </DockPanel>
     </Grid>
 </Window>
