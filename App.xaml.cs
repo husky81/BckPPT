@@ -44,7 +44,7 @@ public partial class BckPptApp : System.Windows.Application
         _ = StaDispatcher.Instance;
         _staStarted = true;
 
-        _compositionRoot = new AppCompositionRoot(Dispatcher);
+        _compositionRoot = new AppCompositionRoot(Dispatcher, StartupOptions.Parse(e.Args));
         var chatWindow = _compositionRoot.CreateAgentChatWindow();
         MainWindow = chatWindow;
         MainWindow.Show();

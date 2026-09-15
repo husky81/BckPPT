@@ -10,6 +10,12 @@ $publishPath = Join-Path $projectRoot "bin\publish\win-x64"
 $artifactsPath = Join-Path $projectRoot "artifacts"
 $version = ([xml](Get-Content -Raw -LiteralPath $projectPath)).Project.PropertyGroup.Version
 
+# publish는 증분 복사라 이전 버전 DLL이 남는다(stale 어셈블리 → 실행 즉시 로드 실패).
+# ReadyToRun 중간 산출물(obj\...\R2R)도 캐시되므로 함께 지운다.
+if (Test-Path -LiteralPath $publishPath) { Remove-Item -LiteralPath $publishPath -Recurse -Force }
+Get-ChildItem -LiteralPath (Join-Path $projectRoot "obj") -Recurse -Directory -Filter "R2R" -ErrorAction SilentlyContinue |
+    ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force }
+
 dotnet publish $projectPath -c $Configuration -r win-x64 --self-contained true `
     -p:PublishProfile=win-x64 --nologo
 if ($LASTEXITCODE -ne 0) { throw "dotnet publish 실패" }

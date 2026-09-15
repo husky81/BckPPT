@@ -35,11 +35,13 @@ public partial class BckPptWindow : Window
     private System.Windows.Documents.AdornerLayer? _adornerLayer;
 
     private readonly DocumentSession _documentSession;
+    private readonly string? _initialDirectory;
 
-    public BckPptWindow(BckPptViewModel viewModel, DocumentSession documentSession)
+    public BckPptWindow(BckPptViewModel viewModel, DocumentSession documentSession, string? initialDirectory = null)
     {
         ViewModel = viewModel;
         _documentSession = documentSession;
+        _initialDirectory = initialDirectory;
         DataContext = ViewModel;
         ViewModel.PropertyChanged += (_, args) =>
         {
@@ -184,6 +186,7 @@ public partial class BckPptWindow : Window
             Title  = "PPT 파일 열기",
             Filter = "PowerPoint 파일 (*.pptx;*.ppt)|*.pptx;*.ppt|모든 파일 (*.*)|*.*",
         };
+        if (_initialDirectory is not null) dialog.InitialDirectory = _initialDirectory;
         if (dialog.ShowDialog() != true) return;
 
         await ViewModel.OpenFileAsync(dialog.FileName, WorkOnCopyBox.IsChecked == true);

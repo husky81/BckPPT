@@ -25,6 +25,7 @@ public partial class AgentChatWindow : Window, INotifyPropertyChanged
     private readonly ExternalJobRegistry _externalJobs;
     private readonly UpdateService _updateService;
     private readonly Action _openEditor;
+    private readonly string? _initialDirectory;
     private CancellationTokenSource? _requestCts;
     private string _conversationText = "파일을 이 창에 놓거나 위 버튼으로 문서를 연결한 뒤 작업을 요청하세요.";
     private string _streamingText = "";
@@ -48,8 +49,9 @@ public partial class AgentChatWindow : Window, INotifyPropertyChanged
 
     public AgentChatWindow(DocumentSession session, IPptComService pptService, ILlmClient llmClient,
         ApprovalWorkflow approvalWorkflow, PptIndexer pptIndexer, ExternalJobRegistry externalJobs,
-        UpdateService updateService, Action openEditor)
+        UpdateService updateService, Action openEditor, string? initialDirectory = null)
     {
+        _initialDirectory = initialDirectory;
         _session = session;
         _pptService = pptService;
         _llmClient = llmClient;
@@ -74,6 +76,7 @@ public partial class AgentChatWindow : Window, INotifyPropertyChanged
     private void OpenFile_Click(object sender, RoutedEventArgs e)
     {
         var dialog = new OpenFileDialog { Filter = "PowerPoint 파일|*.pptx;*.pptm;*.ppt|모든 파일|*.*" };
+        if (_initialDirectory is not null) dialog.InitialDirectory = _initialDirectory;
         if (dialog.ShowDialog(this) == true) OpenPresentation(dialog.FileName);
     }
 

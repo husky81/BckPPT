@@ -22,10 +22,12 @@ public sealed class AppCompositionRoot : IDisposable
     private readonly ExternalJobRegistry _externalJobs = new();
     private ExternalCommandEndpoint? _externalEndpoint;
     private readonly UpdateService _updateService = new();
+    private readonly StartupOptions _startupOptions;
     private BckPptWindow? _editorWindow;
 
-    public AppCompositionRoot(Dispatcher dispatcher)
+    public AppCompositionRoot(Dispatcher dispatcher, StartupOptions? startupOptions = null)
     {
+        _startupOptions = startupOptions ?? StartupOptions.Empty;
         _uiDispatcher = new WpfDispatcher(dispatcher);
         try { _llmClient = new GitokyLlmClient(GitokyLlmOptions.FromEnvironment(AppContext.BaseDirectory)); }
         catch (Exception ex) { _llmClient = new UnavailableLlmClient(ex.Message); }
@@ -40,7 +42,7 @@ public sealed class AppCompositionRoot : IDisposable
 
     public AgentChatWindow CreateAgentChatWindow() =>
         new(_documentSession, _pptService, _llmClient, _approvalWorkflow, _pptIndexer,
-            _externalJobs, _updateService, OpenEditorWindow);
+            _externalJobs, _updateService, OpenEditorWindow, _startupOptions.ResolveInitialDirectory());
 
     public void StartExternalEndpoint(AgentChatWindow window)
     {
@@ -61,7 +63,7 @@ public sealed class AppCompositionRoot : IDisposable
         }
 
         var viewModel = new BckPptViewModel(_pptService, _uiDispatcher);
-        _editorWindow = new BckPptWindow(viewModel, _documentSession);
+        _editorWindow = new BckPptWindow(viewModel, _documentSession, _startupOptions.ResolveInitialDirectory());
         _editorWindow.Closed += (_, _) => _editorWindow = null;
         _editorWindow.Show();
     }

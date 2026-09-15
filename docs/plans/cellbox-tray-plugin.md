@@ -2,7 +2,7 @@
 
 > 작성일: 2026-09-15
 > 대상 저장소: BckPPT, cellbox2 (두 곳 모두 수정)
-> 상태: **1단계(중복 제거) 완료** · 2단계부터 구현 대기
+> 상태: **1단계(중복 제거)·2단계(플러그인 규약 검증) 완료** · 3단계부터 구현 대기
 > 방향: CellBox 본체는 가볍게 두고, 플러그인은 **cellbox.ai 스토어**에서 내려받아 설치한다.
 
 ## 1. 결정 사항
@@ -61,8 +61,59 @@ cellbox2/apps/tray/BckPPT/    v2.0.44   ← 트레이가 빌드해 쓰던 곳
 - **`apps/cellbox-mcp`, `apps/bckppt-mcp`** — BckPPT의 localhost 디버그 API(38700)를 부르는
   런타임 연동입니다. 소스 의존이 아니라 그대로 둡니다.
 
-> **중간 상태 주의**: 지금 CellBox를 빌드하면 트레이에 BckPPT 항목이 없습니다.
-> 3단계(플러그인 서비스)가 들어가야 다시 나타납니다.
+> 1단계 직후에는 트레이에서 BckPPT 항목이 사라진 상태였습니다. 2단계에서 되살아났습니다.
+
+## 2-1. 2단계 — 수동 설치로 동작 확인 (완료)
+
+스토어 없이 **`plugin.json` 규약과 폴더 교체가 실제로 맞는지**만 먼저 확인했습니다.
+
+### 들어간 것
+
+| 레포 | 파일 | 내용 |
+|---|---|---|
+| BckPPT | `scripts/package-plugin.ps1` | publish → `plugin.json` → zip → sha256 → `latest.json`, `-InstallLocal`로 로컬 전개까지 |
+| BckPPT | `BckPPT/Application/StartupOptions.cs` | `--sync-folder` 해석 (`--sync-folder <경로>` / `=경로` 두 형태) |
+| BckPPT | `AppCompositionRoot` · 두 창 | 동기화 폴더를 `열기` 대화상자 기본 경로로 전달 |
+| cellbox2 | `Models/PluginManifest.cs` | `PluginManifest` + 디스크에서 발견한 `InstalledPlugin` |
+| cellbox2 | `Services/PluginService.cs` | 검색·실행·실행 여부 판정 |
+| cellbox2 | `Infrastructure/TrayManager.cs` | 하드코딩 제거, 플러그인 목록 기반 메뉴 |
+
+테스트: BckPPT 37개 통과(신규 7), CellBox2 `PluginServiceTests` 14개 통과.
+
+### 실제로 돌려보고 잡은 것
+
+**패키지에 오래된 DLL이 섞였습니다.** 첫 패키지는 실행하자마자
+`Microsoft.Data.Sqlite 8.0.31.0을 찾을 수 없습니다`로 죽었습니다.
+폴더에는 같은 이름의 DLL이 분명히 있었는데 **버전이 8.0.30**이었습니다.
+
+원인은 두 겹이었습니다.
+
+1. `dotnet publish`는 증분 복사라 `bin\publish\win-x64`의 이전 파일을 지우지 않는다
+2. 그걸 지워도 **ReadyToRun 중간 산출물**(`obj\Release\net8.0-windows\win-x64\R2R`)이
+   9월 1일자 컴파일 결과를 그대로 재사용한다
+
+패키징 스크립트가 매번 둘 다 비우게 했습니다. 같은 함정이 있던 `scripts/package.ps1`도 함께 고쳤습니다.
+**빌드 캐시가 릴리스 아티팩트로 새는 종류의 버그라, 손으로 설치해보지 않았으면 스토어에 올라간 뒤에 발견됐을 것입니다.**
+
+`plugin.json`도 처음엔 깨져 나왔습니다. Windows PowerShell 5.1이 BOM 없는 `.ps1`을 ANSI로 읽어
+설명 문구가 mojibake가 됐고, 출력 JSON에는 BOM이 붙었습니다(스토어 페이지의 `JSON.parse`가 BOM에서 실패합니다).
+스크립트는 BOM을 붙여 저장하고, JSON은 BOM 없이 쓰도록 고정했습니다.
+
+### 확인한 것
+
+```
+%LOCALAPPDATA%\CellBox\Plugins\BckPPT\   ← zip 75.1MB 전개, 266개 파일
+PluginService.Discover()  →  BckPPT  v2.1.0
+                             icon=Assets\icon.ico · desc=PPT 텍스트 분석·치환 도구
+                             dataDirs=%LOCALAPPDATA%\BckSoft\BckPPT
+BckPPT.exe --sync-folder "…\Documents"  →  창 'BckPPT Agent' · crash.log 기록 없음
+```
+
+### 계획과 달라진 점
+
+설치된 플러그인이 하나도 없을 때의 메뉴는 `플러그인 둘러보기...`(스토어 열기)가 아니라
+**`플러그인 폴더 열기...`** 로 뒀습니다. 스토어 페이지가 아직 없어서 지금 누르면 404이기 때문입니다.
+4단계에서 이 자리를 스토어 링크로 바꿉니다 (`TrayManager.RenderPluginMenu`에 주석으로 표시).
 
 ## 3. 목표 구조
 
@@ -310,17 +361,18 @@ https://<release-bucket>/
 
 | 작업 | 내용 |
 |---|---|
-| 패키징 스크립트 | `scripts/package-plugin.ps1` — publish → `plugin.json` 생성 → zip → sha256 산출 |
-| 인자 처리 | `--sync-folder` 수용 (`열기` 기본 경로로 사용) — 4.2 |
-| 아이콘 내보내기 | 스토어 카드용 `icon.png` |
+| ~~패키징 스크립트~~ | ~~`scripts/package-plugin.ps1`~~ — 완료 (2단계) |
+| ~~인자 처리~~ | ~~`--sync-folder` 수용~~ — 완료 (2단계) |
+| ~~아이콘 내보내기~~ | ~~스토어 카드용 `icon.png`~~ — 완료, 패키지의 `Assets/`에 동봉 |
+| 코드 서명 | 플러그인 zip 서명 + 트레이 쪽 검증 (`Shared/AuthenticodeVerifier.cs` 재사용) |
 
 ### cellbox2 레포
 
 | 작업 | 내용 |
 |---|---|
-| 플러그인 모델 | `Models/PluginManifest.cs`, `Models/PluginState.cs` |
-| 플러그인 서비스 | `Services/PluginService.cs` — 검색·설치·제거·재설치·업데이트·실행 |
-| 트레이 메뉴 | `TrayManager.cs:83-104` 하드코딩을 플러그인 목록 기반으로 교체, 버전 표시 |
+| ~~플러그인 모델~~ | ~~`Models/PluginManifest.cs`~~ — 완료 (2단계) |
+| 플러그인 서비스 | `Services/PluginService.cs` — 검색·실행은 완료, **설치·제거·재설치·업데이트 남음** |
+| ~~트레이 메뉴~~ | ~~하드코딩 교체, 버전 표시~~ — 완료 (2단계) |
 | 관리 UI | `Views/Pages/PluginsPage.xaml` + SettingsWindow NavigationView 항목 |
 | 제거 확인 | 데이터 삭제 체크박스가 있는 ContentDialog |
 | 커스텀 스킴 | `cellbox://` 등록 + `plugin/install` 처리 |
@@ -335,10 +387,7 @@ https://<release-bucket>/
 
 ## 8. 권장 순서
 
-**2단계 — 수동 설치로 동작 확인**
-패키징 스크립트로 zip을 만들고 `%LOCALAPPDATA%\CellBox\Plugins\BckPPT\`에 손으로 풀어,
-트레이 메뉴가 `plugin.json`을 읽어 `BckPPT v2.1.0`을 띄우고 Agent가 실행되는지 본다.
-**스토어 없이 규약만 먼저 검증**하는 단계다.
+**~~2단계 — 수동 설치로 동작 확인~~ (완료 — 2-1 참고)**
 
 **3단계 — 관리 UI**
 설치·제거·재설치·업데이트를 UI에서. 이 시점에 버킷에 manifest를 올린다.
@@ -346,5 +395,6 @@ https://<release-bucket>/
 **4단계 — 스토어**
 웹 카탈로그 + `cellbox://` 스킴 연결.
 
-2단계가 가장 값어치가 큽니다. 여기서 `plugin.json` 규약과 프로세스 종료·폴더 교체가 맞는지
-확인하고 나면 나머지는 그 위에 얹는 일입니다.
+2단계에서 `plugin.json` 규약과 폴더 교체가 맞는다는 게 확인됐으므로, 나머지는 그 위에 얹는 일입니다.
+3단계는 `package-plugin.ps1 -InstallLocal`이 손으로 하는 일(프로세스 종료 → `.old` 이름 변경 →
+전개 → 실패 시 되돌리기)을 트레이 안으로 옮기는 것과 같습니다 — 다운로드와 SHA-256 검증이 앞에 붙습니다.
