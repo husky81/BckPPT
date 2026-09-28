@@ -13,3 +13,14 @@ obj/
 /건설안전_후보Long-list_157개_평가표.xlsx
 /한국건설안전박람회_157개_사업외_중복기술_1차분류.md
 /한국건설안전박람회_참여기업_157개_1차목록.md
+
+# Build outputs and dependency caches
+node_modules/
+dist/
+.next/
+__pycache__/
+*.pyc
+
+# CellDev agent runtime output
+.celldev/logs/
+.celldev/task-output/
