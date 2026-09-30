@@ -127,6 +127,15 @@
                         <TextBlock Text="CSV" FontSize="12"/>
                     </Button>
 
+                    <!-- Markdown 내보내기 -->
+                    <Button Style="{StaticResource DarkBtn}" Margin="0,0,4,0"
+                            Click="ExportMarkdown_Click"
+                            IsEnabled="{Binding IsNotBusy}"
+                            ToolTip="그룹·표·문단을 포함한 슬라이드별 Markdown과 PNG 미리보기를 저장합니다"
+                            Padding="7,4">
+                        <TextBlock Text="MD" FontSize="12"/>
+                    </Button>
+
                     <!-- 이력 -->
                     <Button Style="{StaticResource DarkBtn}" Margin="0,0,4,0"
                             Click="History_Click"

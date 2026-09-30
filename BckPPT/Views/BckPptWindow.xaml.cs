@@ -192,6 +192,27 @@ public partial class BckPptWindow : Window
         await ViewModel.OpenFileAsync(dialog.FileName, WorkOnCopyBox.IsChecked == true);
     }
 
+    private async void ExportMarkdown_Click(object sender, RoutedEventArgs e)
+    {
+        var presentation = ViewModel.SelectedPresentation;
+        if (presentation is null) return;
+
+        var sourceDirectory = System.IO.Path.GetDirectoryName(presentation.Path)!;
+        var dialog = new Microsoft.Win32.SaveFileDialog
+        {
+            Title = "슬라이드별 Markdown 저장",
+            Filter = "Markdown 파일 (*.md)|*.md",
+            DefaultExt = ".md",
+            AddExtension = true,
+            InitialDirectory = sourceDirectory,
+            FileName = System.IO.Path.GetFileNameWithoutExtension(presentation.Path) + ".md",
+            OverwritePrompt = true,
+        };
+        if (dialog.ShowDialog() != true) return;
+
+        await ViewModel.ExportMarkdownAsync(dialog.FileName);
+    }
+
     private void Window_DragOver(object sender, DragEventArgs e)
     {
         e.Effects = GetDroppedPptx(e) is null ? DragDropEffects.None : DragDropEffects.Copy;

@@ -13,6 +13,9 @@ BckPPT는 기존 PowerPoint 슬라이드의 레이아웃과 서식을 유지하�
   - Enter 문단 나눔
   - Shift+Enter 강제 줄바꿈
 - 문단별 텍스트 교체와 원본 서식 유지
+- 슬라이드별 Markdown 내보내기
+  - 그룹 도형·표·문단을 재귀적으로 추출
+  - 슬라이드 PNG 미리보기를 함께 저장해 이미지·차트·도형도 원본 맥락으로 확인
 - overflow 감지와 AutoFit 보정
 - Shape 역할 분류와 구조 정보 저장
 - 변경 이력 확인
@@ -65,6 +68,12 @@ PowerShell에서 다음 명령을 실행합니다.
 dotnet restore BckPPT.csproj
 dotnet build BckPPT.csproj -c Debug -p:Platform=x64
 ```
+
+## Markdown 내보내기
+
+편집 창에서 대상 PPT를 선택한 뒤 상단의 `MD`를 누르고 저장 위치를 고릅니다. Markdown 파일과
+`<파일명>_assets` 폴더가 함께 생성됩니다. 그룹 안에 들어간 텍스트, 표, 문단 들여쓰기를 추출하며,
+텍스트로 바꿀 수 없는 이미지·차트·도형은 슬라이드 PNG 미리보기로 보존합니다.
 
 빌드 결과는 `bin/x64/Debug/net8.0-windows/`에 생성됩니다.
 

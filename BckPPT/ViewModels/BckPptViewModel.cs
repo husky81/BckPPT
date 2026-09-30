@@ -883,6 +883,22 @@ public partial class BckPptViewModel : ObservableObject
         finally { IsBusy = false; }
     }
 
+    /// <summary>선택한 프레젠테이션을 슬라이드별 Markdown과 PNG 자산으로 내보낸다.</summary>
+    public async Task ExportMarkdownAsync(string outputPath)
+    {
+        if (SelectedPresentation is null) return;
+        IsBusy = true;
+        try
+        {
+            var result = await Task.Run(() =>
+                _pptComService.ExportMarkdown(SelectedPresentation.Path, outputPath));
+            AddStatus($"✔ Markdown 내보내기 완료 · {result.SlideCount}장" +
+                (result.WarningCount > 0 ? $" · 경고 {result.WarningCount}건" : ""));
+        }
+        catch (Exception ex) { AddStatus($"✖ Markdown 내보내기 오류: {ex.Message}"); }
+        finally { IsBusy = false; }
+    }
+
     // ── Navigate ─────────────────────────────────────────────────
 
     [RelayCommand]

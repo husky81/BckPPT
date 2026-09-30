@@ -12,6 +12,13 @@ public interface IPptComService
         IProgress<SlideAnalysisProgress>? slideProgress = null,
         CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// PowerPoint가 해석한 도형 계층을 슬라이드별 Markdown으로 내보낸다.
+    /// 각 슬라이드는 PNG 미리보기와 함께 저장하여 이미지·차트 등 비텍스트 요소도 보존한다.
+    /// </summary>
+    MarkdownExportResult ExportMarkdown(string presentationPath, string outputPath,
+        CancellationToken cancellationToken = default);
+
     Task<AutoFitResult> AutoFitAsync(string presentationPath, IProgress<string>? progress = null);
     Task FixShapeAsync(string presentationPath, int slideIndex, string shapeName,
         IProgress<string>? progress = null);

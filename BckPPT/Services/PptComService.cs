@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Text.RegularExpressions;
 using BckPPT.Models;
 using Microsoft.Win32;
@@ -375,6 +376,256 @@ public class PptComService : IPptComService
             }
             finally { if (ownedByUs) SafeClose(prs); }
         });
+
+    // ── Markdown 내보내기 ────────────────────────────────────────
+
+    private sealed record MarkdownParagraph(string Text, int Indent, bool HasBullet);
+    private sealed record MarkdownPart(
+        string Name, float Top, float Left,
+        IReadOnlyList<MarkdownParagraph>? Paragraphs = null,
+        IReadOnlyList<IReadOnlyList<string>>? Table = null);
+
+    /// <summary>
+    /// 그룹 도형을 반드시 재귀적으로 순회한다. 이 순서는 PowerPoint의 그룹 항목 순서를
+    /// 보존하므로 카드형 슬라이드의 제목·문제점·성과물이 뒤섞이지 않는다.
+    /// </summary>
+    public MarkdownExportResult ExportMarkdown(string presentationPath, string outputPath,
+        CancellationToken cancellationToken = default)
+        => RunOnSta(() =>
+        {
+            if (string.IsNullOrWhiteSpace(outputPath))
+                throw new ArgumentException("Markdown 출력 경로가 없습니다.", nameof(outputPath));
+
+            outputPath = Path.GetFullPath(outputPath);
+            Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
+
+            var assetDirectoryName = Path.GetFileNameWithoutExtension(outputPath) + "_assets";
+            var assetDirectory = Path.Combine(Path.GetDirectoryName(outputPath)!, assetDirectoryName);
+            Directory.CreateDirectory(assetDirectory);
+
+            dynamic pptApp = GetOrCreateInstance();
+            dynamic? existing = FindOpenPresentation(pptApp, presentationPath);
+            bool ownedByUs = existing is null;
+            dynamic prs = existing ?? pptApp.Presentations.Open(presentationPath, MsoTrue, MsoFalse, MsoFalse);
+            try
+            {
+                var markdown = new StringBuilder();
+                var warnings = new List<string>();
+                markdown.AppendLine($"# {Path.GetFileNameWithoutExtension(presentationPath)}");
+                markdown.AppendLine();
+                markdown.AppendLine($"- 원본: `{Path.GetFileName(presentationPath)}`");
+                markdown.AppendLine($"- 슬라이드 수: {(int)prs.Slides.Count}");
+                markdown.AppendLine("- 생성: BckPPT PowerPoint 구조 추출");
+
+                for (int slideIndex = 1; slideIndex <= (int)prs.Slides.Count; slideIndex++)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    dynamic slide = prs.Slides[slideIndex];
+                    var parts = new List<MarkdownPart>();
+                    CollectMarkdownParts(slide.Shapes, parts, warnings, slideIndex, cancellationToken);
+                    var title = FindMarkdownTitle(parts, slideIndex);
+
+                    markdown.AppendLine();
+                    markdown.AppendLine("---");
+                    markdown.AppendLine();
+                    markdown.AppendLine($"## 슬라이드 {slideIndex:00}. {EscapeMarkdown(title)}");
+                    markdown.AppendLine();
+
+                    string imageName = $"slide-{slideIndex:00}.png";
+                    string imagePath = Path.Combine(assetDirectory, imageName);
+                    try
+                    {
+                        slide.Export(imagePath, "PNG", 1920, 1080);
+                        markdown.AppendLine($"![슬라이드 {slideIndex:00} 미리보기](<{assetDirectoryName}/{imageName}>)");
+                        markdown.AppendLine();
+                    }
+                    catch (Exception ex)
+                    {
+                        warnings.Add($"슬라이드 {slideIndex:00}: 렌더 이미지 생성 실패 ({ex.Message})");
+                    }
+
+                    AppendMarkdownParts(markdown, parts, title);
+                }
+
+                if (warnings.Count > 0)
+                {
+                    markdown.AppendLine();
+                    markdown.AppendLine("---");
+                    markdown.AppendLine();
+                    markdown.AppendLine("## 추출 경고");
+                    markdown.AppendLine();
+                    foreach (var warning in warnings.Distinct())
+                        markdown.AppendLine($"- {EscapeMarkdown(warning)}");
+                }
+
+                File.WriteAllText(outputPath, markdown.ToString(), new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+                return new MarkdownExportResult(outputPath, (int)prs.Slides.Count, warnings.Count);
+            }
+            finally { if (ownedByUs) SafeClose(prs); }
+        });
+
+    private static void CollectMarkdownParts(dynamic shapes, List<MarkdownPart> parts,
+        List<string> warnings, int slideIndex, CancellationToken cancellationToken)
+    {
+        foreach (dynamic shape in shapes)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            int shapeType = 0;
+            try { shapeType = (int)shape.Type; } catch { }
+            if (shapeType == 6) // msoGroup
+            {
+                try { CollectMarkdownParts(shape.GroupItems, parts, warnings, slideIndex, cancellationToken); }
+                catch { warnings.Add($"슬라이드 {slideIndex:00}: 그룹 도형을 읽지 못했습니다."); }
+                continue;
+            }
+
+            string name = "도형";
+            float top = 0, left = 0;
+            try { name = (string)shape.Name; } catch { }
+            try { top = (float)shape.Top; left = (float)shape.Left; } catch { }
+
+            try
+            {
+                if ((int)shape.HasTable == MsoTrue)
+                {
+                    dynamic table = shape.Table;
+                    var rows = new List<IReadOnlyList<string>>();
+                    for (int r = 1; r <= (int)table.Rows.Count; r++)
+                    {
+                        var row = new List<string>();
+                        for (int c = 1; c <= (int)table.Columns.Count; c++)
+                        {
+                            string value = "";
+                            try { value = ((string)table.Cell(r, c).Shape.TextFrame2.TextRange.Text).Trim(); } catch { }
+                            row.Add(value.Replace('\r', ' ').Replace('\n', ' ').Replace("|", "\\|"));
+                        }
+                        rows.Add(row);
+                    }
+                    parts.Add(new MarkdownPart(name, top, left, Table: rows));
+                    continue;
+                }
+            }
+            catch { warnings.Add($"슬라이드 {slideIndex:00}: 표 '{name}'을 읽지 못했습니다."); }
+
+            bool hasText = false;
+            try { hasText = (int)shape.HasTextFrame == MsoTrue; } catch { }
+            if (hasText)
+            {
+                var paragraphs = ReadMarkdownParagraphs(shape);
+                if (paragraphs.Count > 0)
+                    parts.Add(new MarkdownPart(name, top, left, paragraphs));
+                continue;
+            }
+
+            // 그림·차트·SmartArt는 슬라이드 PNG가 보존한다. Markdown에는 명시적으로 경고를 남긴다.
+            bool isVisual = shapeType is 11 or 13;
+            try { isVisual |= (int)shape.HasChart == MsoTrue; } catch { }
+            if (isVisual)
+                warnings.Add($"슬라이드 {slideIndex:00}: '{name}'의 시각 요소는 슬라이드 미리보기 PNG에 보존했습니다.");
+        }
+    }
+
+    private static List<MarkdownParagraph> ReadMarkdownParagraphs(dynamic shape)
+    {
+        var result = new List<MarkdownParagraph>();
+        try
+        {
+            dynamic tf = shape.TextFrame2;
+            int count = (int)tf.TextRange.Paragraphs.Count;
+            for (int index = 1; index <= count; index++)
+            {
+                dynamic paragraph = tf.TextRange.Paragraphs(index, 1);
+                string text = ((string)paragraph.Text).Trim('\r', '\n', '\v', ' ');
+                if (string.IsNullOrWhiteSpace(text)) continue;
+                int indent = 0;
+                bool bullet = false;
+                try { indent = Math.Max(0, (int)paragraph.ParagraphFormat.IndentLevel - 1); } catch { }
+                try { bullet = (int)paragraph.ParagraphFormat.Bullet.Visible == MsoTrue; } catch { }
+                result.Add(new MarkdownParagraph(text, indent, bullet));
+            }
+        }
+        catch { }
+        return result;
+    }
+
+    private static string FindMarkdownTitle(IReadOnlyList<MarkdownPart> parts, int slideIndex)
+    {
+        var candidate = parts
+            .Where(p => p.Paragraphs is { Count: > 0 })
+            .OrderBy(p => p.Top).ThenBy(p => p.Left)
+            .SelectMany(p => p.Paragraphs!)
+            .Select(p => p.Text)
+            .FirstOrDefault(text => text.Length > 2 && !Regex.IsMatch(text, @"^(No\.\s*\d+|\d+)$", RegexOptions.IgnoreCase));
+        return candidate ?? $"슬라이드 {slideIndex}";
+    }
+
+    private static void AppendMarkdownParts(StringBuilder markdown, IReadOnlyList<MarkdownPart> parts, string title)
+    {
+        string? pendingNumber = null;
+        var pendingHeading = new List<string>();
+        bool skippedTitle = false;
+
+        void FlushHeading()
+        {
+            if (pendingNumber is null) return;
+            var heading = string.Join(" ", pendingHeading).Trim();
+            markdown.AppendLine(string.IsNullOrWhiteSpace(heading)
+                ? $"### {EscapeMarkdown(pendingNumber)}"
+                : $"### {EscapeMarkdown(pendingNumber)}. {EscapeMarkdown(heading)}");
+            markdown.AppendLine();
+            pendingNumber = null;
+            pendingHeading.Clear();
+        }
+
+        foreach (var part in parts)
+        {
+            if (part.Table is { Count: > 0 } table)
+            {
+                FlushHeading();
+                int columns = table.Max(row => row.Count);
+                var normalized = table.Select(row => row.Concat(Enumerable.Repeat("", columns - row.Count)).ToList()).ToList();
+                markdown.AppendLine("| " + string.Join(" | ", normalized[0]) + " |");
+                markdown.AppendLine("| " + string.Join(" | ", Enumerable.Repeat("---", columns)) + " |");
+                foreach (var row in normalized.Skip(1)) markdown.AppendLine("| " + string.Join(" | ", row) + " |");
+                markdown.AppendLine();
+                continue;
+            }
+            if (part.Paragraphs is null) continue;
+            foreach (var paragraph in part.Paragraphs)
+            {
+                var text = paragraph.Text;
+                if (!skippedTitle && string.Equals(text, title, StringComparison.Ordinal))
+                {
+                    skippedTitle = true;
+                    continue;
+                }
+                if (Regex.IsMatch(text, @"^No\.\s*\d+", RegexOptions.IgnoreCase))
+                {
+                    FlushHeading();
+                    pendingNumber = text;
+                    continue;
+                }
+                if (pendingNumber is not null && !IsCardSectionLabel(text))
+                {
+                    pendingHeading.Add(text);
+                    continue;
+                }
+                FlushHeading();
+                // 카드 순번은 No. 표기와 중복되므로 본문에서는 생략한다.
+                if (Regex.IsMatch(text, @"^\d{1,2}$")) continue;
+                string indentation = new(' ', paragraph.Indent * 2);
+                markdown.AppendLine($"{indentation}- {EscapeMarkdown(text)}");
+            }
+            markdown.AppendLine();
+        }
+        FlushHeading();
+    }
+
+    private static bool IsCardSectionLabel(string text)
+        => text.Trim() is "문제점" or "도출 성과물" or "추진 내용" or "핵심 내용" or "기대효과" or "기대 효과";
+
+    private static string EscapeMarkdown(string value)
+        => value.Replace("\\", "\\\\").Replace("*", "\\*").Replace("_", "\\_").Replace("[", "\\[").Replace("]", "\\]");
 
     // ── AutoFit (상세 결과 반환) ──────────────────────────────────
 
