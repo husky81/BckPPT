@@ -37,6 +37,27 @@ public class GitokyLlmProtocolTests
     }
 
     [Fact]
+    public void 병렬_도구_호출은_호출과_결과를_번갈아_풀어_보낸다()
+    {
+        var request = new LlmRequest(
+        [
+            LlmMessage.User("두 쪽 복제"),
+            LlmMessage.Assistant("복제합니다", [new LlmToolCall("a", "duplicate_slide", "{}"), new LlmToolCall("b", "duplicate_slide", "{}")]),
+            LlmMessage.Tool("a", "35쪽"),
+            LlmMessage.Tool("b", "36쪽"),
+        ]);
+
+        var messages = GitokyLlmClient.BuildPayload(request, "agent", stream: false)["messages"]!.AsArray();
+
+        Assert.Equal(["user", "assistant", "tool", "assistant", "tool"], messages.Select(m => (string)m!["role"]!));
+        Assert.Equal("a", (string?)messages[1]!["tool_calls"]![0]!["id"]);
+        Assert.Equal("a", (string?)messages[2]!["tool_call_id"]);
+        Assert.Equal("b", (string?)messages[3]!["tool_calls"]![0]!["id"]);
+        Assert.Equal("", (string?)messages[3]!["content"]);
+        Assert.Equal("36쪽", (string?)messages[4]!["content"]);
+    }
+
+    [Fact]
     public void 도구가_없으면_tools를_넣지_않는다()
     {
         var payload = GitokyLlmClient.BuildPayload(new LlmRequest([LlmMessage.User("hi")]), "auto", stream: true);

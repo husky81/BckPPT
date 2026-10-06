@@ -126,10 +126,46 @@ public sealed class GitokyLlmClient : ILlmClient, IDisposable
     }
 
     /// <summary>요청 본문. 도구·도구 결과·이미지 파트는 있을 때만 넣는다.</summary>
+    /// <summary>
+    /// 한 assistant 메시지에 도구 호출이 여러 개면 "호출1, 결과1, 호출2, 결과2"로 풀어 보낸다.
+    /// gitoky(Bedrock 변환)는 병렬 호출 뒤 도구 결과가 연달아 오는 요청을 upstream_rejected로 거부한다
+    /// (2026-10-06 실측, 호출 하나씩 풀면 통과). 의미는 같고 형식만 바뀐다.
+    /// </summary>
+    public static IReadOnlyList<LlmMessage> InterleaveParallelToolCalls(IReadOnlyList<LlmMessage> messages)
+    {
+        var result = new List<LlmMessage>(messages.Count);
+        for (int i = 0; i < messages.Count; i++)
+        {
+            var m = messages[i];
+            if (m.Role != "assistant" || m.ToolCalls is not { Count: > 1 } calls)
+            {
+                result.Add(m);
+                continue;
+            }
+            // 바로 뒤에 이어지는 도구 결과를 호출 Id로 짝짓는다.
+            var answers = new Dictionary<string, LlmMessage>();
+            int j = i + 1;
+            for (; j < messages.Count && messages[j].Role == "tool"; j++)
+                if (messages[j].ToolCallId is { } id) answers[id] = messages[j];
+            if (calls.Any(c => !answers.ContainsKey(c.Id)))
+            {
+                result.Add(m);   // 결과가 아직 없는(마지막) 호출은 그대로 둔다
+                continue;
+            }
+            for (int k = 0; k < calls.Count; k++)
+            {
+                result.Add(m with { Content = k == 0 ? m.Content : "", ToolCalls = [calls[k]] });
+                result.Add(answers[calls[k].Id]);
+            }
+            i = j - 1;
+        }
+        return result;
+    }
+
     public static JsonObject BuildPayload(LlmRequest request, string defaultModel, bool stream)
     {
         var messages = new JsonArray();
-        foreach (var m in request.Messages)
+        foreach (var m in InterleaveParallelToolCalls(request.Messages))
         {
             var node = new JsonObject { ["role"] = m.Role };
             if (m.ImageDataUrls is { Count: > 0 } images)
