@@ -42,6 +42,12 @@ public sealed class AgentToolContext(IPptComService ppt, string workingPath)
     /// </summary>
     public string? BaselinePath { get; init; }
 
+    /// <summary>열린 PowerPoint 창에서 바로 작업 중. 이번 작업에서 만든 쪽과 사용자가 요청에 적은 쪽만 고친다.</summary>
+    public bool InPlace { get; init; }
+
+    /// <summary>바로 작업 중 고쳐도 되는 원래 쪽 번호(현재 요청에 사용자가 적은 쪽).</summary>
+    public IReadOnlySet<int> PermittedOriginalSlides { get; set; } = new HashSet<int>();
+
     /// <summary>세션 중 추가한 도형 (슬라이드, 주소). 겹침 판정 대상.</summary>
     public HashSet<(int Slide, string Address)> AddedShapes { get; } = new();
 
@@ -138,6 +144,12 @@ public static class ToolArgs
         if (v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out var i)) return i;
         if (v.ValueKind == JsonValueKind.String && int.TryParse(v.GetString(), out i)) return i;
         throw new AgentToolException($"인자 '{name}'는 정수여야 합니다.");
+    }
+
+    /// <summary>정수가 아니거나 없으면 null(예외 없음). 검사용.</summary>
+    public static int? OptionalIntOrNull(JsonElement args, string name)
+    {
+        try { return OptionalInt(args, name); } catch (AgentToolException) { return null; }
     }
 
     public static float? OptionalFloat(JsonElement args, string name)

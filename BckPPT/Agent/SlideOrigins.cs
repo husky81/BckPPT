@@ -18,6 +18,9 @@ public sealed class SlideOrigins
 
     public void MarkTouched(int slide) => _touched.Add(slide);
 
+    /// <summary>이번 세션에서 복제해 새로 만든 쪽인지.</summary>
+    public bool IsCreated(int slide) => _origins.ContainsKey(slide);
+
     /// <summary>
     /// 작업 사본의 슬라이드가 원본에서 몇 번이었는지. 세션에서 새로 생긴 슬라이드는 복제 원본의 원래 번호다.
     /// 적용 전 미리보기를 원본에서 렌더할 때 쓴다.

@@ -18,6 +18,7 @@ public static class AgentPrompts
         - 상자 문구를 통째로 바꿀 때는 set_paragraphs, 일부 낱말만 바꿀 때(서식이 섞인 제목 등)는 replace_text를 쓴다.
         - 한 번에 도구 여러 개를 불러도 된다. 다만 결과를 봐야 정할 수 있는 것은 결과를 본 뒤에 부른다.
         - "공백줄·빈 줄 삭제"는 글 상자 안의 빈 문단(줄)을 지우라는 뜻이다. 되묻지 말고 remove_blank_lines(from_slide, to_slide)를 부른다.
+        - 열린 PowerPoint에서 바로 작업할 때는 새로 만든 쪽(복제·빈 쪽)만 고친다. 기존 쪽을 고치라는 도구 오류가 나면 새 쪽을 만들어 한다.
         - 일정 md로 일정표·추진일정을 그리는 요청은 draw_schedule 한 번으로 한다(새 쪽이면 template_slide와 after, 양식은 style).
           도형을 하나씩 그리지 않는다. 새 빈 쪽이 필요하면 new_blank_slide, 그룹을 통째로 지울 때는 delete_shape에 그룹 이름을 준다.
 
@@ -69,12 +70,13 @@ public static class AgentFactory
         new(llm, CreateRegistry(includeSources), (loopOptions ?? new AgentLoopOptions()) with { Model = options?.AgentModel });
 
     public static AgentSession StartSession(
-        ILlmClient llm, GitokyLlmOptions? options, IPptComService ppt, string sourcePath, ISourceLibrary? sources = null) =>
+        ILlmClient llm, GitokyLlmOptions? options, IPptComService ppt, string sourcePath, ISourceLibrary? sources = null,
+        bool inPlace = false) =>
         AgentSession.Start(ppt, sourcePath, AgentPrompts.System,
             describeImage: options is null ? null : (png, question, ct) => DescribeImageAsync(llm, options.VisionModel, png, question, ct),
             summarize: (instruction, content, ct) => SummarizeAsync(llm, options?.AgentModel, instruction, content, ct),
             write: (instruction, content, ct) => SummarizeAsync(llm, options?.WriterModel ?? options?.AgentModel, instruction, content, ct, 4000),
-            sources: sources);
+            sources: sources, inPlace: inPlace);
 
     /// <summary>
     /// 원문 발췌를 주 대화와 따로 요약한다(Claude Code가 하위 에이전트로 원문을 읽던 방식).

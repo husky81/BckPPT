@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using BckPPT.Services;
 using BckPPT.Agent.Tools;
 using BckPPT.Models;
 using BckPPT.PowerPoint;
@@ -347,7 +348,7 @@ public sealed class CardPipeline(AgentToolContext ctx)
         {
             try { await Task.Run(() => ctx.Ppt.RenameShape(ctx.WorkingPath, slide, CardLayoutAnalyzer.Addr(shape), name), ct); }
             catch (OperationCanceledException) { throw; }
-            catch { /* 이름은 편의일 뿐이라 실패해도 계속한다. */ }
+            catch (Exception ex) when (ex is not PptUserInterventionException) { /* 이름은 편의일 뿐이라 실패해도 계속한다. */ }
         }
         return filled;
     }
@@ -450,7 +451,7 @@ public sealed class CardPipeline(AgentToolContext ctx)
                     fixedCount++;
                 }
                 catch (OperationCanceledException) { throw; }
-                catch (Exception ex) { report.Append($"길이 맞춤 실패 {f.Slide}쪽 {f.Address}: {ex.Message}\n"); }
+                catch (Exception ex) when (ex is not PptUserInterventionException) { report.Append($"길이 맞춤 실패 {f.Slide}쪽 {f.Address}: {ex.Message}\n"); }
             }
         }
         report.Append($"길이 맞춤 {fixedCount}회\n");
@@ -493,7 +494,7 @@ public sealed class CardPipeline(AgentToolContext ctx)
             {
                 try { templateSpacing.Add((await Task.Run(() => ctx.Ppt.GetTextFormat(ctx.WorkingPath, _templateSlide, CardLayoutAnalyzer.Addr(body)), ct)).Spacing); }
                 catch (OperationCanceledException) { throw; }
-                catch { }
+                catch (Exception ex) when (ex is not PptUserInterventionException) { }
             }
             var groups = templateSpacing.GroupBy(x => x).OrderByDescending(g => g.Count()).ToList();
             if (groups.Count < 2 || groups[0].Count() == groups[1].Count()) continue;   // 과반이 없으면 손대지 않는다

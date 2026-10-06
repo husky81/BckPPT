@@ -113,6 +113,7 @@ public sealed class FakePptComService : IPptComService
 
     public int DuplicateSlide(string presentationPath, int sourceSlideIndex, int insertAfterSlideIndex)
     {
+        ThrowIfEditing();
         Calls.Add($"duplicate {sourceSlideIndex} after {insertAfterSlideIndex}");
         Slides.Insert(insertAfterSlideIndex, Slide(sourceSlideIndex).Select(s => s.Clone()).ToList());
         return insertAfterSlideIndex + 1;
@@ -120,6 +121,7 @@ public sealed class FakePptComService : IPptComService
 
     public ParagraphEditResult SetParagraphTexts(string presentationPath, IReadOnlyList<ParagraphEdit> edits, bool markRed)
     {
+        ThrowIfEditing();
         // 실제 구현과 같은 순서: 교체는 앞에서부터, 삭제·삽입은 큰 인덱스부터(같은 인덱스는 나열 순서).
         var ordered = edits.Where(e => e.Kind == ParagraphEditKind.Replace).OrderBy(e => e.ParagraphIndex)
             .Concat(edits.Where(e => e.Kind != ParagraphEditKind.Replace).OrderByDescending(e => e.ParagraphIndex));
@@ -255,6 +257,19 @@ public sealed class FakePptComService : IPptComService
     public void NavigateToSlide(string presentationPath, int slideIndex) => throw new NotSupportedException();
     public void OpenPptxInPowerPoint(string filePath) => throw new NotSupportedException();
     public IDisposable KeepOpen(string presentationPath, bool readOnly) => new MemoryStream();
+
+    /// <summary>대상 문서가 PowerPoint 창에 열려 있는 것으로 볼지.</summary>
+    public bool OpenInWindow { get; set; }
+    /// <summary>true면 쓰기 도구가 사용자 조작으로 멈춘다.</summary>
+    public bool UserIsEditing { get; set; }
+    public bool IsOpenInWindow(string presentationPath) => OpenInWindow;
+    public IDisposable WatchUserActivity(string presentationPath)
+    {
+        Calls.Add($"watch {Path.GetFileName(presentationPath)}");
+        return new MemoryStream();
+    }
+    private void ThrowIfEditing() { if (UserIsEditing) throw new PptUserInterventionException(); }
+    public void ClearSelection(string presentationPath) { Calls.Add("clear_selection"); UserIsEditing = false; }
     public IReadOnlyList<(int Index, string Title)> ListSlides(string presentationPath) =>
         Slides.Select((s, i) => (i + 1, s.FirstOrDefault()?.Paragraphs.FirstOrDefault() ?? "")).ToList();
     public int ReplaceText(string presentationPath, string find, string replace, IReadOnlyList<(int slideIndex, string shapeName)>? targets = null) => throw new NotSupportedException();

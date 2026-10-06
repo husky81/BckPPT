@@ -106,3 +106,7 @@ public sealed class PptComTimeoutException(TimeSpan timeout, Exception? inner = 
     : TimeoutException($"PowerPoint COM 작업이 {timeout.TotalSeconds:0}초 안에 완료되지 않았습니다. 그 작업이 끝날 때까지 새 작업을 받지 않습니다.", inner);
 
 public sealed class PptComUnavailableException(string message) : InvalidOperationException(message);
+
+/// <summary>열린 PowerPoint에서 바로 작업하는 중에 사용자가 도형·글을 선택(편집)했다. 작업을 멈춘다.</summary>
+public sealed class PptUserInterventionException()
+    : Exception("PowerPoint에서 도형이나 글을 선택(편집)해 작업을 멈췄습니다. 조작을 마친 뒤 이어서 요청해 주세요.");

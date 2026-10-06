@@ -50,6 +50,7 @@ public class PptComService : IPptComService
     {
         var watch = Stopwatch.StartNew();
         try { return StaDispatcher.Instance.Invoke(func); }
+        catch (COMException ex) when (IsBusyRejection(ex)) { throw new PptUserInterventionException(); }
         finally { ReportIfSlow(caller, watch.Elapsed); }
     }
 
@@ -57,7 +58,15 @@ public class PptComService : IPptComService
     {
         var watch = Stopwatch.StartNew();
         try { StaDispatcher.Instance.Invoke(action); }
+        catch (COMException ex) when (IsBusyRejection(ex)) { throw new PptUserInterventionException(); }
         finally { ReportIfSlow(caller, watch.Elapsed); }
+    }
+
+    /// <summary>사용자가 글을 고치는 중이면 PowerPoint가 호출을 거절한다(RPC_E_CALL_REJECTED·SERVERCALL_RETRYLATER).</summary>
+    private static bool IsBusyRejection(COMException ex)
+    {
+        lock (Watched) if (Watched.Count == 0) return false;
+        return (uint)ex.HResult is 0x80010001 or 0x8001010A;
     }
 
     /// <summary>
@@ -914,6 +923,67 @@ public class PptComService : IPptComService
         return new OpenHandle(opened ? presentationPath : null);
     }
 
+    /// <summary>열린 창에서 바로 작업 중인 문서. 저장하지 않고, 쓰기 전마다 사용자 조작을 확인한다.</summary>
+    private static readonly HashSet<string> Watched = new(StringComparer.OrdinalIgnoreCase);
+
+    private static bool IsWatched(dynamic prs)
+    {
+        string path = "";
+        try { path = (string)prs.FullName; } catch { }
+        lock (Watched) return Watched.Contains(path);
+    }
+
+    /// <summary>
+    /// 사용자가 도형·글을 선택했으면 멈춘다. 쪽 이동(축소판 선택)은 괜찮다.
+    /// 작업은 선택을 바꾸지 않으므로(도형 추가·복제는 선택하지 않는다) 선택이 생겼다면 사용자가 한 것이다.
+    /// </summary>
+    private static void CheckUserActivity(dynamic prs)
+    {
+        if (!IsWatched(prs)) return;
+        int type = 0;
+        try { if ((int)prs.Windows.Count > 0) type = (int)prs.Windows[1].Selection.Type; } catch { return; }
+        if (type is 2 or 3) throw new PptUserInterventionException();   // ppSelectionShapes, ppSelectionText
+    }
+
+    public bool IsOpenInWindow(string presentationPath)
+        => RunOnSta(() =>
+        {
+            if (TryGetActiveInstance() is not { } app || FindOpenPresentation(app, presentationPath) is not { } prs) return false;
+            return (int)prs.Windows.Count > 0;
+        });
+
+    public IDisposable WatchUserActivity(string presentationPath)
+    {
+        string path = Path.GetFullPath(presentationPath);
+        // 시작할 때 남아 있던 선택은 사용자가 이번 작업 중에 한 것이 아니므로 풀어 둔다.
+        ClearSelection(path);
+        lock (Watched) Watched.Add(path);
+        return new WatchHandle(path);
+    }
+
+    public void ClearSelection(string presentationPath)
+        => RunOnSta(() =>
+        {
+            if (TryGetActiveInstance() is { } app && FindOpenPresentation(app, presentationPath) is { } prs && (int)prs.Windows.Count > 0)
+                try { prs.Windows[1].Selection.Unselect(); } catch { }
+        });
+
+    private sealed class WatchHandle(string path) : IDisposable
+    {
+        private string? _path = path;
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _path, null) is { } p) lock (Watched) Watched.Remove(p);
+        }
+    }
+
+    /// <summary>바로 작업 중이면 새로 만든 쪽을 화면에 띄워 개체가 추가되는 것을 보게 한다.</summary>
+    private static void ShowIfWatched(dynamic prs, int slideIndex)
+    {
+        if (!IsWatched(prs)) return;
+        try { if ((int)prs.Windows.Count > 0) prs.Windows[1].View.GotoSlide(slideIndex); } catch { }
+    }
+
     /// <summary>이 프로세스가 KeepOpen으로 열어 둔 문서(읽기 전용 포함). 정리할 때 건드리지 않는다.</summary>
     private static readonly HashSet<string> HeldOpen = new(StringComparer.OrdinalIgnoreCase);
 
@@ -958,6 +1028,8 @@ public class PptComService : IPptComService
 
     private static void SaveUnlessKept(dynamic prs)
     {
+        // 바로 작업 중인 문서는 저장하지 않는다(저장은 사용자가 한다). 작업 뒤에도 사용자 조작을 확인한다.
+        if (IsWatched(prs)) { CheckUserActivity(prs); return; }
         string path = "";
         try { path = (string)prs.FullName; } catch { }
         lock (KeptOpen) if (KeptOpen.Contains(path)) return;
@@ -1368,6 +1440,7 @@ public class PptComService : IPptComService
                 prs = pptApp.Presentations.Open(presentationPath, MsoFalse, MsoFalse, MsoFalse);
             try
             {
+                CheckUserActivity(prs!);
                 // 도형 단위로 묶어 Presentations.Open/Save를 한 번만 타게 한다.
                 foreach (var group in edits.GroupBy(e => (e.SlideIndex, e.ShapeName)))
                 {
@@ -1577,9 +1650,11 @@ public class PptComService : IPptComService
                     throw new ArgumentOutOfRangeException(nameof(sourceSlideIndex));
                 if (insertAfterSlideIndex < 0 || insertAfterSlideIndex > slideCount)
                     throw new ArgumentOutOfRangeException(nameof(insertAfterSlideIndex));
+                CheckUserActivity(prs);
                 dynamic duplicated = prs.Slides[sourceSlideIndex].Duplicate();
                 int targetIndex = insertAfterSlideIndex + 1;
                 duplicated.MoveTo(targetIndex);
+                ShowIfWatched(prs, targetIndex);
                 SaveUnlessKept(prs);
                 return targetIndex;
             }
@@ -1631,6 +1706,7 @@ public class PptComService : IPptComService
                 prs = pptApp.Presentations.Open(presentationPath, save ? MsoFalse : MsoTrue, MsoFalse, MsoFalse);
             try
             {
+                if (save) CheckUserActivity(prs!);
                 T result = work(prs!.Slides[slideIndex]);
                 if (save) SaveUnlessKept(prs);
                 return result;

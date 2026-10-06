@@ -8,8 +8,10 @@ using BckPPT.Services;
 namespace BckPPT.Agent;
 
 /// <summary>
-/// 한 대상 PPT에 대한 에이전트 작업. 시작할 때 작업 사본을 만들고 모든 도구는 그 사본만 고친다.
-/// 승인하면 원본 옆에 결과 사본으로 남기고, 거절하면 작업 사본을 지운다. 원본은 어느 쪽이든 그대로다.
+/// 한 대상 PPT에 대한 에이전트 작업. 두 방식이 있다.
+/// - 작업 사본: 사본을 만들어 고치고, 승인하면 원본 옆 결과 사본으로 남기고 거절하면 사본을 지운다. 원본은 그대로다.
+/// - 바로 작업(<see cref="InPlace"/>): 사용자가 PowerPoint 창에 열어 둔 문서를 그 자리에서 고친다. 새로 만든 쪽만 고치고,
+///   저장·삭제는 하지 않는다(사용자가 한다). 판정 기준은 시작할 때 디스크의 파일을 복사해 둔 기준본이다.
 /// </summary>
 public sealed class AgentSession : IDisposable
 {
@@ -34,6 +36,9 @@ public sealed class AgentSession : IDisposable
     public List<LlmMessage> Messages => _messages;
     public string? ResultPath { get; private set; }
 
+    /// <summary>열린 PowerPoint 창에서 바로 작업한다. 작업 파일이 곧 원본이다.</summary>
+    public bool InPlace { get; private init; }
+
     /// <summary>작업 사본에서 뺀 편집 제한 내장 글꼴. 결과 파일에서는 설치된 글꼴로 대체되어 보인다.</summary>
     public IReadOnlyList<RestrictedFontRemover.RemovedFont> RemovedFonts { get; private init; } = [];
 
@@ -49,7 +54,8 @@ public sealed class AgentSession : IDisposable
         Func<string, string, CancellationToken, Task<string>>? describeImage = null,
         Func<string, string, CancellationToken, Task<string>>? summarize = null,
         Func<string, string, CancellationToken, Task<string>>? write = null,
-        ISourceLibrary? sources = null)
+        ISourceLibrary? sources = null,
+        bool inPlace = false)
     {
         sourcePath = Path.GetFullPath(sourcePath);
         if (!File.Exists(sourcePath)) throw new FileNotFoundException("대상 PPT 파일을 찾을 수 없습니다.", sourcePath);
@@ -60,33 +66,56 @@ public sealed class AgentSession : IDisposable
         try { orphans = ppt.CloseOrphanedPresentations(workDirectory, [sourcePath]); }
         catch { /* 정리는 보조 작업이다. 실패해도 새 작업은 시작한다. */ }
         var stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
-        var workingPath = Path.Combine(workDirectory,
-            $"{Path.GetFileNameWithoutExtension(sourcePath)}_작업_{stamp}_{Guid.NewGuid().ToString("N")[..6]}{Path.GetExtension(sourcePath)}");
-        File.Copy(sourcePath, workingPath, overwrite: false);
-        // 편집을 막는 내장 글꼴(미리 보기·인쇄 전용)이 있으면 작업 사본에서만 뺀다. 없으면 PowerPoint가 읽기 전용으로 연다.
+        var suffix = Guid.NewGuid().ToString("N")[..6];
+        string workingPath, baselinePath;
         IReadOnlyList<RestrictedFontRemover.RemovedFont> removedFonts = [];
-        try { removedFonts = RestrictedFontRemover.Remove(workingPath); }
-        catch { /* 판정할 수 없는 파일이면 그대로 두고 PowerPoint에 맡긴다. */ }
+        if (inPlace)
+        {
+            // 열린 창의 문서를 그대로 고친다. 줄 수 판정은 디스크의 파일(마지막 저장본)을 복사한 기준본과 비교한다.
+            workingPath = sourcePath;
+            baselinePath = Path.Combine(workDirectory,
+                $"{Path.GetFileNameWithoutExtension(sourcePath)}_기준_{stamp}_{suffix}{Path.GetExtension(sourcePath)}");
+            File.Copy(sourcePath, baselinePath, overwrite: false);
+        }
+        else
+        {
+            workingPath = Path.Combine(workDirectory,
+                $"{Path.GetFileNameWithoutExtension(sourcePath)}_작업_{stamp}_{suffix}{Path.GetExtension(sourcePath)}");
+            File.Copy(sourcePath, workingPath, overwrite: false);
+            baselinePath = sourcePath;
+            // 편집을 막는 내장 글꼴(미리 보기·인쇄 전용)이 있으면 작업 사본에서만 뺀다. 없으면 PowerPoint가 읽기 전용으로 연다.
+            try { removedFonts = RestrictedFontRemover.Remove(workingPath); }
+            catch { /* 판정할 수 없는 파일이면 그대로 두고 PowerPoint에 맡긴다. */ }
+        }
 
         var context = new AgentToolContext(ppt, workingPath)
         {
-            DescribeImage = describeImage, Summarize = summarize, Write = write, Sources = sources, BaselinePath = sourcePath
+            DescribeImage = describeImage, Summarize = summarize, Write = write, Sources = sources, BaselinePath = baselinePath,
+            InPlace = inPlace
         };
         var log = new AgentSessionLog(Path.Combine(logDirectory ?? DefaultLogDirectory, $"{stamp}_{Path.GetFileNameWithoutExtension(workingPath)}.jsonl"));
-        var session = new AgentSession(sourcePath, workingPath, context, log) { RemovedFonts = removedFonts };
+        var session = new AgentSession(sourcePath, workingPath, context, log) { RemovedFonts = removedFonts, InPlace = inPlace };
         if (removedFonts.Count > 0)
             log.Write("restricted_fonts_removed", removedFonts.Select(f => $"{f.Typeface} ({f.Style}, fsType 0x{f.FsType:X4})"));
         // 세션 동안 작업 사본과 원본(판정 기준)을 열어 둔다. 31MB 착수보고 PPT에서 도구마다 열고 닫으면 너무 느리다.
         try
         {
-            session._openHandles.Add(ppt.KeepOpen(workingPath, readOnly: false));
-            session._openHandles.Add(ppt.KeepOpen(sourcePath, readOnly: true));
+            if (inPlace)
+            {
+                session._openHandles.Add(ppt.WatchUserActivity(workingPath));
+                session._openHandles.Add(ppt.KeepOpen(baselinePath, readOnly: true));
+            }
+            else
+            {
+                session._openHandles.Add(ppt.KeepOpen(workingPath, readOnly: false));
+                session._openHandles.Add(ppt.KeepOpen(sourcePath, readOnly: true));
+            }
         }
         catch (Exception ex) { log.Write("keep_open_failed", new { ex.Message }); }
         if (orphans.Count > 0) log.Write("closed_orphans", orphans);
         session._slowCallHandler = (caller, elapsed) => log.Write("slow_com", new { caller, seconds = Math.Round(elapsed.TotalSeconds, 1) });
         PptComService.SlowCall += session._slowCallHandler;
-        log.Write("start", new { source = sourcePath, working = workingPath });
+        log.Write("start", new { source = sourcePath, working = workingPath, inPlace, baseline = baselinePath });
         session.Append(LlmMessage.System(systemPrompt));
         return session;
     }
@@ -135,6 +164,15 @@ public sealed class AgentSession : IDisposable
     public string Approve()
     {
         if (ResultPath is not null) return ResultPath;
+        if (InPlace)
+        {
+            // 바로 작업은 결과 사본이 없다. 저장은 사용자가 PowerPoint에서 한다.
+            ReleaseOpenDocuments();
+            DeleteBaseline();
+            ResultPath = SourcePath;
+            Log.Write("approve", new { result = SourcePath, inPlace = true });
+            return SourcePath;
+        }
         ReleaseOpenDocuments();   // 열린 채로는 복사가 막힐 수 있다
         var directory = Path.GetDirectoryName(SourcePath)!;
         var stem = Path.Combine(directory, $"{Path.GetFileNameWithoutExtension(SourcePath)}_BckPPT_{DateTime.Now:yyyyMMdd_HHmmss}");
@@ -150,9 +188,17 @@ public sealed class AgentSession : IDisposable
     /// <summary>작업 사본을 버린다. 확정한 결과 파일은 남긴다.</summary>
     public void Discard()
     {
-        Log.Write("discard", new { });
+        Log.Write("discard", new { InPlace });
         ReleaseOpenDocuments();
+        // 바로 작업이면 작업 파일이 곧 원본이다. 절대 지우지 않는다(추가된 쪽도 사용자가 직접 지운다).
+        if (InPlace) { DeleteBaseline(); return; }
         try { if (File.Exists(WorkingPath)) File.Delete(WorkingPath); } catch { }
+    }
+
+    private void DeleteBaseline()
+    {
+        if (Context.BaselinePath is not { } baseline || string.Equals(baseline, SourcePath, StringComparison.OrdinalIgnoreCase)) return;
+        try { if (File.Exists(baseline)) File.Delete(baseline); } catch { }
     }
 
     private void ReleaseOpenDocuments()

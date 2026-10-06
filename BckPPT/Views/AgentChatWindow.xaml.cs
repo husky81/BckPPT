@@ -74,6 +74,17 @@ public partial class AgentChatWindow : Window, INotifyPropertyChanged
         set { _agentWorkflow.ExternalWriting = value; PptRules.Current.ExternalCardWriting = value; PptRules.Current.Save(); Notify(); }
     }
 
+    public bool WorkInOpenWindow
+    {
+        get => _agentWorkflow.PreferInPlace;
+        set { _agentWorkflow.PreferInPlace = value; PptRules.Current.WorkInOpenWindow = value; PptRules.Current.Save(); Notify(); }
+    }
+
+    private bool InPlaceSession => _agentWorkflow.Session?.InPlace == true;
+    public string ApproveLabel => InPlaceSession ? "작업 마침" : "결과 저장";
+    public string DiscardLabel => InPlaceSession ? "대화 끝내기" : "작업 버리기";
+    public Visibility OpenWorkingCopyVisibility => InPlaceSession ? Visibility.Collapsed : Visibility.Visible;
+
     public bool LlmFit
     {
         get => _agentWorkflow.LlmFit;
@@ -100,6 +111,7 @@ public partial class AgentChatWindow : Window, INotifyPropertyChanged
         _agentWorkflow = agentWorkflow;
         _agentWorkflow.ExternalWriting = PptRules.Current.ExternalCardWriting;
         _agentWorkflow.LlmFit = PptRules.Current.LlmLengthFit;
+        _agentWorkflow.PreferInPlace = PptRules.Current.WorkInOpenWindow;
         _pptIndexer = pptIndexer;
         _externalJobs = externalJobs;
         _updateService = updateService;
@@ -249,6 +261,9 @@ public partial class AgentChatWindow : Window, INotifyPropertyChanged
         {
             _agentResult = await _agentWorkflow.RunAsync(target, instruction, progress, _requestCts.Token);
             var run = _agentResult.Run;
+            if (!continuing && InPlaceSession)
+                log.Append("\n(안내) 열린 PowerPoint 창에서 바로 작업했습니다. 새로 만든 쪽만 고쳤고 저장은 하지 않았습니다. " +
+                           "결과가 마음에 들면 PowerPoint에서 저장하고, 필요 없는 쪽은 직접 지워 주세요.\n");
             if (!continuing && _agentWorkflow.Session?.RemovedFonts is { Count: > 0 } fonts)
                 log.Append("\n(안내) 편집이 제한된 내장 글꼴 ")
                    .Append(string.Join(", ", fonts.Select(f => f.Typeface).Distinct()))
@@ -265,6 +280,7 @@ public partial class AgentChatWindow : Window, INotifyPropertyChanged
                 AgentStopReason.Finished or AgentStopReason.AnsweredWithoutTools =>
                     "완료 · 미리보기를 확인하고 '결과 저장' 또는 후속 요청을 해 주세요.",
                 AgentStopReason.TurnLimit => "턴 상한에 도달해 멈췄습니다 · 이어서 요청하거나 결과를 확인해 주세요.",
+                AgentStopReason.UserIntervened => "PowerPoint 조작을 감지해 멈췄습니다 · 조작을 마친 뒤 이어서 요청해 주세요.",
                 _ => "토큰 상한에 도달해 멈췄습니다."
             } + $" · {run.Turns}턴");
             if (_agentResult.UsageByModel is { Count: > 0 } byModel)
@@ -352,9 +368,18 @@ public partial class AgentChatWindow : Window, INotifyPropertyChanged
     {
         try
         {
+            bool inPlace = InPlaceSession;
             var result = _agentWorkflow.Approve();
-            ConversationText += $"\n\n저장함: {result}";
-            SetStatus("결과 사본을 저장했습니다 · 원본은 바뀌지 않았습니다. 다음 요청은 원본에서 새로 시작합니다.");
+            if (inPlace)
+            {
+                ConversationText += "\n\n작업을 마쳤습니다. 저장은 PowerPoint에서 해 주세요.";
+                SetStatus("작업을 마쳤습니다 · 바로 작업한 내용은 PowerPoint에서 저장해야 남습니다.");
+            }
+            else
+            {
+                ConversationText += $"\n\n저장함: {result}";
+                SetStatus("결과 사본을 저장했습니다 · 원본은 바뀌지 않았습니다. 다음 요청은 원본에서 새로 시작합니다.");
+            }
             _agentResult = null;
         }
         catch (Exception ex) { SetStatus($"저장 실패: {ex.Message} · PowerPoint에서 작업 사본을 닫고 다시 시도해 주세요."); }
@@ -374,10 +399,20 @@ public partial class AgentChatWindow : Window, INotifyPropertyChanged
 
     private void DiscardAgent_Click(object sender, RoutedEventArgs e)
     {
+        bool inPlace = InPlaceSession;
         _agentWorkflow.Discard();
         _agentResult = null;
-        ConversationText += "\n\n작업 사본을 버렸습니다.";
-        SetStatus("작업을 버렸습니다 · 원본은 그대로입니다.");
+        if (inPlace)
+        {
+            // 바로 작업은 아무것도 지우지 않는다. 추가된 쪽은 사용자가 PowerPoint에서 지운다.
+            ConversationText += "\n\n대화를 끝냈습니다. 추가된 쪽은 PowerPoint에 그대로 있습니다(필요 없으면 직접 지워 주세요).";
+            SetStatus("대화를 끝냈습니다 · BckPPT는 쪽을 지우지 않습니다.");
+        }
+        else
+        {
+            ConversationText += "\n\n작업 사본을 버렸습니다.";
+            SetStatus("작업을 버렸습니다 · 원본은 그대로입니다.");
+        }
         NotifyJobState();
     }
 
@@ -568,6 +603,9 @@ public partial class AgentChatWindow : Window, INotifyPropertyChanged
         Notify(nameof(ResultImagesVisibility));
         Notify(nameof(AgentControlsVisibility));
         Notify(nameof(PendingVisibility));
+        Notify(nameof(ApproveLabel));
+        Notify(nameof(DiscardLabel));
+        Notify(nameof(OpenWorkingCopyVisibility));
     }
 
     private static string FormatValidation(BckPPT.PowerPoint.LayoutValidationResult? result)

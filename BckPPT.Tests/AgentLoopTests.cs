@@ -34,6 +34,81 @@ public sealed class AgentLoopTests : IDisposable
     private static AgentLoop Loop(ILlmClient llm, AgentLoopOptions? options = null) =>
         new(llm, AgentFactory.CreateRegistry(includeSources: false), options ?? new AgentLoopOptions());
 
+    private AgentSession StartInPlace()
+    {
+        var session = AgentSession.Start(_ppt, _source, AgentPrompts.System,
+            workDirectory: Path.Combine(_dir, "work"), logDirectory: Path.Combine(_dir, "logs"), inPlace: true);
+        // 바로 작업은 작업 파일이 곧 원본이고, 판정 기준은 시작할 때 복사한 기준본이다.
+        _ppt.SnapshotOriginal(session.Context.BaselinePath!);
+        return session;
+    }
+
+    [Fact]
+    public void 바로_작업은_원본을_그대로_쓰고_끝내도_원본을_지우지_않는다()
+    {
+        var session = StartInPlace();
+        Assert.True(session.InPlace);
+        Assert.Equal(_source, session.WorkingPath);                                      // 작업 사본 없음
+        Assert.Contains(_ppt.Calls, c => c == "watch 착수보고.pptx");
+        var baseline = session.Context.BaselinePath!;
+        Assert.NotEqual(_source, baseline);
+        Assert.True(File.Exists(baseline));                                              // 판정 기준본은 따로 복사
+
+        session.Discard();
+        session.Dispose();
+
+        Assert.True(File.Exists(_source));                                               // 원본은 절대 지우지 않는다
+        Assert.False(File.Exists(baseline));
+    }
+
+    [Fact]
+    public async Task 바로_작업은_새로_만든_쪽과_요청에_적은_쪽만_고친다()
+    {
+        var llm = new FakeLlmClient(
+            FakeLlmClient.Calls(("set_paragraphs", """{"slide": 1, "shape": "C1_rnd", "paragraphs": ["바꿈"]}""")),
+            FakeLlmClient.Calls(("duplicate_slide", """{"source": 1, "after": 1}""")),
+            FakeLlmClient.Calls(("set_paragraphs", """{"slide": 2, "shape": "C1_rnd", "paragraphs": ["새 쪽"]}""")),
+            FakeLlmClient.Calls(("finish", """{"summary": "끝"}""")));
+        using var session = StartInPlace();
+
+        var result = await Loop(llm).RunAsync(session, "카드 하나 더 만들어줘");
+
+        Assert.Equal(["기존 내용 1", "기존 내용 2"], _ppt.Slides[0][1].Paragraphs);          // 기존 1쪽은 막혔다
+        Assert.Contains("1쪽은 원래 있던 쪽이라 고치지 않습니다", session.Messages.First(m => m.Role == "tool").Content);
+        Assert.True(_ppt.Slides[1][1].Paragraphs.SequenceEqual(["새 쪽"]),
+            string.Join(" | ", session.Messages.Where(m => m.Role == "tool").Select(m => m.Content)));   // 새로 만든 쪽은 고친다
+
+        var allowed = new FakeLlmClient(
+            FakeLlmClient.Calls(("set_paragraphs", """{"slide": 1, "shape": "C1_rnd", "paragraphs": ["허락함"]}""")),
+            FakeLlmClient.Calls(("finish", """{"summary": "끝"}""")));
+        await Loop(allowed).RunAsync(session, "1쪽 연구개발 내용을 '허락함'으로 바꿔줘");
+        Assert.Equal(["허락함"], _ppt.Slides[0][1].Paragraphs);                              // 요청에 적은 쪽은 고친다
+    }
+
+    [Fact]
+    public async Task 바로_작업_중_사용자가_조작하면_멈춘다()
+    {
+        var llm = new FakeLlmClient(
+            FakeLlmClient.Calls(("duplicate_slide", """{"source": 1, "after": 1}""")),
+            FakeLlmClient.Calls(("finish", """{"summary": "끝"}""")));
+        using var session = StartInPlace();
+        _ppt.UserIsEditing = true;
+
+        var result = await Loop(llm).RunAsync(session, "1쪽을 복제해줘");
+
+        Assert.Equal(AgentStopReason.UserIntervened, result.Reason);
+        Assert.Equal(2, _ppt.Slides.Count);                                              // 복제하지 않았다(처음 2쪽)
+        Assert.Contains("멈췄습니다", result.Summary);
+    }
+
+    [Theory]
+    [InlineData("38~41쪽 공백줄 삭제해줘", new[] { 38, 39, 40, 41 })]
+    [InlineData("35쪽 카드 템플릿으로 37쪽 뒤에 넣어줘", new[] { 35, 37 })]
+    [InlineData("12, 14쪽 제목 바꿔줘", new[] { 12, 14 })]
+    [InlineData("카드 하나 더 만들어줘", new int[0])]
+    public void 요청에_적힌_쪽_번호를_읽는다(string request, int[] expected) =>
+        Assert.Equal(expected.Order(), AgentLoop.MentionedSlides(request).Order());
+
     [Fact]
     public void 새_작업은_끊긴_세션이_남긴_문서를_먼저_닫고_기록한다()
     {

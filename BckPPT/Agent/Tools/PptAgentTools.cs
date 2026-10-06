@@ -330,7 +330,7 @@ public static class PptAgentTools
             string shape = ToolArgs.String(item, "shape");
             try { sb.Append(await FillAsync(ctx, slide, shape, ParagraphFitPlanner.SplitPilcrows(ToolArgs.StringArray(item, "paragraphs")), ct)); }
             catch (OperationCanceledException) { throw; }
-            catch (Exception ex) { sb.Append($"{shape}: 오류 — {ex.GetBaseException().Message}\n"); }
+            catch (Exception ex) when (ex is not PptUserInterventionException) { sb.Append($"{shape}: 오류 — {ex.GetBaseException().Message}\n"); }
         }
         return sb.ToString();
     }
@@ -350,7 +350,7 @@ public static class PptAgentTools
                 done.Add($"{shape}→{name}");
             }
             catch (OperationCanceledException) { throw; }
-            catch (Exception ex) { failed.Add($"{shape}: {ex.GetBaseException().Message}"); }
+            catch (Exception ex) when (ex is not PptUserInterventionException) { failed.Add($"{shape}: {ex.GetBaseException().Message}"); }
         }
         if (done.Count > 0)
         {

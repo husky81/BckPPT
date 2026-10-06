@@ -1,3 +1,4 @@
+using BckPPT.Services;
 using BckPPT.Agent.Tools;
 using BckPPT.Llm;
 using BckPPT.PowerPoint;
@@ -35,7 +36,7 @@ public sealed record AgentLoopOptions
     public int NudgesWithoutFinish { get; init; } = 2;
 }
 
-public enum AgentStopReason { Finished, AnsweredWithoutTools, TurnLimit, TokenLimit }
+public enum AgentStopReason { Finished, AnsweredWithoutTools, TurnLimit, TokenLimit, UserIntervened }
 
 public sealed record AgentRunResult(
     AgentStopReason Reason,
@@ -78,6 +79,7 @@ public sealed class AgentLoop(ILlmClient llm, ToolRegistry tools, AgentLoopOptio
             .Select(m => m.Content).TakeLast(3).ToList();
         session.Context.UserRequest = earlier.Count == 0 ? userMessage
             : string.Join("\n", earlier.Select(e => "이전 요청: " + e)) + "\n현재 요청: " + userMessage;
+        session.Context.PermittedOriginalSlides = MentionedSlides(userMessage);
 
         for (int turn = 1; turn <= options.MaxTurns; turn++)
         {
@@ -129,7 +131,15 @@ public sealed class AgentLoop(ILlmClient llm, ToolRegistry tools, AgentLoopOptio
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 progress?.Report(new(AgentEventKind.ToolStarted, call.ArgumentsJson, call.Name));
-                var outcome = await tools.ExecuteAsync(session.Context, call, cancellationToken);
+                ToolOutcome outcome;
+                try { outcome = await tools.ExecuteAsync(session.Context, call, cancellationToken); }
+                catch (PptUserInterventionException ex)
+                {
+                    // 사용자가 PowerPoint를 만지는 중에는 더 진행하지 않는다. 레이아웃 검사도 COM을 부르므로 하지 않는다.
+                    session.Append(LlmMessage.Tool(call.Id, "중단: " + ex.Message));
+                    progress?.Report(new(AgentEventKind.ToolFinished, ex.Message, call.Name, true));
+                    return Result(AgentStopReason.UserIntervened, ex.Message, turn, runUsage, []);
+                }
                 var content = outcome.Content;
                 if (call.Name == "finish") finishIssues = null;   // 앞서 되돌려 보낸 판정은 이제 낡았다.
 
@@ -164,6 +174,24 @@ public sealed class AgentLoop(ILlmClient llm, ToolRegistry tools, AgentLoopOptio
             session.Log.Write("result", new { reason = reason.ToString(), summary = text, turns, issues = issues.Select(i => i.Message) });
             return new AgentRunResult(reason, text, turns, usage, issues);
         }
+    }
+
+    /// <summary>요청 문장에 적힌 쪽 번호("38쪽", "38~41쪽", "38-41 쪽", "38, 40쪽").</summary>
+    public static IReadOnlySet<int> MentionedSlides(string request)
+    {
+        var result = new HashSet<int>();
+        foreach (System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches(
+                     request, @"(\d{1,3})\s*(?:쪽|페이지|슬라이드)?\s*(?:~|-|–|부터)\s*(\d{1,3})\s*(?:쪽|페이지|슬라이드)"))
+            for (int s = int.Parse(m.Groups[1].Value); s <= int.Parse(m.Groups[2].Value) && s - int.Parse(m.Groups[1].Value) < 200; s++)
+                result.Add(s);
+        foreach (System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches(
+                     request, @"(\d{1,3})\s*(?:쪽|페이지|번\s*슬라이드)"))
+            result.Add(int.Parse(m.Groups[1].Value));
+        foreach (System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches(
+                     request, @"(\d{1,3})(?:\s*,\s*(\d{1,3}))+\s*(?:쪽|페이지)"))
+            foreach (var n in System.Text.RegularExpressions.Regex.Matches(m.Value, @"\d{1,3}").Select(x => int.Parse(x.Value)))
+                result.Add(n);
+        return result;
     }
 
     private Task<LlmCompletion> Ask(AgentSession session, IReadOnlyList<LlmToolDefinition> definitions, CancellationToken ct) =>

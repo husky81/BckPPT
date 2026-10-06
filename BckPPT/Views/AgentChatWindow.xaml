@@ -30,6 +30,9 @@
                         <CheckBox IsChecked="{Binding ExternalWriting}" Foreground="{StaticResource TextBr}" VerticalContentAlignment="Center"
                                   Content="카드 문안은 내 고급 모델로(요청문 복사·답 붙여넣기)"
                                   ToolTip="ChatGPT·Claude 등 사용하는 모델에 요청문을 붙여넣어 문안을 받습니다. gitoky 사용량이 크게 줄어듭니다"/>
+                        <CheckBox IsChecked="{Binding WorkInOpenWindow}" Foreground="{StaticResource TextBr}" VerticalContentAlignment="Center" Margin="0,0,16,0"
+                                  Content="열린 PowerPoint에서 바로 작업"
+                                  ToolTip="대상 PPT가 PowerPoint 창에 열려 있으면 그 창에서 새 쪽을 만들어 작업합니다. 작업 사본을 만들지 않고 저장도 하지 않습니다(저장은 직접). 작업 중 도형·글을 선택하면 멈춥니다"/>
                         <CheckBox IsChecked="{Binding LlmFit}" Foreground="{StaticResource TextBr}" VerticalContentAlignment="Center" Margin="16,0,0,0"
                                   Content="길이 맞춤에 LLM 사용"
                                   ToolTip="끄면 줄 수를 넘는 항목을 뒤에서부터 빼기만 합니다(gitoky 사용 없음)"/>
@@ -89,10 +92,12 @@
                         </DataTemplate></ItemsControl.ItemTemplate>
                     </ItemsControl>
                     <StackPanel Orientation="Horizontal" Margin="0,18,0,0" Visibility="{Binding AgentControlsVisibility}">
-                        <Button Content="결과 저장" Style="{StaticResource AccentBtn}" IsEnabled="{Binding CanSend}" Click="ApproveAgent_Click"
-                                ToolTip="작업 사본을 원본 옆에 새 파일로 저장합니다. 원본은 바뀌지 않습니다"/>
-                        <Button Content="결과 열어 보기" Style="{StaticResource DarkBtn}" IsEnabled="{Binding CanSend}" Margin="8,0,0,0" Click="OpenWorkingCopy_Click"/>
-                        <Button Content="작업 버리기" Style="{StaticResource DarkBtn}" IsEnabled="{Binding CanSend}" Margin="8,0,0,0" Click="DiscardAgent_Click"/>
+                        <Button Content="{Binding ApproveLabel}" Style="{StaticResource AccentBtn}" IsEnabled="{Binding CanSend}" Click="ApproveAgent_Click"
+                                ToolTip="작업 사본이면 원본 옆에 새 파일로 저장합니다. 바로 작업이면 대화만 마칩니다(저장은 PowerPoint에서)"/>
+                        <Button Content="결과 열어 보기" Style="{StaticResource DarkBtn}" IsEnabled="{Binding CanSend}" Margin="8,0,0,0" Click="OpenWorkingCopy_Click"
+                                Visibility="{Binding OpenWorkingCopyVisibility}"/>
+                        <Button Content="{Binding DiscardLabel}" Style="{StaticResource DarkBtn}" IsEnabled="{Binding CanSend}" Margin="8,0,0,0" Click="DiscardAgent_Click"
+                                ToolTip="작업 사본이면 지웁니다. 바로 작업이면 아무것도 지우지 않고 대화만 끝냅니다"/>
                     </StackPanel>
                     <StackPanel Orientation="Horizontal" Margin="0,18,0,0" Visibility="{Binding JobControlsVisibility}">
                         <Button Content="변경 미리보기" Style="{StaticResource DarkBtn}" IsEnabled="{Binding CanPreview}" Click="Preview_Click"/>

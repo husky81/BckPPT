@@ -48,6 +48,9 @@ public class PptRules
     /// <summary>카드 길이 맞춤에 LLM(qwen)을 쓴다. 끄면 넘친 항목을 코드로만 뺀다.</summary>
     public bool LlmLengthFit { get; set; } = true;
 
+    /// <summary>대상 PPT가 PowerPoint 창에 열려 있으면 그 창에서 바로 작업한다(작업 사본 없음, 저장은 사용자가).</summary>
+    public bool WorkInOpenWindow { get; set; } = true;
+
     // ── 글꼴 규칙 ────────────────────────────────────────────────
 
     public List<string> AllowedFonts { get; set; } =

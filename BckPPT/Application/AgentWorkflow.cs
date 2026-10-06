@@ -74,6 +74,12 @@ public sealed class AgentWorkflow(
     /// </summary>
     public bool ExternalWriting { get; set; }
 
+    /// <summary>
+    /// 대상 파일이 PowerPoint 창에 열려 있으면 그 창에서 바로 작업한다(작업 사본을 만들지 않는다).
+    /// 숨은 창의 사본이 남아 느려지는 문제가 없고, 개체가 추가되는 것을 사용자가 바로 본다.
+    /// </summary>
+    public bool PreferInPlace { get; set; } = true;
+
     /// <summary>길이 맞춤에 qwen을 쓸지. 끄면 넘친 항목을 코드로만 뺀다.</summary>
     public bool LlmFit { get; set; } = true;
 
@@ -94,6 +100,7 @@ public sealed class AgentWorkflow(
         var session = Session ?? throw new InvalidOperationException("이어갈 작업이 없습니다.");
         var pending = session.Context.PendingCards ?? throw new InvalidOperationException("붙여넣기를 기다리는 카드 작업이 없습니다.");
         var meterBefore = _meter!.Snapshot();
+        if (session.InPlace) ppt.ClearSelection(session.WorkingPath);
         int changesBefore = session.Context.Changes.Count;
         session.Context.Status = progress is null ? null
             : new Progress<string>(text => progress.Report(new AgentEvent(AgentEventKind.Message, text)));
@@ -117,7 +124,8 @@ public sealed class AgentWorkflow(
         var touched = session.Context.Origins.Touched.ToHashSet();
         var after = touched.Count == 0 ? [] : await renderer.RenderSlidesAsync(session.WorkingPath, touched, ct);
         var originals = touched.Select(session.Context.Origins.OriginalIndexOf).ToHashSet();
-        var before = originals.Count == 0 ? [] : await renderer.RenderSlidesAsync(session.SourcePath, originals, ct);
+        // 바로 작업이면 원본이 이미 바뀌었으므로 시작할 때 복사해 둔 기준본에서 그린다.
+        var before = originals.Count == 0 ? [] : await renderer.RenderSlidesAsync(session.Context.BaselinePath ?? session.SourcePath, originals, ct);
         return (before, after);
     }
 
@@ -203,10 +211,13 @@ public sealed class AgentWorkflow(
             // 세션의 모든 LLM 호출(루프·요약·문안·길이 맞춤·이미지)을 모델별로 센다.
             _meter = new UsageMeter();
             _metered = new MeteredLlmClient(llm, _meter, options?.Model ?? "auto");
-            Session = AgentFactory.StartSession(_metered, options, ppt, sourcePath);
+            bool inPlace = PreferInPlace && ppt.IsOpenInWindow(sourcePath);
+            Session = AgentFactory.StartSession(_metered, options, ppt, sourcePath, inPlace: inPlace);
             Session.Context.Meter = _meter;
         }
         var meterBefore = _meter!.Snapshot();
+        // 바로 작업에서 앞서 사용자 조작으로 멈췄다면 그 선택이 남아 있다. 이번 요청은 선택을 풀고 시작한다.
+        if (Session.InPlace) ppt.ClearSelection(Session.WorkingPath);
         Session.Context.Status = progress is null ? null
             : new Progress<string>(text => progress.Report(new AgentEvent(AgentEventKind.Message, text)));
 
