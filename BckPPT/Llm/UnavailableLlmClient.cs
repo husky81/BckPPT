@@ -13,6 +13,9 @@ public sealed class UnavailableLlmClient(string reason) : ILlmClient
 #pragma warning restore CS0162
     }
 
+    public Task<LlmCompletion> CompleteAsync(LlmRequest request, CancellationToken cancellationToken = default) =>
+        Task.FromException<LlmCompletion>(new LlmException(reason, "configuration_error"));
+
     public Task TestConnectionAsync(CancellationToken cancellationToken = default) =>
         Task.FromException(new LlmException(reason, "configuration_error"));
 }

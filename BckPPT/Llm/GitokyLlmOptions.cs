@@ -7,7 +7,9 @@ public sealed record GitokyLlmOptions(
     string ApiKey,
     string Model,
     TimeSpan Timeout,
-    int MaxRetries)
+    int MaxRetries,
+    string AgentModel = "agent",
+    string VisionModel = "vision")
 {
     public static GitokyLlmOptions FromEnvironment(string baseDirectory)
     {
@@ -17,7 +19,8 @@ public sealed record GitokyLlmOptions(
                 ? systemValue.Trim()
                 : values.GetValueOrDefault(name, fallback).Trim();
 
-        var key = Read("GITOKY_LLM_API_KEY");
+        // CellBox 계열 .env는 GITOKY_LLM_KEY를 쓴다. 같은 키를 그대로 옮겨 붙여도 동작하게 둘 다 읽는다.
+        var key = Read("GITOKY_LLM_API_KEY") is { Length: > 0 } apiKey ? apiKey : Read("GITOKY_LLM_KEY");
         if (string.IsNullOrWhiteSpace(key))
             throw new InvalidOperationException(".env에 GITOKY_LLM_API_KEY를 설정해 주세요.");
 
@@ -26,7 +29,9 @@ public sealed record GitokyLlmOptions(
             baseUrl = baseUrl[..^3];
         return new GitokyLlmOptions(
             new Uri(baseUrl + "/", UriKind.Absolute), key,
-            Read("GITOKY_LLM_MODEL", "auto"), TimeSpan.FromSeconds(90), 2);
+            Read("GITOKY_LLM_MODEL", "auto"), TimeSpan.FromSeconds(90), 2,
+            // 도구 루프는 tools를 지원하는 라우트, 렌더 확인은 이미지 입력 라우트가 필요하다.
+            Read("GITOKY_LLM_AGENT_MODEL", "agent"), Read("GITOKY_LLM_VISION_MODEL", "vision"));
     }
 
     private static string FindDotEnv(string baseDirectory)
@@ -52,7 +57,9 @@ internal static class DotEnvLoader
             if (line.Length == 0 || line.StartsWith('#')) continue;
             var separator = line.IndexOf('=');
             if (separator <= 0) continue;
-            result[line[..separator].Trim()] = line[(separator + 1)..].Trim().Trim('"', '\'');
+            // 빈 값은 건너뛴다. 템플릿을 붙여 넣다 남은 "KEY=" 줄이 앞의 실제 값을 지우지 않게.
+            var value = line[(separator + 1)..].Trim().Trim('"', '\'');
+            if (value.Length > 0) result[line[..separator].Trim()] = value;
         }
         return result;
     }

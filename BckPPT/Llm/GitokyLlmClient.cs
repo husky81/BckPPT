@@ -1,9 +1,10 @@
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
-using System.Net.Http.Json;
 using System.Runtime.CompilerServices;
+using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.IO;
 
 namespace BckPPT.Llm;
@@ -37,7 +38,7 @@ public sealed class GitokyLlmClient : ILlmClient, IDisposable
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(_options.Timeout);
-        using var response = await SendWithRetryAsync(request, timeout.Token, cancellationToken);
+        using var response = await SendWithRetryAsync(request, stream: true, timeout.Token, cancellationToken);
         var requestId = Header(response, "X-LLM-Request-ID");
         yield return new LlmStreamEvent(LlmStreamEventKind.Started,
             RequestId: requestId, Route: Header(response, "X-LLM-Route"), Model: Header(response, "X-LLM-Model"));
@@ -69,22 +70,126 @@ public sealed class GitokyLlmClient : ILlmClient, IDisposable
         throw new LlmException("LLM 스트림이 완료 신호 없이 종료되었습니다.", "incomplete_stream");
     }
 
-    private async Task<HttpResponseMessage> SendWithRetryAsync(
-        LlmRequest request, CancellationToken timeoutToken, CancellationToken cancellationToken)
+    public async Task<LlmCompletion> CompleteAsync(LlmRequest request, CancellationToken cancellationToken = default)
     {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(_options.Timeout);
+        using var response = await SendWithRetryAsync(request, stream: false, timeout.Token, cancellationToken);
+        string body;
+        try { body = await response.Content.ReadAsStringAsync(timeout.Token); }
+        catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new LlmException("LLM 응답 시간이 초과되었습니다.", "timeout", inner: ex);
+        }
+        return ParseCompletion(body, Header(response, "X-LLM-Request-ID"), Header(response, "X-LLM-Model"));
+    }
+
+    /// <summary>OpenAI 호환 chat.completion 본문을 해석한다. 내용이 없고 도구 호출만 있는 응답도 정상이다.</summary>
+    public static LlmCompletion ParseCompletion(string body, string? requestId = null, string? model = null)
+    {
+        using var document = JsonDocument.Parse(body);
+        var root = document.RootElement;
+        if (root.TryGetProperty("error", out var error) && error.ValueKind == JsonValueKind.Object)
+            throw ParseStreamException(error, requestId);
+        if (!root.TryGetProperty("choices", out var choices) || choices.GetArrayLength() == 0)
+            throw new LlmException("LLM 응답에 choices가 없습니다.", "empty_response");
+
+        var choice = choices[0];
+        var message = choice.GetProperty("message");
+        var content = message.TryGetProperty("content", out var c) && c.ValueKind == JsonValueKind.String
+            ? c.GetString() ?? "" : "";
+        var toolCalls = new List<LlmToolCall>();
+        if (message.TryGetProperty("tool_calls", out var calls) && calls.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var call in calls.EnumerateArray())
+            {
+                var function = call.GetProperty("function");
+                var arguments = function.TryGetProperty("arguments", out var a)
+                    ? a.ValueKind == JsonValueKind.String ? a.GetString() ?? "{}" : a.GetRawText()
+                    : "{}";
+                toolCalls.Add(new LlmToolCall(
+                    call.TryGetProperty("id", out var id) ? id.GetString() ?? "" : "",
+                    function.GetProperty("name").GetString() ?? "",
+                    arguments));
+            }
+        }
+        var finish = choice.TryGetProperty("finish_reason", out var f) && f.ValueKind == JsonValueKind.String
+            ? f.GetString() : null;
+        var usage = LlmUsage.Zero;
+        if (root.TryGetProperty("usage", out var u) && u.ValueKind == JsonValueKind.Object)
+            usage = new LlmUsage(
+                u.TryGetProperty("prompt_tokens", out var p) ? p.GetInt32() : 0,
+                u.TryGetProperty("completion_tokens", out var ct) ? ct.GetInt32() : 0);
+        model ??= root.TryGetProperty("model", out var m) ? m.GetString() : null;
+        requestId ??= root.TryGetProperty("id", out var rid) ? rid.GetString() : null;
+        return new LlmCompletion(content, toolCalls, finish, usage, requestId, model);
+    }
+
+    /// <summary>요청 본문. 도구·도구 결과·이미지 파트는 있을 때만 넣는다.</summary>
+    public static JsonObject BuildPayload(LlmRequest request, string defaultModel, bool stream)
+    {
+        var messages = new JsonArray();
+        foreach (var m in request.Messages)
+        {
+            var node = new JsonObject { ["role"] = m.Role };
+            if (m.ImageDataUrls is { Count: > 0 } images)
+            {
+                var parts = new JsonArray { new JsonObject { ["type"] = "text", ["text"] = m.Content } };
+                foreach (var url in images)
+                    parts.Add(new JsonObject { ["type"] = "image_url", ["image_url"] = new JsonObject { ["url"] = url } });
+                node["content"] = parts;
+            }
+            else
+            {
+                node["content"] = m.Content;
+            }
+            if (m.ToolCalls is { Count: > 0 } calls)
+            {
+                node["tool_calls"] = new JsonArray(calls.Select(call => (JsonNode)new JsonObject
+                {
+                    ["id"] = call.Id,
+                    ["type"] = "function",
+                    ["function"] = new JsonObject { ["name"] = call.Name, ["arguments"] = call.ArgumentsJson }
+                }).ToArray());
+            }
+            if (m.ToolCallId is not null) node["tool_call_id"] = m.ToolCallId;
+            messages.Add(node);
+        }
+
+        var payload = new JsonObject
+        {
+            ["model"] = request.Model ?? defaultModel,
+            ["messages"] = messages,
+            ["max_tokens"] = request.MaxTokens,
+            ["stream"] = stream
+        };
+        if (stream) payload["stream_options"] = new JsonObject { ["include_usage"] = true };
+        if (request.Tools is { Count: > 0 } tools)
+        {
+            payload["tools"] = new JsonArray(tools.Select(tool => (JsonNode)new JsonObject
+            {
+                ["type"] = "function",
+                ["function"] = new JsonObject
+                {
+                    ["name"] = tool.Name,
+                    ["description"] = tool.Description,
+                    ["parameters"] = JsonNode.Parse(tool.Parameters.GetRawText())
+                }
+            }).ToArray());
+            if (request.ToolChoice is not null) payload["tool_choice"] = request.ToolChoice;
+        }
+        return payload;
+    }
+
+    private async Task<HttpResponseMessage> SendWithRetryAsync(
+        LlmRequest request, bool stream, CancellationToken timeoutToken, CancellationToken cancellationToken)
+    {
+        var json = BuildPayload(request, _options.Model, stream).ToJsonString();
         for (var attempt = 0; ; attempt++)
         {
-            var payload = new
-            {
-                model = request.Model ?? _options.Model,
-                messages = request.Messages.Select(m => new { role = m.Role, content = m.Content }),
-                max_tokens = request.MaxTokens,
-                stream = true,
-                stream_options = new { include_usage = true }
-            };
             using var message = new HttpRequestMessage(HttpMethod.Post, "v1/chat/completions")
             {
-                Content = JsonContent.Create(payload)
+                Content = new StringContent(json, Encoding.UTF8, "application/json")
             };
             try
             {
@@ -96,6 +201,11 @@ public sealed class GitokyLlmClient : ILlmClient, IDisposable
                 if (!transient || attempt >= _options.MaxRetries) throw exception;
             }
             catch (HttpRequestException) when (attempt < _options.MaxRetries) { }
+            catch (HttpRequestException ex)
+            {
+                // 게이트웨이가 응답 없이 연결을 끊는 경우(2026-10-06 실측: 지연이 15초를 넘으면 끊김).
+                throw new LlmException("LLM 서버 연결이 끊겼습니다. 잠시 후 다시 시도해 주세요.", "connection_lost", inner: ex);
+            }
             catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
             {
                 throw new LlmException("LLM 응답 시간이 초과되었습니다.", "timeout", inner: ex);
