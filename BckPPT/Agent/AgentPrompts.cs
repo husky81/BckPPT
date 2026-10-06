@@ -43,8 +43,9 @@ public static class AgentFactory
 {
     public static ToolRegistry CreateRegistry(bool includeSources) => new(PptAgentTools.Create(includeSources));
 
-    public static AgentLoop CreateLoop(ILlmClient llm, GitokyLlmOptions? options, bool includeSources) =>
-        new(llm, CreateRegistry(includeSources), new AgentLoopOptions { Model = options?.AgentModel });
+    public static AgentLoop CreateLoop(
+        ILlmClient llm, GitokyLlmOptions? options, bool includeSources, AgentLoopOptions? loopOptions = null) =>
+        new(llm, CreateRegistry(includeSources), (loopOptions ?? new AgentLoopOptions()) with { Model = options?.AgentModel });
 
     public static AgentSession StartSession(
         ILlmClient llm, GitokyLlmOptions? options, IPptComService ppt, string sourcePath, ISourceLibrary? sources = null) =>

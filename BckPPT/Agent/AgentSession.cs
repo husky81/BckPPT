@@ -13,6 +13,7 @@ namespace BckPPT.Agent;
 public sealed class AgentSession : IDisposable
 {
     private readonly List<LlmMessage> _messages = new();
+    private readonly List<IDisposable> _openHandles = new();
 
     private AgentSession(string sourcePath, string workingPath, AgentToolContext context, AgentSessionLog log)
     {
@@ -58,6 +59,13 @@ public sealed class AgentSession : IDisposable
         };
         var log = new AgentSessionLog(Path.Combine(logDirectory ?? DefaultLogDirectory, $"{stamp}_{Path.GetFileNameWithoutExtension(workingPath)}.jsonl"));
         var session = new AgentSession(sourcePath, workingPath, context, log);
+        // 세션 동안 작업 사본과 원본(판정 기준)을 열어 둔다. 31MB 착수보고 PPT에서 도구마다 열고 닫으면 너무 느리다.
+        try
+        {
+            session._openHandles.Add(ppt.KeepOpen(workingPath, readOnly: false));
+            session._openHandles.Add(ppt.KeepOpen(sourcePath, readOnly: true));
+        }
+        catch (Exception ex) { log.Write("keep_open_failed", new { ex.Message }); }
         log.Write("start", new { source = sourcePath, working = workingPath });
         session.Append(LlmMessage.System(systemPrompt));
         return session;
@@ -81,6 +89,7 @@ public sealed class AgentSession : IDisposable
     public string Approve()
     {
         if (ResultPath is not null) return ResultPath;
+        ReleaseOpenDocuments();   // 열린 채로는 복사가 막힐 수 있다
         var directory = Path.GetDirectoryName(SourcePath)!;
         var stem = Path.Combine(directory, $"{Path.GetFileNameWithoutExtension(SourcePath)}_BckPPT_{DateTime.Now:yyyyMMdd_HHmmss}");
         var extension = Path.GetExtension(SourcePath);
@@ -96,10 +105,21 @@ public sealed class AgentSession : IDisposable
     public void Discard()
     {
         Log.Write("discard", new { });
+        ReleaseOpenDocuments();
         try { if (File.Exists(WorkingPath)) File.Delete(WorkingPath); } catch { }
     }
 
-    public void Dispose() => Log.Dispose();
+    private void ReleaseOpenDocuments()
+    {
+        foreach (var handle in _openHandles) handle.Dispose();
+        _openHandles.Clear();
+    }
+
+    public void Dispose()
+    {
+        ReleaseOpenDocuments();
+        Log.Dispose();
+    }
 }
 
 /// <summary>

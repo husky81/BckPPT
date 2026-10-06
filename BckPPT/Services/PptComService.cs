@@ -774,7 +774,102 @@ public class PptComService : IPptComService
         });
 
     public void OpenPptxInPowerPoint(string filePath)
-        => Process.Start(new ProcessStartInfo(filePath) { UseShellExecute = true });
+    {
+        // 세션이 창 없이 열어 둔 문서면 창만 띄운다. 파일을 다시 열면 읽기 전용 사본이 생긴다.
+        bool shown = RunOnSta(() =>
+        {
+            if (TryGetActiveInstance() is not { } app || FindOpenPresentation(app, filePath) is not { } prs) return false;
+            if ((int)prs.Windows.Count == 0) prs.NewWindow();
+            else prs.Windows[1].Activate();
+            return true;
+        });
+        if (!shown) Process.Start(new ProcessStartInfo(filePath) { UseShellExecute = true });
+    }
+
+    /// <summary>
+    /// 슬라이드 번호와 제목만 빠르게 읽는다. AnalyzePresentation은 모든 도형을 측정해
+    /// 31MB·38장 착수보고 PPT에서 45초 제한을 넘겼다(2026-10-06 실측).
+    /// 제목 개체가 없으면 위쪽(상단 80pt 안)에서 가장 위에 있는 텍스트를 제목으로 본다.
+    /// </summary>
+    public IReadOnlyList<(int Index, string Title)> ListSlides(string presentationPath)
+        => RunOnSta(() =>
+        {
+            dynamic pptApp = GetOrCreateInstance();
+            dynamic? existing = FindOpenPresentation(pptApp, presentationPath);
+            bool ownedByUs = existing is null;
+            dynamic prs = existing ?? pptApp.Presentations.Open(presentationPath, MsoTrue, MsoFalse, MsoFalse);
+            try
+            {
+                var result = new List<(int, string)>();
+                foreach (dynamic slide in prs.Slides)
+                {
+                    string title = "";
+                    try
+                    {
+                        if ((int)slide.Shapes.HasTitle == MsoTrue)
+                            title = (string)slide.Shapes.Title.TextFrame2.TextRange.Text;
+                    }
+                    catch { }
+                    if (string.IsNullOrWhiteSpace(title))
+                    {
+                        float best = 80f;
+                        foreach (dynamic shape in slide.Shapes)
+                        {
+                            try
+                            {
+                                if ((int)shape.HasTextFrame != MsoTrue || (float)shape.Top >= best) continue;
+                                string text = (string)shape.TextFrame2.TextRange.Text;
+                                if (string.IsNullOrWhiteSpace(text)) continue;
+                                (best, title) = ((float)shape.Top, text);
+                            }
+                            catch { }
+                        }
+                    }
+                    title = title.Replace('\r', ' ').Replace('\v', ' ').Trim();
+                    result.Add(((int)slide.SlideIndex, title.Length <= 80 ? title : title[..80]));
+                }
+                return (IReadOnlyList<(int, string)>)result;
+            }
+            finally { if (ownedByUs) SafeClose(prs); }
+        });
+
+    /// <summary>
+    /// 문서를 창 없이 열어 두고, 돌려받은 핸들을 해제할 때 닫는다. 이미 열려 있던 문서는 건드리지 않는다.
+    /// 다른 API는 열린 문서를 찾아 재사용하므로, 큰 파일에서 호출마다 열고 닫는 비용이 사라진다.
+    /// </summary>
+    public IDisposable KeepOpen(string presentationPath, bool readOnly)
+    {
+        bool opened = RunOnSta(() =>
+        {
+            dynamic app = GetOrCreateInstance();
+            if (FindOpenPresentation(app, presentationPath) is not null) return false;
+            app.Presentations.Open(presentationPath, readOnly ? MsoTrue : MsoFalse, MsoFalse, MsoFalse);
+            return true;
+        });
+        return new OpenHandle(opened ? presentationPath : null);
+    }
+
+    private sealed class OpenHandle(string? path) : IDisposable
+    {
+        private string? _path = path;
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _path, null) is not { } path) return;
+            try
+            {
+                RunOnSta(() =>
+                {
+                    if (TryGetActiveInstance() is { } app && FindOpenPresentation(app, path) is { } prs)
+                    {
+                        // 사용자가 "결과 열어 보기"로 창을 띄웠다면 닫지 않는다.
+                        if ((int)prs.Windows.Count == 0) SafeClose(prs);
+                    }
+                });
+            }
+            catch { }
+        }
+    }
 
     // ── 텍스트 치환 ───────────────────────────────────────────────
 

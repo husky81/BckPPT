@@ -92,12 +92,12 @@ public static class PptAgentTools
 
     private static async Task<string> ListSlides(AgentToolContext ctx, JsonElement args, CancellationToken ct)
     {
-        var analysis = await Task.Run(() => ctx.Ppt.AnalyzePresentation(ctx.WorkingPath, cancellationToken: ct), ct);
-        var sb = new StringBuilder($"슬라이드 {analysis.Slides.Count(s => !s.IsAll)}장\n");
-        foreach (var slide in analysis.Slides.Where(s => !s.IsAll))
+        var slides = await Task.Run(() => ctx.Ppt.ListSlides(ctx.WorkingPath), ct);
+        var sb = new StringBuilder($"슬라이드 {slides.Count}장\n");
+        foreach (var (index, title) in slides)
         {
-            sb.Append($"{slide.SlideIndex}. {(string.IsNullOrWhiteSpace(slide.Title) ? "(제목 없음)" : slide.Title)}");
-            if (ctx.Origins.BaselineOf(slide.SlideIndex) is int origin) sb.Append($" [← {origin}쪽 복제]");
+            sb.Append($"{index}. {(string.IsNullOrWhiteSpace(title) ? "(제목 없음)" : title)}");
+            if (ctx.Origins.BaselineOf(index) is int origin) sb.Append($" [← {origin}쪽 복제]");
             sb.Append('\n');
         }
         return sb.ToString();

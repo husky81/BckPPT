@@ -32,6 +32,10 @@ public class AgentLiveSmokeTests(ITestOutputHelper output)
         using var workflow = new AgentWorkflow(llm, options, ppt, new RenderValidator(ppt, artifacts),
             new SourceLibrary(Path.Combine(dbDir, "sources.db")));
 
+        if (int.TryParse(Environment.GetEnvironmentVariable("BCKPPT_LIVE_MAX_TURNS"), out var maxTurns))
+            workflow.LoopOptions = workflow.LoopOptions with { MaxTurns = maxTurns, MaxSessionTokens = 0 };
+        var keep = Environment.GetEnvironmentVariable("BCKPPT_LIVE_KEEP") == "1";
+
         var sources = Environment.GetEnvironmentVariable("BCKPPT_LIVE_SOURCES")?.Split('|', StringSplitOptions.RemoveEmptyEntries) ?? [];
         if (sources.Length > 0)
         {
@@ -57,6 +61,8 @@ public class AgentLiveSmokeTests(ITestOutputHelper output)
         }
         finally
         {
+            // BCKPPT_LIVE_KEEP=1이면 결과를 원본 옆에 저장해 눈으로 확인할 수 있게 한다.
+            if (keep && workflow.Session is not null) output.WriteLine("저장: " + workflow.Approve());
             workflow.Discard();
             try { Directory.Delete(dbDir, true); } catch { }
         }

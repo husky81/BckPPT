@@ -25,6 +25,9 @@ public sealed class AgentWorkflow(
     private readonly List<string> _attached = new();
 
     public AgentSession? Session { get; private set; }
+
+    /// <summary>턴·토큰 상한 등. 큰 작업(카드 여러 장)은 기본 30턴으로 모자랄 수 있다.</summary>
+    public AgentLoopOptions LoopOptions { get; set; } = new();
     public IReadOnlyList<string> AttachedSources => _attached;
 
     /// <summary>원문 파일이나 폴더를 색인하고 이번 작업의 검색 대상으로 붙인다. (파일 수, 쪽 수)를 돌려준다.</summary>
@@ -76,7 +79,7 @@ public sealed class AgentWorkflow(
             ? $"{instruction}\n\n(첨부 원문: {string.Join(", ", _attached.Select(Path.GetFileName))})"
             : instruction;
 
-        var run = await AgentFactory.CreateLoop(llm, options, hasSources).RunAsync(Session, request, progress, ct);
+        var run = await AgentFactory.CreateLoop(llm, options, hasSources, LoopOptions).RunAsync(Session, request, progress, ct);
 
         var touched = Session.Context.Origins.Touched.ToHashSet();
         var after = touched.Count == 0 ? [] : await renderer.RenderSlidesAsync(Session.WorkingPath, touched, ct);

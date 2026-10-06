@@ -182,6 +182,9 @@ public sealed class FakePptComService : IPptComService
     public Task NavigateToShapeAsync(string presentationPath, int slideIndex, string shapeName) => throw new NotSupportedException();
     public void NavigateToSlide(string presentationPath, int slideIndex) => throw new NotSupportedException();
     public void OpenPptxInPowerPoint(string filePath) => throw new NotSupportedException();
+    public IDisposable KeepOpen(string presentationPath, bool readOnly) => new MemoryStream();
+    public IReadOnlyList<(int Index, string Title)> ListSlides(string presentationPath) =>
+        Slides.Select((s, i) => (i + 1, s.FirstOrDefault()?.Paragraphs.FirstOrDefault() ?? "")).ToList();
     public int ReplaceText(string presentationPath, string find, string replace, IReadOnlyList<(int slideIndex, string shapeName)>? targets = null) => throw new NotSupportedException();
     public int NormalizeFonts(string presentationPath) => throw new NotSupportedException();
     public void ReplaceImage(string presentationPath, int slideIndex, float targetLeft, float targetTop, string newImagePath) => throw new NotSupportedException();
