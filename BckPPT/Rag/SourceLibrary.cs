@@ -125,7 +125,8 @@ public sealed class SourceLibrary : ISourceLibrary
         if (total == 0) return [];
 
         // 후보: 어느 한 낱말이라도 들어 있는 쪽. 긴 낱말은 FTS로, 짧은 낱말은 LIKE로 찾는다.
-        var candidates = new Dictionary<long, (string Doc, int Page, string Heading, string Text)>();
+        // 둘 다 공백을 뺀 본문(compact)을 본다. PDF 추출본은 "요 약 문"처럼 글자 사이가 벌어진 경우가 많다.
+        var candidates = new Dictionary<long, (string Doc, int Page, string Heading, string Text, string Compact)>();
         var df = new Dictionary<string, int>();
         foreach (var term in terms)
         {
@@ -133,7 +134,7 @@ public sealed class SourceLibrary : ISourceLibrary
             if (term.Length >= 3)
             {
                 command.CommandText = """
-                    SELECT p.rowid, d.name, p.page, p.heading, p.text, d.path FROM source_fts f
+                    SELECT p.rowid, d.name, p.page, p.heading, p.text, d.path, p.compact FROM source_fts f
                     JOIN source_pages p ON p.rowid = f.rowid JOIN source_docs d ON d.id = p.doc_id
                     WHERE source_fts MATCH $q
                     """;
@@ -142,9 +143,9 @@ public sealed class SourceLibrary : ISourceLibrary
             else
             {
                 command.CommandText = """
-                    SELECT p.rowid, d.name, p.page, p.heading, p.text, d.path FROM source_pages p
+                    SELECT p.rowid, d.name, p.page, p.heading, p.text, d.path, p.compact FROM source_pages p
                     JOIN source_docs d ON d.id = p.doc_id
-                    WHERE p.text LIKE $q ESCAPE '\' OR p.heading LIKE $q ESCAPE '\'
+                    WHERE p.compact LIKE $q ESCAPE '\' OR p.heading LIKE $q ESCAPE '\'
                     """;
                 command.Parameters.AddWithValue("$q", "%" + EscapeLike(term) + "%");
             }
@@ -154,13 +155,15 @@ public sealed class SourceLibrary : ISourceLibrary
             {
                 if (!InScope(reader.GetString(5))) continue;
                 found++;
-                candidates[reader.GetInt64(0)] = (reader.GetString(1), reader.GetInt32(2), reader.GetString(3), reader.GetString(4));
+                candidates[reader.GetInt64(0)] = (reader.GetString(1), reader.GetInt32(2), reader.GetString(3),
+                    reader.GetString(4), reader.GetString(6));
             }
             df[term] = found;
         }
 
         return candidates.Values
-            .Select(c => (Hit: c, Score: Score(c.Heading, c.Text, terms, df, total) + PhraseBonus(c.Heading, c.Text, terms, df, total)))
+            .Select(c => (Hit: c, Score: Score(Compact(c.Heading), c.Compact, terms, df, total)
+                                         + PhraseBonus(Compact(c.Heading), c.Compact, terms, df, total)))
             .Where(x => x.Score > 0)
             .OrderByDescending(x => x.Score).ThenBy(x => x.Hit.Doc).ThenBy(x => x.Hit.Page)
             .Take(Math.Max(1, limit))
@@ -186,13 +189,14 @@ public sealed class SourceLibrary : ISourceLibrary
         command.Parameters.AddWithValue("$doc", docId);
         using var reader = command.ExecuteReader();
 
-        // 같은 제목이 이어지는 쪽은 한 줄로 묶는다(긴 절이 여러 구간으로 나뉜 경우).
+        // 같은 제목이 이어지는 쪽과 절 제목을 못 찾은 쪽은 앞 절에 묶는다(긴 절이 여러 쪽에 걸친 경우).
+        const int MaxEntries = 150;
         var sb = new StringBuilder($"{name} 목차 (전체 {pageCount}쪽)\n");
-        int start = 0, last = 0;
+        int start = 0, last = 0, entries = 0;
         string? current = null;
         void Flush()
         {
-            if (current is null) return;
+            if (current is null || ++entries > MaxEntries) return;
             sb.Append(start == last ? $"p.{start}" : $"p.{start}–{last}").Append(' ')
               .Append(current.Length == 0 ? "(제목 없음)" : current).Append('\n');
         }
@@ -200,11 +204,13 @@ public sealed class SourceLibrary : ISourceLibrary
         {
             int page = reader.GetInt32(0);
             string heading = reader.GetString(1);
-            if (heading == current) { last = page; continue; }
+            if (heading == current || (heading.Length == 0 && current is not null)) { last = page; continue; }
             Flush();
             (start, last, current) = (page, page, heading);
         }
         Flush();
+        if (entries > MaxEntries)
+            sb.Append($"…(절 {entries - MaxEntries}개 더 있음. search_source로 절 제목을 검색하세요)\n");
         return sb.ToString();
     }
 
@@ -245,7 +251,7 @@ public sealed class SourceLibrary : ISourceLibrary
         foreach (var page in pdf.GetPages())
         {
             var text = Normalize(ContentOrderTextExtractor.GetText(page));
-            pages.Add(new SourcePage(page.Number, FirstLine(text), text));
+            pages.Add(new SourcePage(page.Number, SectionTitle(text), text));
         }
         return pages;
     }
@@ -281,7 +287,8 @@ public sealed class SourceLibrary : ISourceLibrary
         text = text.Replace("\r\n", "\n");
         if (text.Contains('\f'))
             return text.Split('\f').Select(Normalize).Where(t => t.Length > 0)
-                .Select((t, i) => new SourcePage(i + 1, FirstLine(t), t)).ToList();
+                .Select((t, i) => new SourcePage(i + 1, SectionTitle(t), t)).ToList();
+        if (SplitPageHeadings(text) is { } pageMode) return pageMode;
 
         var sections = new List<(string Heading, StringBuilder Body)>();
         string heading = "";
@@ -304,6 +311,54 @@ public sealed class SourceLibrary : ISourceLibrary
             foreach (var chunk in ChunkAtBlankLines(content.ToString(), MaxSectionChars))
                 pages.Add(new SourcePage(pages.Count + 1, title, chunk));
         return pages;
+    }
+
+    // PDF를 쪽별로 추출한 Markdown의 쪽 제목: "## 12쪽", "## Page 12", "## p.12"
+    private static readonly Regex PageHeading = new(@"^#{1,6}\s*(?:(\d+)\s*(?:쪽|페이지)|(?:page|p\.)\s*(\d+))\s*$",
+        RegexOptions.IgnoreCase);
+
+    /// <summary>
+    /// "## N쪽" 형식이면 그 번호를 실제 쪽 번호로 쓰고, 절 제목은 쪽 본문에서 찾는다.
+    /// 첫 쪽 제목 앞(추출 안내·메타데이터)은 버린다. 쪽 제목이 3개 미만이면 이 형식이 아니다.
+    /// </summary>
+    private static IReadOnlyList<SourcePage>? SplitPageHeadings(string text)
+    {
+        var lines = text.Split('\n');
+        var marks = new List<(int Line, int Page)>();
+        for (int i = 0; i < lines.Length; i++)
+            if (PageHeading.Match(lines[i]) is { Success: true } m)
+                marks.Add((i, int.Parse(m.Groups[1].Success ? m.Groups[1].Value : m.Groups[2].Value)));
+        if (marks.Count < 3) return null;
+
+        var pages = new List<SourcePage>();
+        for (int k = 0; k < marks.Count; k++)
+        {
+            int end = k + 1 < marks.Count ? marks[k + 1].Line : lines.Length;
+            var body = Normalize(string.Join("\n", lines[(marks[k].Line + 1)..end]).Trim().TrimEnd('-').Trim());
+            if (body.Length > 0) pages.Add(new SourcePage(marks[k].Page, SectionTitle(body), body));
+        }
+        return pages;
+    }
+
+    // 보고서 절 제목: "제3장 연구개발 내용", "3.2 연구개발 내용", "Ⅲ. 연구개발", "가. 최종목표".
+    // ○·□ 같은 글머리는 본문 항목에도 쓰여 목차가 잡음으로 덮이므로 제목으로 보지 않는다.
+    private static readonly Regex SectionLine = new(
+        @"^(?:제\s*\d+\s*[장절편]|\d{1,2}\.(?:\d{1,2}\.?){0,3}|[IVXⅠ-Ⅻ]+\.|[가-하]\.)\s*[가-힣A-Za-z(]");
+    // 목차 줄("1. 서론 ········ 3")은 제목이 아니다.
+    private static readonly Regex TocLeader = new(@"(?:\.{3,}|…|·{3,}|(?:\s\.){3,}|-{3,})\s*\d*\s*$|\s\d{1,3}$");
+
+    /// <summary>쪽 본문에서 처음 나오는 절 제목. 없으면 빈 문자열(목차에서 생략된다).</summary>
+    public static string SectionTitle(string text)
+    {
+        foreach (var raw in text.Split('\n').Take(40))
+        {
+            var line = Regex.Replace(raw.Trim(), @"\s+", " ");
+            if (line.Length is < 3 or > 60 || TocLeader.IsMatch(line)) continue;
+            // 표의 숫자 줄("2. 보건·복지 226.0 242.9 …")은 제목이 아니다.
+            if (line.Count(char.IsDigit) * 3 > line.Length) continue;
+            if (SectionLine.IsMatch(line)) return line;
+        }
+        return "";
     }
 
     private static IEnumerable<string> ChunkAtBlankLines(string text, int max)
@@ -366,9 +421,8 @@ public sealed class SourceLibrary : ISourceLibrary
     {
         if (terms.Count < 2) return 0;
         string phrase = string.Concat(terms);
-        string Squash(string s) => Regex.Replace(s, @"\s+", "");
-        bool inHeading = Squash(heading).Contains(phrase, StringComparison.OrdinalIgnoreCase);
-        if (!inHeading && !Squash(text).Contains(phrase, StringComparison.OrdinalIgnoreCase)) return 0;
+        bool inHeading = heading.Contains(phrase, StringComparison.OrdinalIgnoreCase);
+        if (!inHeading && !text.Contains(phrase, StringComparison.OrdinalIgnoreCase)) return 0;
         double idf = terms.Sum(t => Math.Log(1 + (double)total / Math.Max(1, df.GetValueOrDefault(t))));
         return inHeading ? 2 * idf : idf;
     }
@@ -377,12 +431,16 @@ public sealed class SourceLibrary : ISourceLibrary
     {
         // 가장 드문 낱말이 처음 나오는 곳을 가운데 둔다.
         int at = terms.OrderBy(t => df.GetValueOrDefault(t))
-            .Select(t => text.IndexOf(t, StringComparison.OrdinalIgnoreCase))
-            .FirstOrDefault(i => i >= 0, 0);
+            .Select(t => Regex.Match(text, string.Join(@"\s*", t.Select(ch => Regex.Escape(ch.ToString()))), RegexOptions.IgnoreCase))
+            .Where(m => m.Success).Select(m => m.Index)
+            .FirstOrDefault(0);
         int start = Math.Max(0, Math.Min(at - SnippetChars / 4, text.Length - SnippetChars));
         var snippet = text.Substring(start, Math.Min(SnippetChars, text.Length - start)).Replace('\n', ' ');
         return (start > 0 ? "…" : "") + snippet + (start + SnippetChars < text.Length ? "…" : "");
     }
+
+    /// <summary>공백을 모두 뺀 글. 검색은 이것끼리 비교해 띄어쓰기 차이를 무시한다.</summary>
+    public static string Compact(string text) => Regex.Replace(text, @"\s+", "");
 
     private static int Count(string text, string term)
     {
@@ -440,19 +498,21 @@ public sealed class SourceLibrary : ISourceLibrary
         using var page = connection.CreateCommand();
         page.Transaction = transaction;
         page.CommandText = """
-            INSERT INTO source_pages (doc_id, page, heading, text) VALUES ($doc, $page, $heading, $text);
-            INSERT INTO source_fts (rowid, heading, text) VALUES (last_insert_rowid(), $heading, $text);
+            INSERT INTO source_pages (doc_id, page, heading, text, compact) VALUES ($doc, $page, $heading, $text, $compact);
+            INSERT INTO source_fts (rowid, heading, compact) VALUES (last_insert_rowid(), $heading, $compact);
             """;
         var pDoc = page.Parameters.Add("$doc", SqliteType.Integer);
         var pPage = page.Parameters.Add("$page", SqliteType.Integer);
         var pHeading = page.Parameters.Add("$heading", SqliteType.Text);
         var pText = page.Parameters.Add("$text", SqliteType.Text);
+        var pCompact = page.Parameters.Add("$compact", SqliteType.Text);
         foreach (var p in pages)
         {
             pDoc.Value = docId;
             pPage.Value = p.Page;
             pHeading.Value = p.Heading;
             pText.Value = p.Text;
+            pCompact.Value = Compact(p.Text);
             page.ExecuteNonQuery();
         }
         transaction.Commit();
@@ -472,18 +532,34 @@ public sealed class SourceLibrary : ISourceLibrary
         command.ExecuteNonQuery();
     }
 
+    /// <summary>색인 형식이 바뀌면 올린다. 색인은 원문에서 언제든 다시 만들 수 있는 캐시라 옛 형식은 지운다.</summary>
+    private const int SchemaVersion = 2;
+
     private void Initialize()
     {
         using var connection = Open();
+        using (var version = connection.CreateCommand())
+        {
+            version.CommandText = "PRAGMA user_version";
+            if (Convert.ToInt32(version.ExecuteScalar()) < SchemaVersion)
+            {
+                version.CommandText = $"""
+                    DROP TABLE IF EXISTS source_fts; DROP TABLE IF EXISTS source_pages; DROP TABLE IF EXISTS source_docs;
+                    PRAGMA user_version = {SchemaVersion};
+                    """;
+                version.ExecuteNonQuery();
+            }
+        }
         using var command = connection.CreateCommand();
         command.CommandText = """
             CREATE TABLE IF NOT EXISTS source_docs (
               id INTEGER PRIMARY KEY, path TEXT NOT NULL UNIQUE, name TEXT NOT NULL,
               hash TEXT NOT NULL, page_count INTEGER NOT NULL, indexed_utc TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS source_pages (
-              doc_id INTEGER NOT NULL, page INTEGER NOT NULL, heading TEXT NOT NULL, text TEXT NOT NULL);
+              doc_id INTEGER NOT NULL, page INTEGER NOT NULL, heading TEXT NOT NULL, text TEXT NOT NULL,
+              compact TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS source_pages_doc ON source_pages (doc_id, page);
-            CREATE VIRTUAL TABLE IF NOT EXISTS source_fts USING fts5 (heading, text, tokenize = 'trigram');
+            CREATE VIRTUAL TABLE IF NOT EXISTS source_fts USING fts5 (heading, compact, tokenize = 'trigram');
             """;
         command.ExecuteNonQuery();
     }
@@ -505,7 +581,7 @@ public sealed class SourceLibrary : ISourceLibrary
         term.Replace("\\", "\\\\").Replace("%", "\\%").Replace("_", "\\_");
 
     private static string Normalize(string text) =>
-        Regex.Replace(text.Replace("\r\n", "\n").Replace('\r', '\n'), @"[ \t]+", " ").Trim();
+        Regex.Replace(Regex.Replace(text.Replace("\r\n", "\n").Replace('\r', '\n'), @"[ \t]+", " "), @"\n(?:\s*\n){2,}", "\n\n").Trim();
 
     // "- 5 -", "12", "5 / 40"처럼 쪽 번호만 있는 줄
     private static readonly Regex PageNumberLine = new(@"^[-–—\s\d/]+$");

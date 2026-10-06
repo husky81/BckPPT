@@ -65,6 +65,16 @@ public sealed class SourceLibraryTests(ITestOutputHelper output) : IDisposable
     }
 
     [Fact]
+    public void 글자_사이가_벌어진_PDF_추출본도_찾는다()
+    {
+        var library = Library();
+        library.AddFile(Write("s.md", "# 앞\n\n요 약 문\n\n본 과제는 연구 개발 내 용 을 다룬다\n\n# 뒤\n\n관련 없음\n"));
+        var hit = Assert.Single(library.Search("요약문", 5));
+        Assert.Contains("요 약 문", hit.Snippet);
+        Assert.Single(library.Search("연구개발 내용", 5));
+    }
+
+    [Fact]
     public void 두_글자_낱말도_찾는다()
     {
         // trigram은 3글자 미만을 못 찾으므로 LIKE로 보완한다.
@@ -153,6 +163,69 @@ public sealed class SourceLibraryTests(ITestOutputHelper output) : IDisposable
     }
 
     [Fact]
+    public void 쪽별_추출_Markdown은_실제_쪽_번호와_본문의_절_제목을_쓴다()
+    {
+        const string md = """
+            # 보고서
+
+            > PDF의 내장 텍스트 레이어를 페이지별로 추출한 Markdown입니다.
+
+            ---
+
+            ## 1쪽
+
+            표지
+
+            ## 2쪽
+
+            목 차
+            1. 서론 ............ 3
+            3.2 연구개발 내용 ······ 41
+
+            ## 41쪽
+
+            국토교통 R&D
+            3.2 연구개발 내용
+            가. 센서 개발
+
+            ## 42쪽
+
+            이어지는 본문
+            """;
+        var pages = SourceLibrary.SplitText(md);
+
+        Assert.Equal([1, 2, 41, 42], pages.Select(p => p.Page));
+        Assert.Equal("", pages[1].Heading);                 // 목차 줄은 제목이 아니다
+        Assert.Equal("3.2 연구개발 내용", pages[2].Heading);
+        Assert.Equal("", pages[3].Heading);
+        Assert.DoesNotContain(pages, p => p.Text.Contains("추출한 Markdown"));
+    }
+
+    [Fact]
+    public void 목차는_제목_없는_쪽을_앞_절에_묶는다()
+    {
+        var library = Library();
+        library.AddFile(Write("p.md", "## 1쪽\n\n표지\n\n## 2쪽\n\n1. 서론\n본문\n\n## 3쪽\n\n계속\n\n## 4쪽\n\n2. 연구개발 내용\n본문\n"));
+        var outline = library.Outline("p.md");
+        Assert.Contains("p.1 (제목 없음)", outline);
+        Assert.Contains("p.2–3 1. 서론", outline);
+        Assert.Contains("p.4 2. 연구개발 내용", outline);
+    }
+
+    [Theory]
+    [InlineData("제3장 연구개발 내용", "제3장 연구개발 내용")]
+    [InlineData("Ⅲ. 연구개발 목표 및 내용", "Ⅲ. 연구개발 목표 및 내용")]
+    [InlineData("□ 연구개발 내용", "")]
+    [InlineData("3.2 연구개발 내용", "3.2 연구개발 내용")]
+    [InlineData("6 드론라이다 국립산림과학원 2021 활용", "")]
+    [InlineData("1. 서론 ........ 3", "")]
+    [InlineData("2024. 12. 24.", "")]
+    public void 절_제목을_알아본다(string line, string expected)
+    {
+        Assert.Equal(expected, SourceLibrary.SectionTitle(line));
+    }
+
+    [Fact]
     public void 폼피드가_있으면_쪽_경계로_쓴다()
     {
         var pages = SourceLibrary.SplitText("1쪽 내용\f2쪽 내용\f3쪽 내용");
@@ -170,6 +243,8 @@ public sealed class SourceLibraryTests(ITestOutputHelper output) : IDisposable
         var started = DateTime.Now;
         int pages = library.AddFile(file);
         output.WriteLine($"{Path.GetFileName(file)}: {pages}쪽 색인 {(DateTime.Now - started).TotalSeconds:0.0}초");
+        var outline = library.Outline(Path.GetFileName(file));
+        output.WriteLine($"목차 {outline.Length}자\n{outline[..Math.Min(3000, outline.Length)]}");
         foreach (var query in (Environment.GetEnvironmentVariable("BCKPPT_LIVE_QUERY") ?? "과업 내용").Split('|'))
         {
             output.WriteLine($"\n## {query}");
