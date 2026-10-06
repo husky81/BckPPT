@@ -1333,6 +1333,7 @@ public class PptComService : IPptComService
                                          $"문단 {edit.ParagraphIndex} — {ex.Message}");
                         }
                     }
+                    TrimTrailingParagraphMarks(tr);
                 }
                 SaveUnlessKept(prs!);
             }
@@ -1340,6 +1341,22 @@ public class PptComService : IPptComService
 
             return new ParagraphEditResult(snapshots, failures);
         });
+
+    /// <summary>
+    /// 상자 끝의 Enter(빈 마지막 문단)를 뗀다. COM의 Paragraphs.Count는 이 빈 문단을 세지 않아 지울 대상에서 빠지고,
+    /// 남으면 세로 가운데 정렬 상자에서 글이 위로 올라간다(2026-10-07 착수보고 카드 제목: 템플릿 제목 끝에 Enter가 있었다).
+    /// </summary>
+    private static void TrimTrailingParagraphMarks(dynamic tr)
+    {
+        try
+        {
+            string text = (string)tr.Text;
+            int keep = text.TrimEnd('\r').Length;
+            if (keep == text.Length || keep == 0) return;
+            tr.Characters(keep + 1, text.Length - keep).Delete();
+        }
+        catch { /* 못 떼도 내용은 맞다 */ }
+    }
 
     /// <summary>기존 문단의 텍스트만 교체. Bullet → Indent → Font 순서 복원은 필수다.</summary>
     private static void ReplaceParagraph(
