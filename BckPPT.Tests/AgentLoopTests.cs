@@ -152,9 +152,9 @@ public sealed class AgentLoopTests : IDisposable
     {
         var llm = new FakeLlmClient(
             FakeLlmClient.Calls(("set_paragraphs", """{"slide": 1, "shape": "C1_rnd", "paragraphs": ["새 내용"]}""")),
-            FakeLlmClient.Text("어느 카드를 바꿀까요?"),
-            FakeLlmClient.Text("어느 카드를 바꿀까요?"),
-            FakeLlmClient.Text("어느 카드를 바꿀까요?"));
+            FakeLlmClient.Text("이제 검사하겠습니다."),
+            FakeLlmClient.Text("이제 검사하겠습니다."),
+            FakeLlmClient.Text("이제 검사하겠습니다."));
         using var session = StartSession();
 
         var result = await Loop(llm).RunAsync(session, "채워줘");
@@ -162,6 +162,27 @@ public sealed class AgentLoopTests : IDisposable
         Assert.Equal(AgentStopReason.AnsweredWithoutTools, result.Reason);
         Assert.Equal(4, result.Turns);   // 이어가라는 안내 2번 뒤 끝낸다
     }
+
+    [Fact]
+    public async Task 사용자에게_되물으면_재촉하지_않는다()
+    {
+        // 2026-10-07: "채울 내용을 알려주시면…"이라고 바르게 물었는데 재촉이 끊어 임시 글상자를 넣고 끝냈다.
+        var llm = new FakeLlmClient(
+            FakeLlmClient.Calls(("set_paragraphs", """{"slide": 1, "shape": "C1_rnd", "paragraphs": ["새 내용"]}""")),
+            FakeLlmClient.Text("어떤 과제로 채울지 알려주시면 채우겠습니다."));
+        using var session = StartSession();
+
+        var result = await Loop(llm).RunAsync(session, "채워줘");
+
+        Assert.Equal(AgentStopReason.AnsweredWithoutTools, result.Reason);
+        Assert.Equal(2, result.Turns);
+    }
+
+    [Theory]
+    [InlineData("어느 카드를 바꿀까요?", true)]
+    [InlineData("원문을 첨부해 주세요.", true)]
+    [InlineData("이제 lint_slide로 확인하겠습니다.", false)]
+    public void 되묻는_답을_알아본다(string content, bool asks) => Assert.Equal(asks, AgentLoop.AsksUser(content));
 
     [Fact]
     public async Task 템플릿에_원래_있던_문제는_판정하지_않는다()

@@ -106,7 +106,7 @@ public sealed class AgentLoop(ILlmClient llm, ToolRegistry tools, AgentLoopOptio
             // qwen3는 "이제 lint_slide로 확인하겠습니다"라고 말만 하고 멈추곤 한다(실측). 슬라이드를 바꾼 뒤라면
             // 한 번은 이어가게 한다. 그래도 도구 없이 답하면 질문일 수 있으므로 끝내고, 바꾼 슬라이드의 판정만 보여준다.
             if (completion.ToolCalls.Count == 0 && nudges < options.NudgesWithoutFinish &&
-                session.Context.Origins.Touched.Count > 0)
+                session.Context.Origins.Touched.Count > 0 && !AsksUser(completion.Content))
             {
                 nudges++;
                 // 남은 위반을 함께 보여줘야 무엇을 고칠지 안다. 실측에서 위반 15건을 남긴 채 "다음 단계"만 말하고 멈췄다.
@@ -190,6 +190,19 @@ public sealed class AgentLoop(ILlmClient llm, ToolRegistry tools, AgentLoopOptio
             catch { /* 측정 실패는 판정 불가로 보고 루프를 막지 않는다. */ }
         }
         return issues;
+    }
+
+    /// <summary>
+    /// 사용자에게 되묻는 답인지. 이런 답은 재촉하지 않는다. "채울 내용을 알려주시면…"이라고 바르게 물었는데
+    /// 재촉이 끊어 임시 글상자를 넣고 끝낸 일이 있었다(2026-10-07 채팅창 사용).
+    /// </summary>
+    public static bool AsksUser(string content)
+    {
+        var text = content.Trim();
+        if (text.Length == 0) return false;
+        if (text.Contains('?') || text.Contains('？')) return true;
+        string[] cues = ["알려주시면", "알려 주시면", "알려주세요", "알려 주세요", "말씀해", "주시겠", "할까요", "드릴까요", "원하시", "첨부해"];
+        return cues.Any(text.Contains);
     }
 
     public static string Truncate(string text, int max) =>
