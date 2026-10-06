@@ -203,12 +203,23 @@ public sealed class CardPipelineTests : IDisposable
     }
 
     [Fact]
-    public async Task 템플릿보다_카드가_많으면_거부한다()
+    public async Task 템플릿보다_카드가_많으면_여러_쪽으로_나눈다()
     {
-        var context = Context((_, _) => "{}");
-        var cards = Enumerable.Range(1, 3).Select(i => new CardSpec($"{i}", "과제")).ToList();
-        await Assert.ThrowsAsync<AgentToolException>(() =>
-            new CardPipeline(context).RunAsync(new CardJob(2, 2, [new CardSlideSpec(cards)]), CancellationToken.None));
+        var context = Context((_, _) => """{"cards": [{"number": "1", "title": "가"}, {"number": "2", "title": "나"}, {"number": "3", "title": "다"}]}""");
+        var cards = Enumerable.Range(1, 3).Select(i => new CardSpec($"{i}", $"과제{i}")).ToList();
+
+        var report = await new CardPipeline(context).RunAsync(new CardJob(2, 2, [new CardSlideSpec(cards)]), CancellationToken.None);
+
+        Assert.Equal(4, _ppt.Slides.Count);                                   // 템플릿 카드 2장 → 2+1로 두 쪽
+        Assert.Contains("3쪽: 카드 1·2", report);
+        Assert.Contains("4쪽: 카드 3", report);
+        Assert.Equal(["과제3"], _ppt.Slides[3].Single(s => s.Name == "C1_title").Paragraphs);
+    }
+
+    [Fact]
+    public void 문안_답에_cards가_없으면_형식_오류다()
+    {
+        Assert.Throws<FormatException>(() => CardFillPrompts.ParseDrafts("{}", ["overview"]));
     }
 
     public void Dispose()

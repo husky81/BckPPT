@@ -135,7 +135,9 @@ public static class CardFillPrompts
     {
         using var document = JsonDocument.Parse(ExtractJson(text));
         var root = document.RootElement;
-        var cards = root.ValueKind == JsonValueKind.Array ? root : root.GetProperty("cards");
+        var cards = root.ValueKind == JsonValueKind.Array ? root
+            : root.TryGetProperty("cards", out var c) && c.ValueKind == JsonValueKind.Array ? c
+            : throw new FormatException("답에 \"cards\" 배열이 없습니다.");
         var drafts = new List<CardDraft>();
         foreach (var card in cards.EnumerateArray())
         {
@@ -199,6 +201,10 @@ public static class CardJobExtractor
           - document: 그 과제의 원문 별칭. 원문 목록에서 과제명과 가장 맞는 것
           - title(쪽): 그 쪽의 슬라이드 제목(요청에 있으면)
         - header: 패널 위 머리말(요청에 있으면), legend: 범례 문구(요청에 있으면)
+        - "문서(파일)마다 카드 하나"처럼 카드를 하나하나 적지 않았으면, 원문 목록의 모든 문서로 카드를 만든다.
+          title은 문서명에서 앞 번호, [붙임] 같은 머리표, "기획", "최종보고서", "연구개발계획서", 확장자를 뺀 과제명,
+          number는 요청에 없으면 1부터 차례로 붙인다. 쪽을 나누지 말고 slides 하나에 모두 넣는다(코드가 템플릿 카드 수대로 나눈다).
+        - 템플릿 쪽이 "해당 쪽", "그 쪽"처럼 앞 대화의 쪽을 가리키면, 요청에 적힌 쪽 번호나 문맥의 쪽을 쓴다. 정할 수 없으면 null로 둔다.
         JSON 하나만 답한다.
         예: {"template_slide": 33, "after": 34, "slides": [{"title": "…(1/2)", "cards": [{"number": "1", "title": "…", "tag": "…", "document": "D1"}, …]}, …], "header": "…", "legend": "…"}
         """;
@@ -218,8 +224,14 @@ public static class CardJobExtractor
                 ? (v.ValueKind == JsonValueKind.String ? v.GetString() : v.GetRawText())?.Trim() is { Length: > 0 } s ? s : null
                 : null;
 
+        // 쪽 구분 없이 cards만 준 답도 받는다(코드가 템플릿 카드 수대로 나눈다).
         if (!root.TryGetProperty("slides", out var slidesElement) || slidesElement.ValueKind != JsonValueKind.Array)
-            throw new FormatException("'slides' 배열이 없습니다.");
+        {
+            if (root.TryGetProperty("cards", out var flat) && flat.ValueKind == JsonValueKind.Array)
+                slidesElement = JsonDocument.Parse("[{\"cards\": " + flat.GetRawText() + "}]").RootElement.Clone();
+            else
+                throw new FormatException("'slides' 배열이 없습니다.");
+        }
         var slides = new List<CardSlideSpec>();
         foreach (var slide in slidesElement.EnumerateArray())
         {
@@ -234,6 +246,24 @@ public static class CardJobExtractor
         }
         if (slides.Count == 0) throw new FormatException("만들 쪽이 없습니다.");
         return new CardJob(Int(root, "template_slide"), Int(root, "after"), slides, Str(root, "header"), Str(root, "legend"));
+    }
+
+    /// <summary>
+    /// 한 쪽에 템플릿 카드 수보다 많은 카드가 있으면 여러 쪽으로 나눈다. 둘째 쪽부터는 제목에 붙은 "(1/n)"을 쪽 순서로 바꾼다.
+    /// "문서마다 카드 하나"로 13장이 한 쪽에 들어온 경우를 4+4+4+1로 나눈다.
+    /// </summary>
+    public static CardJob SplitToCapacity(CardJob job, int capacity)
+    {
+        if (capacity <= 0 || job.Slides.All(s => s.Cards.Count <= capacity)) return job;
+        var slides = new List<CardSlideSpec>();
+        foreach (var slide in job.Slides)
+            for (int i = 0; i < slide.Cards.Count; i += capacity)
+                slides.Add(new CardSlideSpec(slide.Cards.Skip(i).Take(capacity).ToList(), slide.Title));
+        // 제목 끝의 "(k/n)" 꼴은 나눈 쪽 수에 맞춰 다시 매긴다.
+        for (int i = 0; i < slides.Count; i++)
+            if (slides[i].Title is { } title && Regex.IsMatch(title, @"\(\d+/\d+\)\s*$"))
+                slides[i] = slides[i] with { Title = Regex.Replace(title, @"\(\d+/\d+\)\s*$", $"({i + 1}/{slides.Count})") };
+        return job with { Slides = slides };
     }
 
     /// <summary>요청에 "N번"으로 적힌 카드 번호가 사양에 모두 들어갔는지 본다. 빠졌으면 빠진 번호를 돌려준다.</summary>

@@ -36,7 +36,8 @@ public sealed class CardPipeline(AgentToolContext ctx)
             try
             {
                 var parsed = CardJobExtractor.Parse(answer);
-                var missing = CardJobExtractor.MissingNumbers(userRequest, parsed);
+                var current = userRequest.LastIndexOf("현재 요청: ", StringComparison.Ordinal) is var at and >= 0 ? userRequest[at..] : userRequest;
+                var missing = CardJobExtractor.MissingNumbers(current, parsed);
                 if (missing.Count > 0 && attempt < 2) { problem = $"요청의 카드 {string.Join(", ", missing)}번이 빠졌다"; continue; }
                 job = parsed;
             }
@@ -134,8 +135,8 @@ public sealed class CardPipeline(AgentToolContext ctx)
         }
         var sample = await SampleAsync(job.TemplateSlide, model, ct);
         int maxCards = template.Cards.Count;
-        var tooMany = job.Slides.Select((s, i) => (s, i)).Where(x => x.s.Cards.Count > maxCards).ToList();
-        if (tooMany.Count > 0) throw new AgentToolException($"템플릿 카드는 {maxCards}개입니다. 슬라이드 {tooMany[0].i + 1}에 카드 {tooMany[0].s.Cards.Count}개를 넣을 수 없습니다.");
+        // 카드가 템플릿 한 쪽보다 많으면 여러 쪽으로 나눈다("문서마다 카드 하나" 요청 등).
+        job = CardJobExtractor.SplitToCapacity(job, maxCards);
         report.Append($"템플릿 {job.TemplateSlide}쪽: 카드 {maxCards}개, 예산 {titleBudget.Describe().Replace("제목: ", "제목 ")}; ")
               .Append(string.Join("; ", budgets.Select(b => b.Describe()))).Append('\n');
         return new CardPlan(job, template, titleBudget, budgets, positionBudgets, sample, report.ToString());

@@ -80,14 +80,15 @@ public static class PptAgentTools
                 Schema("""{"slide": {"type": "integer"}, "question": {"type": "string"}}""", "slide"), false, RenderSlide),
             new("finish", "작업을 마친다. summary에 무엇을 바꿨는지 사용자에게 보고할 내용을 적는다",
                 Schema("""{"summary": {"type": "string"}}""", "summary"), false, Finish),
-        };
-        if (includeSources)
-        {
-            tools.Add(new("fill_cards",
+            // 원문이 없어도 보이게 둔다. 없으면 도구가 첨부를 안내한다(원문 첨부 전 요청에 "도구가 없다"고 끝난 일이 있었다).
+            new("fill_cards",
                 "카드형 템플릿 슬라이드를 복제해 보고서들을 카드로 정리한다. 요청 해석·복제·남는 카드 삭제·패널 폭·이름·원문 요점·문안 작성·길이 맞춤을 한 번에 한다. " +
                 "이런 요청은 다른 도구를 부르기 전에 이 도구를 먼저 한 번 부른다(슬라이드를 미리 복제하지 않는다). " +
                 "request에는 사용자 요청을 줄이지 말고 그대로 넣는다",
-                Schema("""{"request": {"type": "string", "description": "사용자 요청 전문"}}"""), true, FillCards));
+                Schema("""{"request": {"type": "string", "description": "사용자 요청 전문"}}"""), true, FillCards),
+        };
+        if (includeSources)
+        {
             tools.Add(new("brief_source",
                 "원문 한 문서에서 요약문·개요, 문제점·필요성, 연구개발 내용·목표 절을 찾아 읽고 요점만 정리해 돌려준다(쪽 번호 포함). " +
                 "카드를 채울 때 문서마다 이것을 먼저 부른다. document는 D1 같은 별칭. focus로 원하는 항목을 바꿀 수 있다",
@@ -508,6 +509,11 @@ public static class PptAgentTools
         // 모델이 요약해 넘긴 문장보다 사용자 원문이 정확하다. 원문이 있으면 그것으로 사양을 뽑는다.
         string request = ctx.UserRequest is { Length: > 0 } original ? original
             : ToolArgs.OptionalString(args, "request") ?? throw new AgentToolException("request(사용자 요청)가 필요합니다.");
+        if (ctx.Sources is null || ctx.Sources.Outline(null).StartsWith("첨부된 원문이 없습니다", StringComparison.Ordinal))
+        {
+            ctx.FinishSummary = "카드에 채울 원문이 없습니다. [원문 첨부]로 보고서 파일이나 폴더를 붙이거나, 요청에 폴더 경로를 적어 다시 보내 주세요.";
+            return ctx.FinishSummary;
+        }
         var report = await new Cards.CardPipeline(ctx).RunFromRequestAsync(request, ct);
         // 파이프라인 뒤에 qwen 루프가 남은 위반을 고치게 두면 이름·패널·문구를 망쳤다(실행 11, 35만 토큰).
         // 결과를 그대로 사용자에게 보여주고 끝낸다. 추가 수정은 사용자가 짚어서 요청한다.

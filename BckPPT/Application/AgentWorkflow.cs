@@ -43,10 +43,9 @@ public sealed class AgentWorkflow(
             ct.ThrowIfCancellationRequested();
             if (Directory.Exists(path))
             {
-                var found = Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories)
+                var found = PreferTextVersions(Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories)
                     .Where(f => SourceLibrary.SupportedExtensions.Contains(Path.GetExtension(f)))
-                    .Where(f => !Path.GetFileName(f).StartsWith("~$", StringComparison.Ordinal))
-                    .ToList();
+                    .Where(f => !Path.GetFileName(f).StartsWith("~$", StringComparison.Ordinal)));
                 foreach (var file in found) pages += await AttachFileAsync(file, ct);
                 files += found.Count;
             }
@@ -121,6 +120,50 @@ public sealed class AgentWorkflow(
         return (before, after);
     }
 
+    /// <summary>
+    /// 같은 폴더에 같은 이름의 원문이 여러 형식으로 있으면(보고서.pdf와 PDF에서 뽑은 보고서.md) 하나만 남긴다.
+    /// md·txt(이미 뽑은 텍스트)를 pdf·pptx보다 먼저 고른다. 안 그러면 "문서마다 카드 하나"가 두 배로 생긴다.
+    /// </summary>
+    public static List<string> PreferTextVersions(IEnumerable<string> files)
+    {
+        static int Rank(string f) => Path.GetExtension(f).ToLowerInvariant() switch
+        {
+            ".md" or ".markdown" => 0, ".txt" => 1, ".pdf" => 2, _ => 3
+        };
+        return files
+            .GroupBy(f => Path.Combine(Path.GetDirectoryName(f) ?? "", Path.GetFileNameWithoutExtension(f)), StringComparer.OrdinalIgnoreCase)
+            .Select(g => g.OrderBy(Rank).First())
+            .OrderBy(f => f, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    /// <summary>
+    /// 요청 문장에서 실제로 있는 원문 경로(폴더, 또는 pdf·pptx·md·txt 파일)를 찾는다.
+    /// 따옴표로 감싼 경로와, 따옴표 없이 드라이브 문자로 시작해 줄 끝까지 이어지는 경로를 본다.
+    /// </summary>
+    public static IReadOnlyList<string> MentionedSourcePaths(string text)
+    {
+        var candidates = new List<string>();
+        foreach (System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches(text, "[\"“”'](?<p>[A-Za-z]:\\\\[^\"“”'\\r\\n]+)[\"“”']"))
+            candidates.Add(m.Groups["p"].Value.Trim());
+        foreach (System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches(text, @"(?<![""“”'\w])(?<p>[A-Za-z]:\\[^""“”'\r\n]+)"))
+        {
+            // 따옴표 없는 경로는 공백을 품을 수 있어, 뒤에서부터 잘라 가며 실제로 있는 가장 긴 경로를 고른다.
+            var cut = m.Groups["p"].Value.TrimEnd();
+            while (cut.Length > 3)
+            {
+                if (Directory.Exists(cut) || File.Exists(cut)) { candidates.Add(cut); break; }
+                int space = cut.LastIndexOf(' ');
+                if (space <= 2) break;
+                cut = cut[..space].TrimEnd();
+            }
+        }
+        return candidates
+            .Where(p => Directory.Exists(p) || (File.Exists(p) && SourceLibrary.SupportedExtensions.Contains(Path.GetExtension(p))
+                                                 && !p.EndsWith(".pptx", StringComparison.OrdinalIgnoreCase)))
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
     public async Task<AgentTurnResult> RunAsync(
         string sourcePath, string instruction, IProgress<AgentEvent>? progress, CancellationToken ct)
     {
@@ -142,6 +185,16 @@ public sealed class AgentWorkflow(
         Session.Context.ExternalWriter = ExternalWriting;
         Session.Context.LlmFit = LlmFit;
         Session.Context.PendingCards = null;   // 새 요청이 오면 붙여넣기 대기는 취소한다
+
+        // 요청에 원문 파일·폴더 경로를 적으면 첨부한다. 버튼을 쓰지 않고 경로를 적어 "도구가 없다"로 끝난 일이 있었다.
+        var mentioned = MentionedSourcePaths(instruction)
+            .Where(p => !_attached.Contains(Path.GetFullPath(p), StringComparer.OrdinalIgnoreCase)).ToList();
+        if (mentioned.Count > 0)
+        {
+            Session.Context.Status?.Report($"요청에 적힌 경로의 원문을 첨부하는 중: {string.Join(", ", mentioned.Select(Path.GetFileName))}");
+            var (files, pages) = await AttachAsync(mentioned, ct);
+            Session.Context.Status?.Report($"원문 {files}개 · {pages}쪽 첨부");
+        }
         bool hasSources = _attached.Count > 0;
         var scoped = hasSources ? library.WithScope(_attached) : null;
         Session.Context.Sources = scoped;

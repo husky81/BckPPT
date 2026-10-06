@@ -72,7 +72,12 @@ public sealed class AgentLoop(ILlmClient llm, ToolRegistry tools, AgentLoopOptio
         int nudges = 0;
         var runUsage = LlmUsage.Zero;
         session.Context.FinishSummary = null;
-        session.Context.UserRequest = userMessage;
+        // "해당 쪽"처럼 앞 요청을 가리키는 말을 풀 수 있게 같은 세션의 이전 요청(자동 안내 제외)도 함께 넘긴다.
+        var earlier = session.Messages
+            .Where(m => m.Role == "user" && !m.Content.StartsWith("(자동 안내)", StringComparison.Ordinal) && m.Content != userMessage)
+            .Select(m => m.Content).TakeLast(3).ToList();
+        session.Context.UserRequest = earlier.Count == 0 ? userMessage
+            : string.Join("\n", earlier.Select(e => "이전 요청: " + e)) + "\n현재 요청: " + userMessage;
 
         for (int turn = 1; turn <= options.MaxTurns; turn++)
         {
