@@ -273,3 +273,40 @@ public sealed class AgentLoopTests : IDisposable
         public void Report(T value) => report(value);
     }
 }
+
+public class ToolArgumentTests
+{
+    [Theory]
+    [InlineData("216*4", 864f)]
+    [InlineData("32 + 236", 268f)]
+    [InlineData("(896 - 20) / 4", 219f)]
+    public void 계산식_인자를_계산한다(string expression, float expected)
+    {
+        using var doc = System.Text.Json.JsonDocument.Parse($$"""{"width": "{{expression}}"}""");
+        Assert.Equal(expected, BckPPT.Agent.Tools.ToolArgs.OptionalFloat(doc.RootElement, "width"));
+    }
+
+    [Fact]
+    public void 숫자와_연산자_외의_글자는_거부한다()
+    {
+        using var doc = System.Text.Json.JsonDocument.Parse("""{"width": "Width*2"}""");
+        Assert.Throws<BckPPT.Agent.Tools.AgentToolException>(() => BckPPT.Agent.Tools.ToolArgs.OptionalFloat(doc.RootElement, "width"));
+    }
+
+    [Fact]
+    public void 카드_영역_안의_도형을_고른다()
+    {
+        BckPPT.Models.ShapeEntry E(string a, float l, float t, float w, float h, int id) => new(a, a, "", 1, l, t, w, h, false, "", id);
+        var card = E("@20", 262, 112, 216, 390, 20);
+        var shapes = new[]
+        {
+            card,
+            E("@24", 271, 117, 27, 27, 24),       // 카드 안 번호
+            E("@27", 272, 144, 206, 35, 27),      // 카드 안 제목
+            E("@33", 482, 112, 216, 390, 33),     // 옆 카드
+            E("Panel", 32, 93, 896, 422, 1),      // 바깥 틀(더 크다)
+        };
+        var inside = BckPPT.Agent.Tools.PptAgentTools.InsideOf(card, shapes);
+        Assert.Equal(["@24", "@27"], inside.Select(s => s.Address));
+    }
+}

@@ -78,6 +78,25 @@ public interface ISourceLibrary
 
 public sealed record SourceHit(string Document, int Page, string Snippet);
 
+/// <summary>숫자와 + - * / ( )만 있는 식을 계산한다. 그 밖의 글자가 있으면 거부한다.</summary>
+public static class Arithmetic
+{
+    private static readonly System.Text.RegularExpressions.Regex Allowed = new(@"^[\d\s.+\-*/()]+$");
+
+    public static bool TryEvaluate(string expression, out float value)
+    {
+        value = 0;
+        if (!Allowed.IsMatch(expression)) return false;
+        try
+        {
+            var result = new System.Data.DataTable().Compute(expression, null);
+            value = Convert.ToSingle(result, System.Globalization.CultureInfo.InvariantCulture);
+            return float.IsFinite(value);
+        }
+        catch { return false; }
+    }
+}
+
 /// <summary>도구 인자 읽기. 빠지거나 형식이 틀리면 모델이 고칠 수 있는 문장으로 알린다.</summary>
 public static class ToolArgs
 {
@@ -106,6 +125,8 @@ public static class ToolArgs
         if (v.ValueKind == JsonValueKind.Number) return v.GetSingle();
         if (v.ValueKind == JsonValueKind.String &&
             float.TryParse(v.GetString(), System.Globalization.CultureInfo.InvariantCulture, out var f)) return f;
+        // 모델이 "216*4"처럼 계산식을 보내기도 한다. 숫자와 사칙연산만 있으면 계산해 준다.
+        if (v.ValueKind == JsonValueKind.String && Arithmetic.TryEvaluate(v.GetString()!, out var computed)) return computed;
         throw new AgentToolException($"인자 '{name}'는 숫자여야 합니다.");
     }
 

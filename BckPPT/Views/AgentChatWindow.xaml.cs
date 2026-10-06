@@ -463,6 +463,8 @@ public partial class AgentChatWindow : Window, INotifyPropertyChanged
     private static string ToUserMessage(LlmException ex) => ex.ErrorCode switch
     {
         "quota_exceeded" => "GitOky LLM 사용 한도를 초과했습니다.",
+        _ when ex.Message.Contains("quota", StringComparison.OrdinalIgnoreCase) =>
+            $"GitOky LLM 일일 토큰 한도를 다 썼습니다. 한도가 초기화된 뒤 다시 요청해 주세요. ({ex.Message})",
         "timeout" => "LLM 응답 시간이 초과되었습니다. 다시 시도해 주세요.",
         _ when ex.StatusCode == 401 || ex.StatusCode == 403 => "GitOky LLM 키 또는 권한을 확인해 주세요.",
         _ => $"LLM 요청 실패: {ex.Message}"

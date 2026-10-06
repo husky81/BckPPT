@@ -44,8 +44,8 @@ public static class PptAgentTools
             new("set_geometry", "도형 위치·크기(pt)를 바꾼다. 준 값만 바뀐다",
                 Schema("{" + SlideShape + """, "left": {"type": "number"}, "top": {"type": "number"}, "width": {"type": "number"}, "height": {"type": "number"}}""",
                     "slide", "shape"), true, SetGeometry),
-            new("delete_shape", "도형을 지운다",
-                Schema("{" + SlideShape + "}", "slide", "shape"), true, DeleteShape),
+            new("delete_shape", "도형을 지운다. with_contents=true면 그 도형 영역 안에 든 도형(카드 안의 글 상자 등)도 함께 지운다. 카드 하나를 통째로 지울 때 쓴다",
+                Schema("{" + SlideShape + """, "with_contents": {"type": "boolean"}}""", "slide", "shape"), true, DeleteShape),
             new("add_text_shape", "텍스트 상자(범례·배지)를 추가한다. auto_width면 글자 폭에 맞추고 right_edge가 있으면 오른쪽 끝을 그 위치에 맞춘다",
                 Schema("""
                     {"slide": {"type": "integer"}, "text": {"type": "string"},
@@ -304,12 +304,37 @@ public static class PptAgentTools
     {
         int slide = ToolArgs.Int(args, "slide");
         string shape = ToolArgs.String(args, "shape");
-        await Task.Run(() => ctx.Ppt.DeleteShape(ctx.WorkingPath, slide, shape), ct);
+        var targets = new List<string> { shape };
+        if (ToolArgs.OptionalBool(args, "with_contents") == true)
+        {
+            // 카드 배경만 지우고 안의 글 상자를 남기는 일이 있었다(2026-10-06 실측). 중심이 영역 안에 있는 도형을 함께 지운다.
+            var shapes = await Task.Run(() => ctx.Ppt.ListShapes(ctx.WorkingPath, slide), ct);
+            var container = shapes.FirstOrDefault(s => s.Address == shape || s.Name == shape)
+                ?? throw new AgentToolException($"{slide}쪽에서 도형 '{shape}'를 찾지 못했습니다.");
+            targets.AddRange(InsideOf(container, shapes).Select(s => s.Id > 0 ? $"@{s.Id}" : s.Address));
+        }
+        // 이름 주소가 밀리지 않게 Id 주소로, 안쪽부터 지운다.
+        foreach (var target in Enumerable.Reverse(targets))
+            await Task.Run(() => ctx.Ppt.DeleteShape(ctx.WorkingPath, slide, target), ct);
         ctx.Origins.MarkTouched(slide);
         ctx.AddedShapes.Remove((slide, shape));
-        ctx.Changes.Add($"{slide}쪽 {shape} 삭제");
-        return $"{shape}를 지웠습니다. 같은 이름 도형의 #n 번호가 바뀌었을 수 있으니 list_shapes로 다시 확인하세요.";
+        ctx.Changes.Add(targets.Count == 1 ? $"{slide}쪽 {shape} 삭제" : $"{slide}쪽 {shape}와 안의 도형 {targets.Count - 1}개 삭제");
+        return targets.Count == 1
+            ? $"{shape}를 지웠습니다."
+            : $"{shape}와 그 안의 도형 {targets.Count - 1}개를 지웠습니다.";
     }
+
+    /// <summary>중심이 <paramref name="container"/> 영역 안에 있는 다른 도형.</summary>
+    public static IReadOnlyList<ShapeEntry> InsideOf(ShapeEntry container, IReadOnlyList<ShapeEntry> shapes) =>
+        shapes.Where(s => !ReferenceEquals(s, container) && s.Address != container.Address)
+              .Where(s =>
+              {
+                  float cx = s.Left + s.Width / 2, cy = s.Top + s.Height / 2;
+                  return cx >= container.Left && cx <= container.Left + container.Width &&
+                         cy >= container.Top && cy <= container.Top + container.Height &&
+                         s.Width * s.Height < container.Width * container.Height;
+              })
+              .ToList();
 
     private static async Task<string> AddTextShape(AgentToolContext ctx, JsonElement args, CancellationToken ct)
     {
