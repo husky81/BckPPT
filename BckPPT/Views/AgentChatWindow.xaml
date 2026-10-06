@@ -26,6 +26,14 @@
                     <TextBlock Text="{Binding SourcesText}" Foreground="{StaticResource SubTextBr}" Margin="0,5,0,0"
                                TextTrimming="CharacterEllipsis" ToolTip="{Binding SourcesText}"/>
                     <TextBlock Text="{Binding StatusText}" Foreground="{StaticResource SubTextBr}" Margin="0,5,0,0"/>
+                    <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                        <CheckBox IsChecked="{Binding ExternalWriting}" Foreground="{StaticResource TextBr}" VerticalContentAlignment="Center"
+                                  Content="카드 문안은 내 고급 모델로(요청문 복사·답 붙여넣기)"
+                                  ToolTip="ChatGPT·Claude 등 사용하는 모델에 요청문을 붙여넣어 문안을 받습니다. gitoky 사용량이 크게 줄어듭니다"/>
+                        <CheckBox IsChecked="{Binding LlmFit}" Foreground="{StaticResource TextBr}" VerticalContentAlignment="Center" Margin="16,0,0,0"
+                                  Content="길이 맞춤에 LLM 사용"
+                                  ToolTip="끄면 줄 수를 넘는 항목을 뒤에서부터 빼기만 합니다(gitoky 사용 없음)"/>
+                    </StackPanel>
                 </StackPanel>
                 <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
                     <Button Content="원문 첨부" Style="{StaticResource DarkBtn}" Margin="0,0,8,0" Click="AttachSources_Click"
@@ -42,6 +50,24 @@
                     <TextBlock Text="{Binding ConversationText}" TextWrapping="Wrap" FontSize="13" LineHeight="21"/>
                     <TextBlock Text="{Binding StreamingText}" TextWrapping="Wrap" FontSize="13" LineHeight="21"
                                Foreground="{StaticResource TextBr}" Margin="0,12,0,0"/>
+                    <Border Visibility="{Binding PendingVisibility}" BorderBrush="{StaticResource BorderBr}" BorderThickness="1"
+                            CornerRadius="6" Padding="14" Margin="0,16,0,0">
+                        <StackPanel>
+                            <TextBlock Text="고급 모델로 카드 문안 받기" FontWeight="SemiBold"/>
+                            <TextBlock TextWrapping="Wrap" Foreground="{StaticResource SubTextBr}" Margin="0,4,0,8"
+                                       Text="1) 요청문을 복사해 사용하는 모델(ChatGPT·Claude 등)에 붙여넣습니다. 2) 받은 답(JSON)을 아래에 붙여넣고 [적용]을 누릅니다."/>
+                            <StackPanel Orientation="Horizontal">
+                                <Button Content="요청문 복사" Style="{StaticResource AccentBtn}" Click="CopyPrompt_Click" IsEnabled="{Binding CanSend}"/>
+                                <Button Content="기본 모델로 작성" Style="{StaticResource DarkBtn}" Margin="8,0,0,0" Click="WriteDefault_Click" IsEnabled="{Binding CanSend}"
+                                        ToolTip="고급 모델 없이 BckPPT 기본 모델(gitoky qwen)로 씁니다"/>
+                            </StackPanel>
+                            <TextBox x:Name="AnswerBox" Style="{StaticResource DarkInput}" Margin="0,10,0,0" Height="120" Padding="8"
+                                     AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"
+                                     ToolTip="모델이 준 답을 그대로 붙여넣습니다(코드블록 표시가 있어도 됩니다)"/>
+                            <Button Content="적용" Style="{StaticResource AccentBtn}" HorizontalAlignment="Left" Margin="0,8,0,0"
+                                    Click="ApplyAnswer_Click" IsEnabled="{Binding CanSend}"/>
+                        </StackPanel>
+                    </Border>
                     <TextBlock Text="적용 전" Style="{StaticResource Caption}" Margin="0,16,0,6"
                                Visibility="{Binding PreviewImagesVisibility}"/>
                     <ItemsControl ItemsSource="{Binding PreviewImages}" Visibility="{Binding PreviewImagesVisibility}">

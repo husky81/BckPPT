@@ -43,10 +43,64 @@ public sealed class CardPipeline(AgentToolContext ctx)
             catch (Exception ex) when (ex is FormatException or JsonException && attempt < 2) { problem = ex.Message; }
         }
         if (job is null) throw new AgentToolException($"요청에서 카드 사양을 뽑지 못했습니다: {problem}");
-        return $"사양: {CardJobExtractor.Describe(job)}\n" + await RunAsync(job, ct);
+        string spec = $"사양: {CardJobExtractor.Describe(job)}\n";
+        if (!ctx.ExternalWriter) return spec + await RunAsync(job, ct);
+
+        // 외부 작성: 사용자가 자기 고급 모델에 붙여넣을 요청문을 만들고 멈춘다. 원문 요점 정리(qwen)도 건너뛴다.
+        var plan = await PrepareAsync(job, ct);
+        string prompt = await ExternalPromptAsync(plan, ct);
+        ctx.PendingCards = new PendingCards(plan, prompt);
+        return spec + plan.Report + $"작성 요청문을 준비했습니다({prompt.Length:N0}자). 사용자 모델의 답을 붙여넣으면 이어서 적용합니다.\n";
+    }
+
+    /// <summary>문안 작성 전까지의 결과. 외부 작성이면 이 상태로 사용자의 답을 기다린다.</summary>
+    public sealed record CardPlan(
+        CardJob Job,
+        SlideCards Template,
+        TextBudget TitleBudget,
+        IReadOnlyList<TextBudget> Budgets,
+        IReadOnlyList<(TextBudget Title, IReadOnlyList<TextBudget> Sections)> PositionBudgets,
+        CardLayoutSample? Sample,
+        string Report)
+    {
+        public IReadOnlyList<CardSpec> AllCards => Job.Slides.SelectMany(s => s.Cards).ToList();
     }
 
     public async Task<string> RunAsync(CardJob job, CancellationToken ct)
+    {
+        var plan = await PrepareAsync(job, ct);
+        var report = new StringBuilder(plan.Report);
+        var briefs = await BriefAllAsync(plan.AllCards, plan.Budgets, ct);
+        Status($"카드 {plan.AllCards.Count}장 문안을 쓰는 중");
+        var drafts = await WriteAsync(plan.AllCards, briefs, plan.TitleBudget, plan.Budgets, plan.Sample, report, ct);
+        return report + await ApplyAsync(plan, drafts, ct);
+    }
+
+    /// <summary>사용자 모델이 쓴 답(JSON)으로 이어서 배치한다.</summary>
+    public async Task<string> ApplyExternalAsync(PendingCards pending, string answer, CancellationToken ct)
+    {
+        IReadOnlyList<CardDraft> drafts;
+        try { drafts = CardFillPrompts.ParseDrafts(answer, pending.Plan.Budgets.Select(b => b.Role).ToList()); }
+        catch (Exception ex) when (ex is FormatException or JsonException or KeyNotFoundException or InvalidOperationException)
+        {
+            throw new AgentToolException($"붙여넣은 답을 읽지 못했습니다. 요청문의 출력 형식(JSON)대로인지 확인해 주세요. ({ex.Message})");
+        }
+        if (drafts.Count == 0) throw new AgentToolException("붙여넣은 답에 카드가 없습니다.");
+        return await ApplyAsync(pending.Plan, drafts, ct);
+    }
+
+    /// <summary>외부 작성을 그만두고 기본 모델로 쓴다.</summary>
+    public async Task<string> WritePendingWithDefaultAsync(PendingCards pending, CancellationToken ct)
+    {
+        var plan = pending.Plan;
+        var report = new StringBuilder();
+        var briefs = await BriefAllAsync(plan.AllCards, plan.Budgets, ct);
+        var drafts = await WriteAsync(plan.AllCards, briefs, plan.TitleBudget, plan.Budgets, plan.Sample, report, ct);
+        return report + await ApplyAsync(plan, drafts, ct);
+    }
+
+    /// <summary>템플릿 구조와 예산을 재고 사양을 검증한다(LLM 없음).</summary>
+    public async Task<CardPlan> PrepareAsync(CardJob job, CancellationToken ct)
     {
         var report = new StringBuilder();
         var ppt = ctx.Ppt;
@@ -84,14 +138,50 @@ public sealed class CardPipeline(AgentToolContext ctx)
         if (tooMany.Count > 0) throw new AgentToolException($"템플릿 카드는 {maxCards}개입니다. 슬라이드 {tooMany[0].i + 1}에 카드 {tooMany[0].s.Cards.Count}개를 넣을 수 없습니다.");
         report.Append($"템플릿 {job.TemplateSlide}쪽: 카드 {maxCards}개, 예산 {titleBudget.Describe().Replace("제목: ", "제목 ")}; ")
               .Append(string.Join("; ", budgets.Select(b => b.Describe()))).Append('\n');
+        return new CardPlan(job, template, titleBudget, budgets, positionBudgets, sample, report.ToString());
+    }
 
-        // 2. 원문 요점(문서마다 한 번, 같은 문서는 재사용)
-        var allCards = job.Slides.SelectMany(s => s.Cards).ToList();
-        var briefs = await BriefAllAsync(allCards, budgets, ct);
+    /// <summary>
+    /// 사용자 고급 모델에 붙여넣을 요청문. 지침·예산·예시·출력 형식에 원문 발췌를 그대로 담는다
+    /// (qwen 요점 정리를 건너뛰어 gitoky 사용을 줄이고, 고급 모델이 원문을 직접 읽게 한다).
+    /// </summary>
+    private async Task<string> ExternalPromptAsync(CardPlan plan, CancellationToken ct)
+    {
+        var excerpts = new List<(CardSpec Card, string Brief)>();
+        var cache = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var card in plan.AllCards)
+        {
+            string text = "";
+            if (card.Document is { Length: > 0 } document && ctx.Sources is { } sources)
+            {
+                if (!cache.TryGetValue(document, out text!))
+                {
+                    Status($"원문 {document} 발췌 중");
+                    try { text = await Task.Run(() => sources.Excerpts(document, PptAgentTools.BriefQueries, 2, ExternalExcerptChars), ct); }
+                    catch (AgentToolException ex) { text = $"(원문을 찾지 못함: {ex.Message})"; }
+                    cache[document] = text;
+                }
+            }
+            excerpts.Add((card, text.Length == 0 ? "" : "원문 발췌(국가 R&D 기획보고서):\n" + text));
+        }
+        return CardFillPrompts.ExternalPrompt(CardFillPrompts.WriterRequest(excerpts, plan.TitleBudget, plan.Budgets, plan.Sample));
+    }
 
-        // 3. 문안 작성(한 번)
-        Status($"카드 {allCards.Count}장 문안을 쓰는 중");
-        var drafts = await WriteAsync(allCards, briefs, titleBudget, budgets, sample, report, ct);
+    /// <summary>외부 요청문에 담는 문서당 발췌 글자 수. 5건이면 4만 자 안팎으로 웹 채팅에 붙여넣을 수 있다.</summary>
+    public const int ExternalExcerptChars = 8000;
+
+    /// <summary>문안으로 배치·길이 맞춤·판정을 한다.</summary>
+    private async Task<string> ApplyAsync(CardPlan plan, IReadOnlyList<CardDraft> drafts, CancellationToken ct)
+    {
+        var report = new StringBuilder();
+        var ppt = ctx.Ppt;
+        string path = ctx.WorkingPath;
+        var job = plan.Job;
+        var template = plan.Template;
+        var budgets = plan.Budgets;
+        var positionBudgets = plan.PositionBudgets;
+        var allCards = plan.AllCards.ToList();
+        _templateSlide = job.TemplateSlide;
 
         // 4. 배치
         var filled = new List<(int Slide, string Address, TextBudget Budget, IReadOnlyList<string> Items)>();
@@ -304,9 +394,10 @@ public sealed class CardPipeline(AgentToolContext ctx)
     private async Task FitAsync(
         List<(int Slide, string Address, TextBudget Budget, IReadOnlyList<string> Items)> filled, StringBuilder report, CancellationToken ct)
     {
-        if (ctx.Summarize is null) return;
         int fixedCount = 0;
-        for (int round = 1; round <= MaxFitRounds; round++)
+        // LLM 길이 맞춤을 끄면(gitoky 사용 절약) 아래 코드 마무리(항목 빼기)만 한다.
+        int rounds = ctx.Summarize is not null && ctx.LlmFit ? MaxFitRounds : 0;
+        for (int round = 1; round <= rounds; round++)
         {
             var over = new List<int>();
             var measured = new Dictionary<int, IReadOnlyList<TextLineInfo>>();

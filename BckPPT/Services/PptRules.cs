@@ -40,6 +40,14 @@ public class PptRules
     /// <summary>이름의 역할 부분(C2_title → title)에 이 문자열이 들어가면 제목으로 본다.</summary>
     public List<string> TitleRoles { get; set; } = ["title", "제목"];
 
+    // ── 에이전트 ─────────────────────────────────────────────────
+
+    /// <summary>카드 문안을 사용자 고급 모델에서 쓰게 한다(요청문 복사·답 붙여넣기).</summary>
+    public bool ExternalCardWriting { get; set; }
+
+    /// <summary>카드 길이 맞춤에 LLM(qwen)을 쓴다. 끄면 넘친 항목을 코드로만 뺀다.</summary>
+    public bool LlmLengthFit { get; set; } = true;
+
     // ── 글꼴 규칙 ────────────────────────────────────────────────
 
     public List<string> AllowedFonts { get; set; } =

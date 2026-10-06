@@ -511,7 +511,9 @@ public static class PptAgentTools
         var report = await new Cards.CardPipeline(ctx).RunFromRequestAsync(request, ct);
         // 파이프라인 뒤에 qwen 루프가 남은 위반을 고치게 두면 이름·패널·문구를 망쳤다(실행 11, 35만 토큰).
         // 결과를 그대로 사용자에게 보여주고 끝낸다. 추가 수정은 사용자가 짚어서 요청한다.
-        ctx.FinishSummary = "카드 작성을 마쳤습니다. 남은 위반이 있으면 상자를 짚어 후속 요청해 주세요.\n" + report;
+        ctx.FinishSummary = ctx.PendingCards is not null
+            ? "작성 요청문을 준비했습니다. [복사]해서 사용하는 고급 모델(ChatGPT·Claude 등)에 붙여넣고, 받은 답을 붙여넣어 [적용]해 주세요.\n" + report
+            : "카드 작성을 마쳤습니다. 남은 위반이 있으면 상자를 짚어 후속 요청해 주세요.\n" + report;
         return report;
     }
 

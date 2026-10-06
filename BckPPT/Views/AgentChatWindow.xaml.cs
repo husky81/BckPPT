@@ -46,6 +46,20 @@ public partial class AgentChatWindow : Window, INotifyPropertyChanged
         ? Visibility.Collapsed : Visibility.Visible;
     public IReadOnlyList<string> PreviewImages => _agentResult?.BeforeThumbnails ?? _currentJob?.BeforeThumbnails ?? [];
     public IReadOnlyList<string> ResultImages => _agentResult?.AfterThumbnails ?? _currentJob?.AfterThumbnails ?? [];
+    public Visibility PendingVisibility => _agentWorkflow.PendingCards is null ? Visibility.Collapsed : Visibility.Visible;
+
+    public bool ExternalWriting
+    {
+        get => _agentWorkflow.ExternalWriting;
+        set { _agentWorkflow.ExternalWriting = value; PptRules.Current.ExternalCardWriting = value; PptRules.Current.Save(); Notify(); }
+    }
+
+    public bool LlmFit
+    {
+        get => _agentWorkflow.LlmFit;
+        set { _agentWorkflow.LlmFit = value; PptRules.Current.LlmLengthFit = value; PptRules.Current.Save(); Notify(); }
+    }
+
     public Visibility AgentControlsVisibility => _agentWorkflow.Session is null ? Visibility.Collapsed : Visibility.Visible;
     public string SourcesText => _agentWorkflow.AttachedSources.Count == 0
         ? "첨부 원문 없음"
@@ -64,6 +78,8 @@ public partial class AgentChatWindow : Window, INotifyPropertyChanged
         _llmClient = llmClient;
         _approvalWorkflow = approvalWorkflow;
         _agentWorkflow = agentWorkflow;
+        _agentWorkflow.ExternalWriting = PptRules.Current.ExternalCardWriting;
+        _agentWorkflow.LlmFit = PptRules.Current.LlmLengthFit;
         _pptIndexer = pptIndexer;
         _externalJobs = externalJobs;
         _updateService = updateService;
@@ -226,9 +242,75 @@ public partial class AgentChatWindow : Window, INotifyPropertyChanged
             if (_agentResult.UsageByModel is { Count: > 0 } byModel)
                 log.Append("LLM 사용: ").Append(UsageMeter.Describe(byModel)).Append('\n');
             ConversationText = log.ToString();
+            if (_agentWorkflow.PendingCards is { } pending)
+                SetStatus($"요청문({pending.Prompt.Length:N0}자)을 준비했습니다 · [요청문 복사] 후 사용하는 모델에 붙여넣고, 답을 붙여넣어 [적용]해 주세요.");
         }
         catch (OperationCanceledException) { SetStatus("작업을 중단했습니다. 지금까지의 변경은 작업 사본에 남아 있습니다."); }
         catch (LlmException ex) { SetStatus(ToUserMessage(ex) + " · 작업 사본은 유지됩니다. 다시 요청하면 이어갑니다."); }
+        catch (Exception ex) { SetStatus($"작업 실패: {ex.Message}"); }
+        finally
+        {
+            IsRequesting = false;
+            NotifyJobState();
+        }
+    }
+
+    private void CopyPrompt_Click(object sender, RoutedEventArgs e)
+    {
+        if (_agentWorkflow.PendingCards is not { } pending) return;
+        try
+        {
+            Clipboard.SetText(pending.Prompt);
+            SetStatus($"요청문 {pending.Prompt.Length:N0}자를 복사했습니다 · 사용하는 고급 모델에 붙여넣으세요.");
+        }
+        catch (Exception ex) { SetStatus($"복사 실패: {ex.Message}"); }
+    }
+
+    private async void ApplyAnswer_Click(object sender, RoutedEventArgs e)
+    {
+        var answer = AnswerBox.Text.Trim();
+        if (answer.Length == 0) { SetStatus("모델에게 받은 답을 붙여넣어 주세요."); return; }
+        await ContinueCardsAsync("붙여넣은 답으로 카드 작성",
+            (progress, ct) => _agentWorkflow.ApplyPendingCardsAsync(answer, progress, ct));
+    }
+
+    private async void WriteDefault_Click(object sender, RoutedEventArgs e) =>
+        await ContinueCardsAsync("기본 모델로 카드 작성",
+            (progress, ct) => _agentWorkflow.WritePendingWithDefaultAsync(progress, ct));
+
+    private async Task ContinueCardsAsync(
+        string title, Func<IProgress<AgentEvent>, CancellationToken, Task<AgentTurnResult>> step)
+    {
+        if (IsRequesting) return;
+        _requestCts?.Dispose();
+        _requestCts = new CancellationTokenSource();
+        IsRequesting = true;
+        var log = new StringBuilder(ConversationText + $"\n\n{title}\n");
+        ConversationText = log.ToString();
+        var progress = new Progress<AgentEvent>(ev =>
+        {
+            if (ev.Kind != AgentEventKind.Message) return;
+            SetStatus(ev.Text);
+            log.Append($"{ev.Text}\n");
+            ConversationText = log.ToString();
+        });
+        try
+        {
+            _agentResult = await step(progress, _requestCts.Token);
+            var run = _agentResult.Run;
+            log.Append($"\n결과\n{run.Summary}\n");
+            if (run.RemainingIssues.Count > 0)
+                log.Append($"남은 레이아웃 위반 {run.RemainingIssues.Count}건\n")
+                   .Append(string.Join("\n", run.RemainingIssues.Select(i => "- " + i.Message))).Append('\n');
+            if (_agentResult.UsageByModel is { Count: > 0 } byModel)
+                log.Append("LLM 사용: ").Append(UsageMeter.Describe(byModel)).Append('\n');
+            ConversationText = log.ToString();
+            AnswerBox.Clear();
+            SetStatus("완료 · 미리보기를 확인하고 '결과 저장' 또는 후속 요청을 해 주세요.");
+        }
+        catch (OperationCanceledException) { SetStatus("작업을 중단했습니다."); }
+        catch (BckPPT.Agent.Tools.AgentToolException ex) { SetStatus(ex.Message); }
+        catch (LlmException ex) { SetStatus(ToUserMessage(ex)); }
         catch (Exception ex) { SetStatus($"작업 실패: {ex.Message}"); }
         finally
         {
@@ -444,6 +526,7 @@ public partial class AgentChatWindow : Window, INotifyPropertyChanged
         Notify(nameof(PreviewImagesVisibility));
         Notify(nameof(ResultImagesVisibility));
         Notify(nameof(AgentControlsVisibility));
+        Notify(nameof(PendingVisibility));
     }
 
     private static string FormatValidation(BckPPT.PowerPoint.LayoutValidationResult? result)

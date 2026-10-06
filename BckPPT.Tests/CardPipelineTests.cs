@@ -169,6 +169,40 @@ public sealed class CardPipelineTests : IDisposable
     }
 
     [Fact]
+    public async Task 외부_작성은_요청문을_만들고_붙여넣은_답으로_적용한다()
+    {
+        int summarizeCalls = 0;
+        var context = new AgentToolContext(_ppt, Path.Combine(_dir, "work.pptx"))
+        {
+            // 사양 추출만 작성 모델을 쓴다. 요점 정리·문안은 사용자 모델이 한다.
+            Write = (system, content, _) => Task.FromResult(
+                """{"template_slide": 2, "after": 2, "slides": [{"cards": [{"number": "1", "title": "노후 도로시설물"}]}]}"""),
+            Summarize = (_, _, _) => { summarizeCalls++; return Task.FromResult("[]"); },
+            ExternalWriter = true,
+        };
+        var pipeline = new CardPipeline(context);
+
+        var report = await pipeline.RunFromRequestAsync("2쪽 카드로 2쪽 뒤에 1번 노후 도로시설물 카드를 만들어줘", CancellationToken.None);
+
+        var pending = Assert.IsType<PendingCards>(context.PendingCards);
+        Assert.Contains("작성 요청문을 준비했습니다", report);
+        Assert.Contains("개요: 전체 2줄 이내", pending.Prompt);
+        Assert.Contains("JSON 하나만", pending.Prompt);
+        Assert.Equal(2, _ppt.Slides.Count);          // 답을 받기 전에는 슬라이드를 건드리지 않는다
+        Assert.Equal(0, summarizeCalls);
+
+        await Assert.ThrowsAsync<AgentToolException>(() => pipeline.ApplyExternalAsync(pending, "죄송합니다만…", CancellationToken.None));
+        Assert.Equal(2, _ppt.Slides.Count);
+
+        const string fence = "```";
+        await pipeline.ApplyExternalAsync(pending, fence + "json\n" +
+            """{"cards": [{"number": "1", "title": "노후 도로시설물 철거", "overview": ["의사결정 시스템 구축"], "rnd": ["선정기법 개발"]}]}"""
+            + "\n" + fence, CancellationToken.None);
+        Assert.Equal(3, _ppt.Slides.Count);
+        Assert.Equal(["의사결정 시스템 구축"], _ppt.Slides[2].Single(s => s.Name == "C1_overview").Paragraphs);
+    }
+
+    [Fact]
     public async Task 템플릿보다_카드가_많으면_거부한다()
     {
         var context = Context((_, _) => "{}");

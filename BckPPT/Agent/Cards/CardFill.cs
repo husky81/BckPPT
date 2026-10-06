@@ -86,6 +86,11 @@ public static class CardFillPrompts
         return sb.ToString();
     }
 
+    /// <summary>사용자 모델에 그대로 붙여넣는 한 덩어리 요청문(지침 + 요청).</summary>
+    public static string ExternalPrompt(string writerRequest) =>
+        WriterSystem + "\n\n" + writerRequest +
+        "\n\n답은 위 출력 형식의 JSON 하나만 쓴다. 코드블록 표시나 설명을 붙이지 않는다.";
+
     public const string FitSystem = """
         너는 슬라이드 상자의 문구 길이를 맞추는 교정자다. 뜻은 유지하고 길이만 맞춘다.
         개조식 명사형을 유지한다. 답은 JSON 배열(문자열 항목들) 하나만 쓴다.
@@ -233,3 +238,6 @@ public static class CardJobExtractor
 
 /// <summary>템플릿 카드 하나의 실제 문구. 문체·길이 예시로 문안 작성에 준다.</summary>
 public sealed record CardLayoutSample(string Title, IReadOnlyList<(string Label, IReadOnlyList<string> Items)> Sections);
+
+/// <summary>외부 작성을 기다리는 카드 작업. Prompt를 사용자에게 보여주고 답을 받아 적용한다.</summary>
+public sealed record PendingCards(CardPipeline.CardPlan Plan, string Prompt);

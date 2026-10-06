@@ -66,6 +66,15 @@ public sealed class AgentToolContext(IPptComService ppt, string workingPath)
     /// <summary>모델별 사용량. 파이프라인 결과에 함께 보고한다.</summary>
     public BckPPT.Llm.UsageMeter? Meter { get; set; }
 
+    /// <summary>카드 문안을 사용자 고급 모델에서 쓰게 할지(요청문 복사·답 붙여넣기). gitoky 비용을 줄인다.</summary>
+    public bool ExternalWriter { get; set; }
+
+    /// <summary>외부 작성 대기 중인 카드 작업.</summary>
+    public Cards.PendingCards? PendingCards { get; set; }
+
+    /// <summary>길이 맞춤에 LLM(qwen)을 쓸지. 끄면 넘친 항목을 코드로만 뺀다.</summary>
+    public bool LlmFit { get; set; } = true;
+
     /// <summary>이번 요청의 사용자 원문. 사양을 뽑는 도구가 모델의 요약 대신 이것을 쓴다.</summary>
     public string? UserRequest { get; set; }
 
