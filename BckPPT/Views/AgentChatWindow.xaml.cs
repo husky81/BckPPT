@@ -36,7 +36,27 @@ public partial class AgentChatWindow : Window, INotifyPropertyChanged
 
     public string TargetText => _session.TargetText;
     public string StatusText { get; private set; } = "준비됨";
-    public string ConversationText { get => _conversationText; private set { _conversationText = value; Notify(); } }
+    public string ConversationText
+    {
+        get => _conversationText;
+        private set
+        {
+            _conversationText = value;
+            Notify();
+            // 진행 로그가 길어져도 최신 줄이 보이게 따라 내려간다(사용자가 위로 올려 읽는 중이면 두지 않는다).
+            if (_followConversation)
+                Dispatcher.BeginInvoke(() => ConversationScroll?.ScrollToEnd(), System.Windows.Threading.DispatcherPriority.Background);
+        }
+    }
+
+    private bool _followConversation = true;
+
+    private void ConversationScroll_ScrollChanged(object sender, System.Windows.Controls.ScrollChangedEventArgs e)
+    {
+        // 내용이 늘어서 생긴 변화가 아니라 사용자가 스크롤한 경우에만 따라가기 여부를 바꾼다.
+        if (e.ExtentHeightChange == 0)
+            _followConversation = ConversationScroll.VerticalOffset >= ConversationScroll.ScrollableHeight - 24;
+    }
     public string StreamingText { get => _streamingText; private set { _streamingText = value; Notify(); } }
     public bool IsRequesting { get => _isRequesting; private set { _isRequesting = value; Notify(); Notify(nameof(CanSend)); Notify(nameof(CanApply)); } }
     public bool CanSend => !IsRequesting;
@@ -182,9 +202,15 @@ public partial class AgentChatWindow : Window, INotifyPropertyChanged
     {
         var instruction = InstructionBox.Text.Trim();
         if (instruction.Length == 0 || IsRequesting) return;
+        // 요청에 PPT 경로가 있으면 그것을 대상으로 연다.
+        if (_session.Presentation is null && AgentWorkflow.MentionedPresentationPath(instruction) is { } mentionedPptx)
+            OpenPresentation(mentionedPptx);
         if (_session.Presentation?.Path is not { Length: > 0 } target)
         {
-            SetStatus("먼저 대상 PPT를 열거나 PowerPoint에 연결해 주세요.");
+            // 상태 줄만으로는 눈에 띄지 않아 "보내기가 안 눌린다"고 느꼈다. 대화창에도 적는다.
+            const string notice = "먼저 대상 PPT를 열어 주세요. [PPT 열기]로 파일을 고르거나, PowerPoint에 열어 둔 문서라면 [현재 PowerPoint 연결]을 누릅니다. 요청 문구는 그대로 남겨 두었습니다.";
+            ConversationText = (ConversationText.Length == 0 ? "" : ConversationText + "\n\n") + "⚠ " + notice;
+            SetStatus(notice);
             return;
         }
 

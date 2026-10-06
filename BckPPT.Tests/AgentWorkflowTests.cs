@@ -29,6 +29,17 @@ public sealed class AgentWorkflowTests : IDisposable
     }
 
     [Fact]
+    public void 인용_표시와_줄바꿈으로_끊긴_경로도_찾는다()
+    {
+        // 2026-10-07: 터미널에서 복사한 요청이 "…\기존" / "▎ 기획보고서"로 두 줄에 나뉘어 경로를 못 찾았다.
+        var parent = Path.GetDirectoryName(_dir)!;
+        var spaced = Path.Combine(parent, "기존 기획보고서2");
+        Directory.CreateDirectory(spaced);
+        var pasted = "  ▎ \"" + parent + "\\기존\n  ▎ 기획보고서2\" 이 폴더에 있는 md 파일 하나마다\n  ▎ 카드를 만들어줘.";
+        Assert.Equal([spaced], AgentWorkflow.MentionedSourcePaths(pasted));
+    }
+
+    [Fact]
     public void 같은_이름이면_md를_pdf보다_고른다()
     {
         var picked = AgentWorkflow.PreferTextVersions(Directory.EnumerateFiles(_dir)

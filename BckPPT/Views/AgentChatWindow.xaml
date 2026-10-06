@@ -45,7 +45,7 @@
             </Grid>
         </Border>
         <Border Grid.Row="2" Background="{StaticResource PanelBg}" CornerRadius="6" Padding="20">
-            <ScrollViewer VerticalScrollBarVisibility="Auto">
+            <ScrollViewer x:Name="ConversationScroll" VerticalScrollBarVisibility="Auto" ScrollChanged="ConversationScroll_ScrollChanged">
                 <StackPanel>
                     <TextBlock Text="{Binding ConversationText}" TextWrapping="Wrap" FontSize="13" LineHeight="21"/>
                     <TextBlock Text="{Binding StreamingText}" TextWrapping="Wrap" FontSize="13" LineHeight="21"

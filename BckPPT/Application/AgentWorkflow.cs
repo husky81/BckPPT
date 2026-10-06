@@ -138,11 +138,33 @@ public sealed class AgentWorkflow(
     }
 
     /// <summary>
+    /// 다른 창에서 복사한 요청을 정리한다. 줄 앞 인용 표시("▎", "&gt;", "│")를 떼고, 따옴표 안에서 줄바꿈으로
+    /// 끊긴 경로를 공백으로 잇는다. 터미널에서 복사한 "…\기존 / ▎ 기획보고서"가 두 줄로 나뉘어 경로를 못 찾았다.
+    /// </summary>
+    public static string NormalizePasted(string text)
+    {
+        text = System.Text.RegularExpressions.Regex.Replace(text, @"(?m)^[ \t]*[▎>│|][ \t]?", "");
+        return System.Text.RegularExpressions.Regex.Replace(text, "[\"“”](?<q>[^\"“”]*)[\"“”]",
+            m => "\"" + System.Text.RegularExpressions.Regex.Replace(m.Groups["q"].Value, @"\s*\r?\n\s*", " ") + "\"");
+    }
+
+    /// <summary>요청에 적힌, 실제로 있는 PPT 파일 경로. 대상을 열지 않고 보냈을 때 대상으로 쓴다.</summary>
+    public static string? MentionedPresentationPath(string text)
+    {
+        text = NormalizePasted(text);
+        foreach (System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches(text, "[\"“”'](?<p>[A-Za-z]:\\\\[^\"“”'\\r\\n]+\\.pptx?)[\"“”']",
+                     System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+            if (File.Exists(m.Groups["p"].Value)) return m.Groups["p"].Value;
+        return null;
+    }
+
+    /// <summary>
     /// 요청 문장에서 실제로 있는 원문 경로(폴더, 또는 pdf·pptx·md·txt 파일)를 찾는다.
     /// 따옴표로 감싼 경로와, 따옴표 없이 드라이브 문자로 시작해 줄 끝까지 이어지는 경로를 본다.
     /// </summary>
     public static IReadOnlyList<string> MentionedSourcePaths(string text)
     {
+        text = NormalizePasted(text);
         var candidates = new List<string>();
         foreach (System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches(text, "[\"“”'](?<p>[A-Za-z]:\\\\[^\"“”'\\r\\n]+)[\"“”']"))
             candidates.Add(m.Groups["p"].Value.Trim());
