@@ -113,7 +113,7 @@ public static class CardFillPrompts
             .Select(s => s[^1].Text.Trim()).ToList();
         if (orphans.Count > 0) sb.Append($"마지막 줄에 짧게 남은 꼬리: {string.Join(", ", orphans.Select(o => $"'{o}'"))} — 줄이거나 바꿔 앞줄에 붙인다.\n");
         if (measured.Count > budget.Lines)
-            sb.Append($"{measured.Count - budget.Lines}줄을 줄여야 한다. 항목을 짧게 하고, 그래도 넘치면 덜 중요한 항목을 뺀다.\n");
+            sb.Append($"{measured.Count - budget.Lines}줄을 줄여야 한다. 항목 수와 순서는 그대로 두고 각 항목을 짧게 한다.\n");
         sb.Append("현재 항목(JSON): ").Append(JsonSerializer.Serialize(items, Tools.ToolArgs.Json)).Append('\n');
         sb.Append("고친 항목을 JSON 배열로만 답한다.");
         return sb.ToString();
@@ -163,6 +163,19 @@ public static class CardFillPrompts
         if (root.ValueKind != JsonValueKind.Array) throw new FormatException("항목 배열이 아닙니다.");
         return root.EnumerateArray().Select(e => Clean(e.ValueKind == JsonValueKind.String ? e.GetString() ?? "" : e.GetRawText()))
                    .Where(s => s.Length > 0).ToList();
+    }
+
+    /// <summary>과제명 끝의 문서 종류("기획", "기획보고서")를 뗀다. 원래 결과본 카드 제목도 그랬다.</summary>
+    public static string CleanTitle(string title) =>
+        Regex.Replace(title.Trim(), @"\s*(?:기획\s*(?:최종)?보고서|기획)$", "").Trim();
+
+    /// <summary>가운데에 가장 가까운 띄어쓰기를 Shift+Enter(\v)로 바꾼다. 띄어쓰기가 없으면 null.</summary>
+    public static string? BalancedBreak(string text)
+    {
+        int middle = text.Length / 2, best = -1;
+        for (int i = 0; i < text.Length; i++)
+            if (text[i] == ' ' && (best < 0 || Math.Abs(i - middle) < Math.Abs(best - middle))) best = i;
+        return best <= 0 ? null : text[..best] + "\v" + text[(best + 1)..];
     }
 
     /// <summary>항목 앞의 글머리("-", "•", "1.")와 끝 마침표를 뗀다. 템플릿 문단이 글머리를 이미 갖고 있다.</summary>

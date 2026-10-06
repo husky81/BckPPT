@@ -72,7 +72,7 @@ public sealed class CardPipeline(AgentToolContext ctx)
         var report = new StringBuilder(plan.Report);
         var briefs = await BriefAllAsync(plan.AllCards, plan.Budgets, ct);
         Status($"카드 {plan.AllCards.Count}장 문안을 쓰는 중");
-        var drafts = await WriteAsync(plan.AllCards, briefs, plan.TitleBudget, plan.Budgets, plan.Sample, report, ct);
+        var drafts = await WriteAsync(plan, briefs, report, ct);
         return report + await ApplyAsync(plan, drafts, ct);
     }
 
@@ -95,7 +95,7 @@ public sealed class CardPipeline(AgentToolContext ctx)
         var plan = pending.Plan;
         var report = new StringBuilder();
         var briefs = await BriefAllAsync(plan.AllCards, plan.Budgets, ct);
-        var drafts = await WriteAsync(plan.AllCards, briefs, plan.TitleBudget, plan.Budgets, plan.Sample, report, ct);
+        var drafts = await WriteAsync(plan, briefs, report, ct);
         return report + await ApplyAsync(plan, drafts, ct);
     }
 
@@ -162,7 +162,7 @@ public sealed class CardPipeline(AgentToolContext ctx)
                     cache[document] = text;
                 }
             }
-            excerpts.Add((card, text.Length == 0 ? "" : "원문 발췌(국가 R&D 기획보고서):\n" + text));
+            excerpts.Add((card, PositionBudgetText(plan, card) + "\n" + (text.Length == 0 ? "" : "원문 발췌(국가 R&D 기획보고서):\n" + text)));
         }
         return CardFillPrompts.ExternalPrompt(CardFillPrompts.WriterRequest(excerpts, plan.TitleBudget, plan.Budgets, plan.Sample));
     }
@@ -263,13 +263,14 @@ public sealed class CardPipeline(AgentToolContext ctx)
     }
 
     private async Task<IReadOnlyList<CardDraft>> WriteAsync(
-        IReadOnlyList<CardSpec> cards, IReadOnlyDictionary<string, string> briefs, TextBudget title,
-        IReadOnlyList<TextBudget> budgets, CardLayoutSample? sample, StringBuilder report, CancellationToken ct)
+        CardPlan plan, IReadOnlyDictionary<string, string> briefs, StringBuilder report, CancellationToken ct)
     {
+        var budgets = plan.Budgets;
         var write = ctx.Write ?? ctx.Summarize ?? throw new AgentToolException("문안을 쓸 LLM이 없습니다.");
         var request = CardFillPrompts.WriterRequest(
-            cards.Select(c => (c, c.Document is { } d && briefs.TryGetValue(d, out var b) ? b : "")).ToList(),
-            title, budgets, sample);
+            plan.AllCards.Select(c => (c, PositionBudgetText(plan, c) + "\n" +
+                                  (c.Document is { } d && briefs.TryGetValue(d, out var b) ? b : ""))).ToList(),
+            plan.TitleBudget, budgets, plan.Sample);
         var roles = budgets.Select(b => b.Role).ToList();
         for (int attempt = 1; ; attempt++)
         {
@@ -309,9 +310,11 @@ public sealed class CardPipeline(AgentToolContext ctx)
         }
         if (card.Title is { } title)
         {
-            string text = draft?.Title is { Length: > 0 } drafted ? drafted : spec.Title;
-            await FillAsync(slide, CardLayoutAnalyzer.Addr(title), [text], ct);
-            filled.Add((slide, CardLayoutAnalyzer.Addr(title), titleBudget, [text]));
+            // 제목은 요청한 과제명 그대로 쓴다. LLM이 고치면 어순이 뒤바뀌었다(실행 13·14). 균형만 코드로 맞춘다.
+            string text = CardFillPrompts.CleanTitle(spec.Title);
+            string address = CardLayoutAnalyzer.Addr(title);
+            await FillAsync(slide, address, [text], ct);
+            await BalanceTitleAsync(slide, address, text, ct);
             renames.Add((title, $"{prefix}_title"));
         }
         foreach (var section in card.Sections)
@@ -415,11 +418,18 @@ public sealed class CardPipeline(AgentToolContext ctx)
                 var f = filled[i];
                 try
                 {
-                    var answer = await ctx.Summarize(CardFillPrompts.FitSystem,
+                    var answer = await ctx.Summarize!(CardFillPrompts.FitSystem,
                         CardFillPrompts.FitRequest(f.Budget, f.Items, measured[i]), ct);
                     var items = CardFillPrompts.ParseItems(answer);
-                    if (items.Count == 0) continue;
+                    // 항목 수가 바뀌면 받지 않는다. qwen이 한 문장 개요를 어색한 조각으로 쪼갰다(실행 14). 항목 빼기는 코드가 한다.
+                    if (items.Count != f.Items.Count) { report.Append($"길이 맞춤 거절 {f.Slide}쪽 {f.Budget.Label}: 항목 수가 바뀜\n"); continue; }
                     await FillAsync(f.Slide, f.Address, items, ct);
+                    var after = await Task.Run(() => ctx.Ppt.GetTextLineBreaks(ctx.WorkingPath, f.Slide, f.Address), ct);
+                    if (Violates(after, f.Budget) && after.Count >= measured[i].Count)
+                    {
+                        await FillAsync(f.Slide, f.Address, f.Items, ct);   // 나아지지 않았으면 되돌린다
+                        continue;
+                    }
                     filled[i] = f with { Items = items };
                     fixedCount++;
                 }
@@ -480,6 +490,35 @@ public sealed class CardPipeline(AgentToolContext ctx)
                     await Task.Run(() => ctx.Ppt.SetTextFormat(ctx.WorkingPath, slide, address, new TextFormatPatch(Spacing: majority)), ct);
             }
         }
+    }
+
+    /// <summary>
+    /// 2줄 제목의 둘째 줄이 짧으면 가운데에 가장 가까운 띄어쓰기를 Shift+Enter로 바꿔 균형을 맞춘다.
+    /// </summary>
+    private async Task BalanceTitleAsync(int slide, string address, string text, CancellationToken ct)
+    {
+        var lines = await Task.Run(() => ctx.Ppt.GetTextLineBreaks(ctx.WorkingPath, slide, address), ct);
+        if (lines.Count != 2) return;
+        int first = lines[0].Text.Trim().Length, second = lines[1].Text.Trim().Length;
+        if (second >= first * 0.4) return;
+        if (CardFillPrompts.BalancedBreak(text) is not { } balanced) return;
+        await FillAsync(slide, address, [balanced], ct);
+        var after = await Task.Run(() => ctx.Ppt.GetTextLineBreaks(ctx.WorkingPath, slide, address), ct);
+        if (after.Count > 2) await FillAsync(slide, address, [text], ct);   // 오히려 늘면 되돌린다
+    }
+
+    /// <summary>카드가 들어갈 자리의 예산(템플릿 같은 자리 카드 기준). 판정 기준과 같다.</summary>
+    public static string PositionBudgetText(CardPlan plan, CardSpec card)
+    {
+        foreach (var slide in plan.Job.Slides)
+        {
+            int position = slide.Cards.ToList().IndexOf(card);
+            if (position < 0) continue;
+            var (title, sections) = plan.PositionBudgets[Math.Min(position, plan.PositionBudgets.Count - 1)];
+            return "이 카드 자리 예산: " + string.Join(", ",
+                new[] { $"제목 {title.Lines}줄" }.Concat(sections.Select(s => $"{s.Label} {s.Lines}줄(한 줄 약 {s.CharsPerLine}자)")));
+        }
+        return "";
     }
 
     /// <summary>작업 사본에서 템플릿 슬라이드의 현재 번호. 앞에 쪽을 끼우면 밀린다.</summary>

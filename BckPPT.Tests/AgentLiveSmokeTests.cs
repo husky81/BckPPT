@@ -49,7 +49,21 @@ public class AgentLiveSmokeTests(ITestOutputHelper output)
         var progress = new SyncProgress(e => output.WriteLine($"[{e.Kind}] {e.ToolName} {Clip(e.Text)}"));
         try
         {
+            // BCKPPT_LIVE_EXCHANGE(폴더)가 있으면 외부 작성: 요청문을 prompt.txt로 내보내고 answer.txt를 기다려 적용한다.
+            var exchange = Environment.GetEnvironmentVariable("BCKPPT_LIVE_EXCHANGE");
+            workflow.ExternalWriting = !string.IsNullOrEmpty(exchange);
             var result = await workflow.RunAsync(pptx, request, progress, CancellationToken.None);
+            if (workflow.PendingCards is { } pending && exchange is not null)
+            {
+                Directory.CreateDirectory(exchange);
+                var answerPath = Path.Combine(exchange, "answer.txt");
+                File.Delete(answerPath);
+                File.WriteAllText(Path.Combine(exchange, "prompt.txt"), pending.Prompt);
+                output.WriteLine($"요청문 {pending.Prompt.Length:N0}자 → {exchange}\\prompt.txt, 답 대기");
+                var deadline = DateTime.Now.AddMinutes(30);
+                while (!File.Exists(answerPath) && DateTime.Now < deadline) await Task.Delay(2000);
+                result = await workflow.ApplyPendingCardsAsync(File.ReadAllText(answerPath), progress, CancellationToken.None);
+            }
             var run = result.Run;
             output.WriteLine($"== {run.Reason} turns={run.Turns} tokens={run.Usage.TotalTokens}");
             output.WriteLine(run.Summary);

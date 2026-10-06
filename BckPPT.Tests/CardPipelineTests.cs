@@ -136,7 +136,7 @@ public sealed class CardPipelineTests : IDisposable
         Assert.Equal(["1"], created.Single(s => s.Name == "C1_num").Paragraphs);
         Assert.Equal(["시공 안전성 ●"], created.Single(s => s.Name == "C1_tag").Paragraphs);
         Assert.True(created.Single(s => s.Name == "C1_tag").Width > 50);                 // 태그 상자를 넓혔다
-        Assert.Equal(["노후 도로시설물 철거 의사결정"], created.Single(s => s.Name == "C1_title").Paragraphs);
+        Assert.Equal(["(초)노후 도로시설물"], created.Single(s => s.Name == "C1_title").Paragraphs);   // 제목은 요청한 과제명 그대로
         Assert.Equal(["선정기법 개발", "우선순위 모델 개발"], created.Single(s => s.Name == "C1_rnd").Paragraphs);
         Assert.Equal(1, created.Count(s => s.Name == "C1_card"));
         Assert.DoesNotContain(created, s => s.Paragraphs.Contains("4"));                 // 둘째 카드는 통째로 지웠다
@@ -253,5 +253,22 @@ public class CardJobExtractorTests
     public void 쪽_번호가_없으면_거부한다()
     {
         Assert.Throws<FormatException>(() => CardJobExtractor.Parse("""{"slides": [{"cards": [{"number": "1", "title": "x"}]}]}"""));
+    }
+}
+
+public class CardTitleTests
+{
+    [Theory]
+    [InlineData("건설로보틱스 시공자동화 기술 개발 기획", "건설로보틱스 시공자동화 기술 개발")]
+    [InlineData("디지털 트윈 기반 관리 기술개발 기획 최종보고서", "디지털 트윈 기반 관리 기술개발")]
+    [InlineData("(초)노후 도로시설물 철거·교체 의사결정지원 기술개발", "(초)노후 도로시설물 철거·교체 의사결정지원 기술개발")]
+    public void 과제명_끝의_문서_종류를_뗀다(string title, string expected) =>
+        Assert.Equal(expected, CardFillPrompts.CleanTitle(title));
+
+    [Fact]
+    public void 가운데에_가장_가까운_띄어쓰기에서_나눈다()
+    {
+        Assert.Equal("AI 기반 TBM 시공·안전\v통합관리 시스템 기술 개발", CardFillPrompts.BalancedBreak("AI 기반 TBM 시공·안전 통합관리 시스템 기술 개발"));
+        Assert.Null(CardFillPrompts.BalancedBreak("띄어쓰기없음"));
     }
 }
