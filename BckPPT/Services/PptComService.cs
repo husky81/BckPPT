@@ -720,7 +720,7 @@ public class PptComService : IPptComService
                             trimmed));
                     }
                 }
-                prs.Save();
+                SaveUnlessKept(prs);
                 return new AutoFitResult(details.Count, details);
             }
             finally { SafeClose(prs); }
@@ -747,7 +747,7 @@ public class PptComService : IPptComService
                     ApplyAutoFit(shape, rules);
                     break;
                 }
-                prs.Save();
+                SaveUnlessKept(prs);
             }
             finally { if (ownedByUs) SafeClose(prs); }
         }));
@@ -854,7 +854,22 @@ public class PptComService : IPptComService
             app.Presentations.Open(presentationPath, readOnly ? MsoTrue : MsoFalse, MsoFalse, MsoFalse);
             return true;
         });
+        if (opened && !readOnly) lock (KeptOpen) KeptOpen.Add(presentationPath);
         return new OpenHandle(opened ? presentationPath : null);
+    }
+
+    /// <summary>
+    /// 세션이 열어 둔 쓰기용 문서. 편집마다 저장하지 않고 핸들을 놓을 때 한 번 저장한다.
+    /// 27MB 착수보고 PPT를 카드 하나 채울 때마다 저장하니 한 번이 45초 COM 제한을 넘겼다(2026-10-06 실행 12).
+    /// </summary>
+    private static readonly HashSet<string> KeptOpen = new(StringComparer.OrdinalIgnoreCase);
+
+    private static void SaveUnlessKept(dynamic prs)
+    {
+        string path = "";
+        try { path = (string)prs.FullName; } catch { }
+        lock (KeptOpen) if (KeptOpen.Contains(path)) return;
+        prs.Save();
     }
 
     private sealed class OpenHandle(string? path) : IDisposable
@@ -864,12 +879,15 @@ public class PptComService : IPptComService
         public void Dispose()
         {
             if (Interlocked.Exchange(ref _path, null) is not { } path) return;
+            bool deferred;
+            lock (KeptOpen) deferred = KeptOpen.Remove(path);
             try
             {
                 RunOnSta(() =>
                 {
                     if (TryGetActiveInstance() is { } app && FindOpenPresentation(app, path) is { } prs)
                     {
+                        if (deferred) prs.Save();   // 미뤄 둔 저장
                         // 사용자가 "결과 열어 보기"로 창을 띄웠다면 닫지 않는다.
                         if ((int)prs.Windows.Count == 0) SafeClose(prs);
                     }
@@ -924,7 +942,7 @@ public class PptComService : IPptComService
                             catch { }
                         }
                     }
-                prs.Save();
+                SaveUnlessKept(prs);
                 return count;
             }
             finally { if (ownedByUs) SafeClose(prs); }
@@ -987,7 +1005,7 @@ public class PptComService : IPptComService
                             changed.Add((slideIdx, shapeName, oldText, newText));
                     }
                 }
-                if (changed.Count > 0) prs.Save();
+                if (changed.Count > 0) SaveUnlessKept(prs);
                 return (IReadOnlyList<(int, string, string, string)>)changed;
             }
             finally { if (ownedByUs) SafeClose(prs); }
@@ -1029,7 +1047,7 @@ public class PptComService : IPptComService
                             catch { }
                         }
                     }
-                prs.Save();
+                SaveUnlessKept(prs);
                 return count;
             }
             finally { SafeClose(prs); }
@@ -1112,7 +1130,7 @@ public class PptComService : IPptComService
                 dynamic newShape = slide.Shapes.AddPicture(
                     newImagePath, MsoFalse, MsoTrue, left, top, width, height);
 
-                prs.Save();
+                SaveUnlessKept(prs);
             }
             finally { if (ownedByUs) SafeClose(prs); }
         });
@@ -1196,7 +1214,7 @@ public class PptComService : IPptComService
                         break;
                     }
                 }
-                prs.Save();
+                SaveUnlessKept(prs);
             }
             finally { if (ownedByUs) SafeClose(prs); }
         });
@@ -1316,7 +1334,7 @@ public class PptComService : IPptComService
                         }
                     }
                 }
-                prs!.Save();
+                SaveUnlessKept(prs!);
             }
             finally { if (ownedByUs) SafeClose(prs); }
 
@@ -1430,7 +1448,7 @@ public class PptComService : IPptComService
                         catch { }
                     }
                 }
-                prs!.Save();
+                SaveUnlessKept(prs!);
             }
             finally { if (ownedByUs) SafeClose(prs); }
         });
@@ -1452,7 +1470,7 @@ public class PptComService : IPptComService
                 dynamic duplicated = prs.Slides[sourceSlideIndex].Duplicate();
                 int targetIndex = insertAfterSlideIndex + 1;
                 duplicated.MoveTo(targetIndex);
-                prs.Save();
+                SaveUnlessKept(prs);
                 return targetIndex;
             }
             finally { if (ownedByUs) SafeClose(prs); }
@@ -1478,7 +1496,7 @@ public class PptComService : IPptComService
                 dynamic pasted = target.Slides.Paste();
                 var targetIndex = insertAfterSlideIndex + 1;
                 pasted.MoveTo(targetIndex);
-                target.Save();
+                SaveUnlessKept(target);
                 return targetIndex;
             }
             finally
@@ -1503,7 +1521,7 @@ public class PptComService : IPptComService
             try
             {
                 T result = work(prs!.Slides[slideIndex]);
-                if (save) prs.Save();
+                if (save) SaveUnlessKept(prs);
                 return result;
             }
             finally { if (ownedByUs) SafeClose(prs); }
