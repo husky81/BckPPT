@@ -217,6 +217,24 @@ public sealed class CardPipelineTests : IDisposable
     }
 
     [Fact]
+    public async Task 카드가_많으면_문안을_나눠_받고_빠진_카드를_알린다()
+    {
+        // 2026-10-07: 15장을 한 번에 시키니 답이 5장째에서 잘려 나머지 카드가 비었다.
+        int calls = 0;
+        var context = Context((_, _) => ++calls == 1
+            ? """{"cards": [{"number": "1", "title": "가", "rnd": ["내용1"]}, {"number": "2", "title": "나", "rnd": ["내용2"]}, {"number": "3", "title": "다", "rnd": ["내용3"]}, {"number": "4", "title": "라", "rnd": ["내용4"]}]}"""
+            : """{"cards": [{"number": "5", "title": "마", "rnd": ["내용5"]}]}""");
+        var cards = Enumerable.Range(1, 6).Select(i => new CardSpec($"{i}", $"과제{i}")).ToList();
+
+        var report = await new CardPipeline(context).RunAsync(new CardJob(2, 2, [new CardSlideSpec(cards)]), CancellationToken.None);
+
+        Assert.Equal(2, calls);
+        Assert.Equal(["내용5"], _ppt.Slides[4].Single(s => s.Name == "C1_rnd").Paragraphs);
+        Assert.Contains("카드 6(과제6): 받은 문안이 없어", report);
+        Assert.DoesNotContain("카드 5(", report);
+    }
+
+    [Fact]
     public void 문안_답에_cards가_없으면_형식_오류다()
     {
         Assert.Throws<FormatException>(() => CardFillPrompts.ParseDrafts("{}", ["overview"]));

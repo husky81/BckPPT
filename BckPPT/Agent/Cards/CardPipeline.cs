@@ -209,6 +209,8 @@ public sealed class CardPipeline(AgentToolContext ctx)
                 var card = layout.Cards[c];
                 var cardSpec = spec.Cards[c];
                 var draft = drafts.FirstOrDefault(d => d.Number == cardSpec.Number) ?? drafts.ElementAtOrDefault(allCards.IndexOf(cardSpec));
+                if (draft is null || draft.Sections.Count == 0)
+                    report.Append($"카드 {cardSpec.Number}({cardSpec.Title}): 받은 문안이 없어 본문을 비웠습니다\n");
                 var (positionTitle, positionSections) = positionBudgets[Math.Min(c, positionBudgets.Count - 1)];
                 filled.AddRange(await FillCardAsync(slide, c + 1, card, cardSpec, draft, positionTitle,
                     positionSections.Count > 0 ? positionSections : budgets, ct));
@@ -268,22 +270,35 @@ public sealed class CardPipeline(AgentToolContext ctx)
     {
         var budgets = plan.Budgets;
         var write = ctx.Write ?? ctx.Summarize ?? throw new AgentToolException("문안을 쓸 LLM이 없습니다.");
-        var request = CardFillPrompts.WriterRequest(
-            plan.AllCards.Select(c => (c, PositionBudgetText(plan, c) + "\n" +
-                                  (c.Document is { } d && briefs.TryGetValue(d, out var b) ? b : ""))).ToList(),
-            plan.TitleBudget, budgets, plan.Sample);
         var roles = budgets.Select(b => b.Role).ToList();
-        for (int attempt = 1; ; attempt++)
+        var drafts = new List<CardDraft>();
+        // 카드 15장을 한 번에 시키니 출력 상한에 걸려 5장째에서 답이 잘리고 나머지가 빈 카드로 남았다(2026-10-07).
+        // 몇 장씩 나눠 쓴다.
+        var batches = plan.AllCards.Chunk(WriteBatchSize).ToList();
+        for (int n = 0; n < batches.Count; n++)
         {
-            var answer = await write(CardFillPrompts.WriterSystem, request, ct);
-            try { return CardFillPrompts.ParseDrafts(answer, roles); }
-            catch (Exception ex) when (ex is FormatException or System.Text.Json.JsonException && attempt < 2)
+            if (batches.Count > 1) Status($"카드 문안 작성 {n + 1}/{batches.Count}");
+            var request = CardFillPrompts.WriterRequest(
+                batches[n].Select(c => (c, PositionBudgetText(plan, c) + "\n" +
+                                      (c.Document is { } d && briefs.TryGetValue(d, out var b) ? b : ""))).ToList(),
+                plan.TitleBudget, budgets, plan.Sample);
+            for (int attempt = 1; ; attempt++)
             {
-                report.Append($"문안 JSON 해석 실패, 다시 요청: {ex.Message}\n");
-                request += "\n\n앞의 답은 JSON으로 읽을 수 없었다. 형식대로 JSON 하나만 답한다.";
+                var answer = await write(CardFillPrompts.WriterSystem, request, ct);
+                try { drafts.AddRange(CardFillPrompts.ParseDrafts(answer, roles)); break; }
+                catch (Exception ex) when (ex is FormatException or System.Text.Json.JsonException)
+                {
+                    if (attempt >= 2) { report.Append($"카드 {string.Join("·", batches[n].Select(c => c.Number))} 문안을 읽지 못함: {ex.Message}\n"); break; }
+                    report.Append($"문안 JSON 해석 실패, 다시 요청: {ex.Message}\n");
+                    request += "\n\n앞의 답은 JSON으로 읽을 수 없었다. 형식대로 JSON 하나만 답한다.";
+                }
             }
         }
+        return drafts;
     }
+
+    /// <summary>문안 작성 한 번에 맡기는 카드 수. 템플릿 한 쪽(4장) 단위.</summary>
+    public const int WriteBatchSize = 4;
 
     private async Task<IReadOnlyList<(int, string, TextBudget, IReadOnlyList<string>)>> FillCardAsync(
         int slide, int position, CardLayout card, CardSpec spec, CardDraft? draft,

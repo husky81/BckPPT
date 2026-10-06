@@ -48,6 +48,20 @@ public sealed class AgentWorkflowTests : IDisposable
     }
 
     [Fact]
+    public void OCR로_다시_뽑은_사본은_원래_본에_묶는다()
+    {
+        var files = new[] { @"C:\x\해양매립 기획 (셀독스 OCR).md", @"C:\x\해양매립 기획.md", @"C:\x\BIM 기획_최종_(더플래너).md" };
+        Assert.Equal([@"C:\x\BIM 기획_최종_(더플래너).md", @"C:\x\해양매립 기획.md"], AgentWorkflow.PreferTextVersions(files));
+    }
+
+    [Theory]
+    [InlineData("해양매립 신공간 부지 조성 기술 개발 기획 (셀독스 OCR)", "해양매립 신공간 부지 조성 기술 개발")]
+    [InlineData("AI 활용 차세대 인프라 설계 자동화 기술개발 기획 최종보고서", "AI 활용 차세대 인프라 설계 자동화 기술개발")]
+    [InlineData("건설로보틱스 시공자동화 기술 개발 기획", "건설로보틱스 시공자동화 기술 개발")]
+    public void 카드_제목에서_문서_종류와_끝_괄호를_뗀다(string title, string expected) =>
+        Assert.Equal(expected, CardFillPrompts.CleanTitle(title));
+
+    [Fact]
     public void 한_쪽에_넘치는_카드는_템플릿_카드_수대로_나눈다()
     {
         var cards = Enumerable.Range(1, 13).Select(i => new CardSpec($"{i}", $"과제{i}")).ToList();

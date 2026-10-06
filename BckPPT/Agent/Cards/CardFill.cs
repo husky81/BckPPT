@@ -168,8 +168,13 @@ public static class CardFillPrompts
     }
 
     /// <summary>과제명 끝의 문서 종류("기획", "기획보고서")를 뗀다. 원래 결과본 카드 제목도 그랬다.</summary>
-    public static string CleanTitle(string title) =>
-        Regex.Replace(title.Trim(), @"\s*(?:기획\s*(?:최종)?보고서|기획)$", "").Trim();
+    public static string CleanTitle(string title)
+    {
+        // "(셀독스 OCR)", "(최종)" 같은 끝 괄호와 "기획 최종보고서" 같은 문서 종류를 차례로 뗀다.
+        var text = Regex.Replace(title.Trim(), @"\s*[\(\[（][^\)\]）]*[\)\]）]\s*$", "");
+        text = Regex.Replace(text, @"\s*(?:기획\s*(?:최종\s*)?(?:보고서)?|최종\s*보고서|연구개발계획서)\s*$", "");
+        return text.Trim();
+    }
 
     /// <summary>가운데에 가장 가까운 띄어쓰기를 Shift+Enter(\v)로 바꾼다. 띄어쓰기가 없으면 null.</summary>
     public static string? BalancedBreak(string text)

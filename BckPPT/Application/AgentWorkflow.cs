@@ -130,9 +130,14 @@ public sealed class AgentWorkflow(
         {
             ".md" or ".markdown" => 0, ".txt" => 1, ".pdf" => 2, _ => 3
         };
+        // "… 기획 (셀독스 OCR).md"는 같은 보고서를 OCR로 다시 뽑은 사본이다. 같은 과제로 묶고 원래 본을 고른다(2026-10-07).
+        static string Stem(string f) => System.Text.RegularExpressions.Regex.Replace(
+            Path.GetFileNameWithoutExtension(f), @"\s*[\(\[][^\)\]]*OCR[^\)\]]*[\)\]]\s*$", "",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        static bool IsOcrCopy(string f) => Stem(f).Length != Path.GetFileNameWithoutExtension(f).Length;
         return files
-            .GroupBy(f => Path.Combine(Path.GetDirectoryName(f) ?? "", Path.GetFileNameWithoutExtension(f)), StringComparer.OrdinalIgnoreCase)
-            .Select(g => g.OrderBy(Rank).First())
+            .GroupBy(f => Path.Combine(Path.GetDirectoryName(f) ?? "", Stem(f)), StringComparer.OrdinalIgnoreCase)
+            .Select(g => g.OrderBy(IsOcrCopy).ThenBy(Rank).First())
             .OrderBy(f => f, StringComparer.OrdinalIgnoreCase)
             .ToList();
     }
