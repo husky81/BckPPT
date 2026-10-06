@@ -13,7 +13,7 @@ public sealed record AgentTurnResult(
     AgentRunResult Run,
     IReadOnlyList<string> BeforeThumbnails,
     IReadOnlyList<string> AfterThumbnails,
-    IReadOnlyList<string> Changes,
+    IReadOnlyList<string> Changes,   // 이번 요청에서 도구가 실제로 바꾼 것(코드가 기록). 모델 요약과 따로 보여 준다.
     IReadOnlyDictionary<string, (int Calls, LlmUsage Usage)>? UsageByModel = null);
 
 /// <summary>
@@ -94,6 +94,7 @@ public sealed class AgentWorkflow(
         var session = Session ?? throw new InvalidOperationException("이어갈 작업이 없습니다.");
         var pending = session.Context.PendingCards ?? throw new InvalidOperationException("붙여넣기를 기다리는 카드 작업이 없습니다.");
         var meterBefore = _meter!.Snapshot();
+        int changesBefore = session.Context.Changes.Count;
         session.Context.Status = progress is null ? null
             : new Progress<string>(text => progress.Report(new AgentEvent(AgentEventKind.Message, text)));
         session.Context.LlmFit = LlmFit;
@@ -108,7 +109,7 @@ public sealed class AgentWorkflow(
         var run = new AgentRunResult(AgentStopReason.Finished, report, 0,
             usage.Values.Aggregate(LlmUsage.Zero, (a, v) => a + v.Usage), issues);
         var (before, after) = await RenderAsync(session, ct);
-        return new AgentTurnResult(run, before, after, session.Context.Changes.ToList(), usage);
+        return new AgentTurnResult(run, before, after, session.Context.Changes.Skip(changesBefore).ToList(), usage);
     }
 
     private async Task<(IReadOnlyList<string> Before, IReadOnlyList<string> After)> RenderAsync(AgentSession session, CancellationToken ct)
@@ -229,10 +230,11 @@ public sealed class AgentWorkflow(
             ? instruction
             : $"{instruction}\n\n(첨부 원문: {string.Join(", ", scoped.Documents().Select(d => $"{d.Alias}={d.Name}"))})";
 
+        int changesBefore = Session.Context.Changes.Count;
         var run = await AgentFactory.CreateLoop(_metered!, options, hasSources, LoopOptions).RunAsync(Session, request, progress, ct);
 
         var (before, after) = await RenderAsync(Session, ct);
-        return new AgentTurnResult(run, before, after, Session.Context.Changes.ToList(),
+        return new AgentTurnResult(run, before, after, Session.Context.Changes.Skip(changesBefore).ToList(),
             UsageMeter.Delta(meterBefore, _meter.Snapshot()));
     }
 

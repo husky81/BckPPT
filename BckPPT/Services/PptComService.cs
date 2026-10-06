@@ -46,8 +46,32 @@ public class PptComService : IPptComService
 
     // ── STA 스레드 래퍼 (StaDispatcher 싱글턴 사용) ─────────────
 
-    private static T RunOnSta<T>(Func<T> func)   => StaDispatcher.Instance.Invoke(func);
-    private static void RunOnSta(Action action)   => StaDispatcher.Instance.Invoke(action);
+    private static T RunOnSta<T>(Func<T> func, [System.Runtime.CompilerServices.CallerMemberName] string caller = "")
+    {
+        var watch = Stopwatch.StartNew();
+        try { return StaDispatcher.Instance.Invoke(func); }
+        finally { ReportIfSlow(caller, watch.Elapsed); }
+    }
+
+    private static void RunOnSta(Action action, [System.Runtime.CompilerServices.CallerMemberName] string caller = "")
+    {
+        var watch = Stopwatch.StartNew();
+        try { StaDispatcher.Instance.Invoke(action); }
+        finally { ReportIfSlow(caller, watch.Elapsed); }
+    }
+
+    /// <summary>
+    /// 오래 걸린 COM 호출(3초 이상). 세션 로그에 남겨 어느 작업이 45초 제한에 가까운지 본다.
+    /// 첫 일정표만 12~85초 더 걸리는데 어디서인지 알 수 없었다(2026-10-07).
+    /// </summary>
+    public static event Action<string, TimeSpan>? SlowCall;
+    public static TimeSpan SlowCallThreshold { get; set; } = TimeSpan.FromSeconds(3);
+
+    private static void ReportIfSlow(string caller, TimeSpan elapsed)
+    {
+        if (elapsed < SlowCallThreshold) return;
+        try { SlowCall?.Invoke(caller, elapsed); } catch { }
+    }
 
     // ── 분석 헬퍼 ─────────────────────────────────────────────────
 
@@ -950,19 +974,19 @@ public class PptComService : IPptComService
             bool deferred;
             lock (KeptOpen) deferred = KeptOpen.Remove(path);
             lock (HeldOpen) HeldOpen.Remove(path);
-            try
+            void Close()
             {
-                RunOnSta(() =>
+                if (TryGetActiveInstance() is { } app && FindOpenPresentation(app, path) is { } prs)
                 {
-                    if (TryGetActiveInstance() is { } app && FindOpenPresentation(app, path) is { } prs)
-                    {
-                        if (deferred) prs.Save();   // 미뤄 둔 저장
-                        // 사용자가 "결과 열어 보기"로 창을 띄웠다면 닫지 않는다.
-                        if ((int)prs.Windows.Count == 0) SafeClose(prs);
-                    }
-                });
+                    if (deferred) prs.Save();   // 미뤄 둔 저장
+                    // 사용자가 "결과 열어 보기"로 창을 띄웠다면 닫지 않는다.
+                    if ((int)prs.Windows.Count == 0) SafeClose(prs);
+                }
             }
-            catch { }
+            // 시간 초과로 격리된 중이면 멈춘 작업 뒤에 예약한다. 전에는 여기서 예외가 나 문서가 창 없이 남았다.
+            if (!StaDispatcher.Instance.IsHealthy) { StaDispatcher.Instance.Post(() => { try { Close(); } catch { } }); return; }
+            try { RunOnSta(Close); }
+            catch { StaDispatcher.Instance.Post(() => { try { Close(); } catch { } }); }
         }
     }
 
@@ -1596,7 +1620,8 @@ public class PptComService : IPptComService
     // 주소는 모두 ShapeAddress 규약("이름", "이름#2", "그룹/이름")을 따른다.
 
     /// <summary>슬라이드 하나의 작업을 열린 문서(없으면 직접 연 문서)에서 수행한다.</summary>
-    private static T OnSlide<T>(string presentationPath, int slideIndex, bool save, Func<dynamic, T> work)
+    private static T OnSlide<T>(string presentationPath, int slideIndex, bool save, Func<dynamic, T> work,
+        [System.Runtime.CompilerServices.CallerMemberName] string caller = "")
         => RunOnSta(() =>
         {
             dynamic pptApp = GetOrCreateInstance();
@@ -1611,7 +1636,7 @@ public class PptComService : IPptComService
                 return result;
             }
             finally { if (ownedByUs) SafeClose(prs); }
-        });
+        }, caller);
 
     /// <summary>그룹 안까지 펼친 도형 목록. 이름이 겹치면 주소에 "#n"을 붙여 구분한다.</summary>
     public IReadOnlyList<ShapeEntry> ListShapes(string presentationPath, int slideIndex)
@@ -1686,9 +1711,15 @@ public class PptComService : IPptComService
     public string AddTextShape(string presentationPath, int slideIndex, TextShapeRequest request)
         => OnSlide(presentationPath, slideIndex, save: true, slide => AddTextShapeOn(slide, request));
 
+    /// <summary>몇 개씩 나눠 부른다. 도형 하나에 COM 호출이 스무 번 남짓이라 한 번에 많이 그리면 45초를 넘는다.</summary>
     public IReadOnlyList<string> AddTextShapes(string presentationPath, int slideIndex, IReadOnlyList<TextShapeRequest> requests)
-        => OnSlide(presentationPath, slideIndex, save: true, slide =>
-            (IReadOnlyList<string>)requests.Select(r => (string)AddTextShapeOn(slide, r)).ToList());
+    {
+        var names = new List<string>(requests.Count);
+        foreach (var chunk in requests.Chunk(20))
+            names.AddRange(OnSlide(presentationPath, slideIndex, save: true, slide =>
+                chunk.Select(r => (string)AddTextShapeOn(slide, r)).ToList()));
+        return names;
+    }
 
     private static int AutoShapeType(TextShapeKind kind) => kind switch
     {
@@ -1800,12 +1831,19 @@ public class PptComService : IPptComService
             foreach (var m in request.Merges ?? [])
                 if (m.Row2 > m.Row || m.Column2 > m.Column)
                     table.Cell(m.Row, m.Column).Merge(table.Cell(m.Row2, m.Column2));
+            if ((int)table.Rows.Count != rows || (int)table.Columns.Count != cols)
+                throw new InvalidOperationException(
+                    $"병합 뒤 표가 {rows}×{cols}에서 {(int)table.Rows.Count}×{(int)table.Columns.Count}로 줄었습니다. " +
+                    "한 행(열)의 칸이 모두 병합되면 PowerPoint가 그 행(열)을 없앱니다.");
             return $"@{(int)shape.Id}";
         });
 
         var styles = (request.CellStyles ?? []).GroupBy(s => (s.Row, s.Column)).ToDictionary(g => g.Key, g => g.Last());
         int border = request.BorderColor is null ? 0 : OleColor.FromHex(request.BorderColor);
-        const int rowsPerCall = 3;
+        // 칸 하나의 속성 하나가 COM 왕복 한 번(3~60ms)이다. 실측(17×23 표): 테두리 26초, 여백 19초, 채우기 12초, 글자 서식 8초.
+        // 병합으로 가려진 칸은 건너뛰고(병합 칸을 덮어 칠한다), 채울 색이 있는 칸만 칠하고, 글자가 있는 칸만 여백·서식을 준다.
+        // 테두리는 행·열 단위로 줘도 내부에서 칸마다 처리돼 빠르지 않다. 큰 표는 BorderColor를 비우고 선을 따로 그린다.
+        const int rowsPerCall = 6;
         for (int from = 1; from <= rows; from += rowsPerCall)
         {
             int start = from;
@@ -1814,36 +1852,34 @@ public class PptComService : IPptComService
                 dynamic table = RequireShape(slide, slideIndex, address).Table;
                 for (int r = start; r < start + rowsPerCall && r <= rows; r++)
                 {
+                    bool header = r <= request.HeaderRows;
                     for (int c = 1; c <= cols; c++)
                     {
+                        if (anchorOf.ContainsKey((r, c))) continue;
                         dynamic cell = table.Cell(r, c);
-                        bool isCovered = anchorOf.TryGetValue((r, c), out var anchor);
-                        if (!isCovered) anchor = (r, c);
-                        bool header = anchor.Row <= request.HeaderRows;
-                        styles.TryGetValue(anchor, out var style);
+                        styles.TryGetValue((r, c), out var style);
                         string? fill = style?.Fill ?? (header ? request.HeaderFill
-                            : request.BandFill is not null && (anchor.Row - request.HeaderRows) % 2 == 0 ? request.BandFill : request.BodyFill);
+                            : request.BandFill is not null && (r - request.HeaderRows) % 2 == 0 ? request.BandFill : request.BodyFill);
                         dynamic cs = cell.Shape;
-                        if (fill is not null) { cs.Fill.Visible = MsoTrue; cs.Fill.Solid(); cs.Fill.ForeColor.RGB = OleColor.FromHex(fill); }
-                        // 아래·오른쪽 선만 긋는다(첫 행·첫 열은 위·왼쪽도). 이웃 칸과 겹치는 선을 두 번 긋지 않는다.
+                        if (fill is not null) { dynamic f = cs.Fill; f.Visible = MsoTrue; f.Solid(); f.ForeColor.RGB = OleColor.FromHex(fill); }
                         if (request.BorderColor is not null)
                             foreach (int b in r == 1 && c == 1 ? [1, 2, 3, 4] : r == 1 ? [1, 3, 4] : c == 1 ? [2, 3, 4] : new[] { 3, 4 })
                             {
                                 dynamic line = cell.Borders(b);   // 1 위, 2 왼쪽, 3 아래, 4 오른쪽
                                 line.Visible = MsoTrue; line.ForeColor.RGB = border; line.Weight = request.BorderWidth;
                             }
-                        if (isCovered) continue;
 
+                        string text = c <= request.Cells[r - 1].Count ? request.Cells[r - 1][c - 1] : "";
+                        if (text.Length == 0) continue;
                         dynamic tf = cs.TextFrame2;
                         tf.MarginLeft = request.CellPadding; tf.MarginRight = request.CellPadding;
                         tf.MarginTop = 1f; tf.MarginBottom = 1f;
                         tf.VerticalAnchor = 3;
-                        string text = c <= request.Cells[r - 1].Count ? request.Cells[r - 1][c - 1] : "";
                         dynamic tr = tf.TextRange;
-                        if (text.Length > 0) tr.Text = text;
+                        tr.Text = text;
                         var align = style?.Align ?? (header ? TextAlign.Center
                             : request.ColumnAligns is { } aligns && c <= aligns.Count ? aligns[c - 1] : TextAlign.Left);
-                        tr.ParagraphFormat.Alignment = AlignmentOf(align);
+                        if (align != TextAlign.Left) tr.ParagraphFormat.Alignment = AlignmentOf(align);
                         dynamic font = tr.Font;
                         if (!string.IsNullOrEmpty(request.FontName)) { font.Name = request.FontName; font.NameFarEast = request.FontName; }
                         font.Size = style?.FontSize ?? request.FontSize;
@@ -1877,12 +1913,21 @@ public class PptComService : IPptComService
         {
             if (addresses.Count < 2) throw new ArgumentException("묶을 도형이 두 개 이상이어야 합니다.");
             // 최상위 순번으로 묶는다. 이름은 겹칠 수 있어 Range(이름)으로는 엉뚱한 도형이 잡힌다.
-            var ids = new HashSet<int>();
-            foreach (var address in addresses) ids.Add((int)RequireShape(slide, slideIndex, address).Id);
-            var indices = new List<int>();
+            // 주소마다 RequireShape로 찾으면 매번 슬라이드 전체를 훑어 도형 100개 묶기에 5초가 걸렸다. 최상위 목록을 한 번만 읽는다.
             int count = (int)slide.Shapes.Count;
-            for (int i = 1; i <= count; i++)
-                if (ids.Contains((int)slide.Shapes.Item(i).Id)) indices.Add(i);
+            var top = new List<(int Index, int Id, string Name)>(count);
+            for (int i = 1; i <= count; i++) { dynamic s = slide.Shapes.Item(i); top.Add((i, (int)s.Id, (string)s.Name)); }
+            var ids = new HashSet<int>();
+            var empty = (IReadOnlyList<string>)Array.Empty<string>();
+            foreach (var address in addresses)
+            {
+                var parsed = ShapeAddress.Parse(address);
+                int found = parsed.Id is int id ? top.FindIndex(t => t.Id == id)
+                    : parsed.Select(top.Select(t => (empty, t.Name)).ToList());
+                if (found < 0) ids.Add((int)RequireShape(slide, slideIndex, address).Id);   // 그룹 안 도형 등은 기존 방식으로
+                else ids.Add(top[found].Id);
+            }
+            var indices = top.Where(t => ids.Contains(t.Id)).Select(t => t.Index).ToList();
             if (indices.Count != ids.Count)
                 throw new InvalidOperationException("그룹 안에 든 도형은 묶을 수 없습니다. 그룹 이름으로 가리키세요.");
             dynamic group = slide.Shapes.Range(indices.ToArray()).Group();

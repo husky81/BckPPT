@@ -83,7 +83,7 @@ public sealed class ScheduleTests
     }
 
     [Fact]
-    public void 표형_일정표는_표와_막대를_그리고_한_그룹으로_묶는다()
+    public void 표형_일정표는_표를_만들고_막대와_눈금을_한_그룹으로_묶는다()
     {
         var ppt = new FakePptComService();
         ppt.Slides.Add([]);
@@ -93,26 +93,32 @@ public sealed class ScheduleTests
 
         var table = Assert.IsType<TableRequest>(ppt.Slides[0].Single(s => s.Name == result.TableName).Spec);
         int cols = table.Cells[0].Count;
-        Assert.Equal(4 + 13, cols);                                           // 단계·하위·항목·기간 + 월 13칸
+        Assert.Equal(4, cols);                                                // 단계·하위·항목·기간(월 눈금은 표 밖 도형)
         Assert.Equal("세부 추진 항목", table.Cells[0][2]);
-        Assert.Equal("2026", table.Cells[0][4]);
-        Assert.Equal("7월", table.Cells[1][4]);
-        Assert.Equal("통계(CSI)분석 및 현장의견 수렴", table.Cells[3][2]);
-        Assert.Equal("8.1~9.15", table.Cells[3][3]);
-        Assert.Contains(new TableMerge(5, 2, 5, 2), table.Merges!);            // 품목지정 하위 칸(한 줄)
-        Assert.Contains(new TableMerge(3, 1, 4, 2), table.Merges!);            // 하위 없는 구분은 하위 칸까지 합친다
+        Assert.Equal(1, table.HeaderRows);                                    // 머리 2행이 모두 병합되면 PowerPoint가 행을 없앤다
+        Assert.Equal("통계(CSI)분석 및 현장의견 수렴", table.Cells[2][2]);
+        Assert.Equal("8.1~9.15", table.Cells[2][3]);
+        Assert.Equal("품목지정", table.Cells[3][1]);                           // 하위 구분 칸(한 줄짜리는 병합 없음)
+        Assert.Contains(new TableMerge(5, 2, 6, 2), table.Merges!);            // 지정공모 하위 칸(두 줄)
+        Assert.Contains(new TableMerge(2, 1, 3, 2), table.Merges!);            // 하위 없는 구분은 하위 칸까지 합친다
 
         var overlay = ppt.Slides[0].Where(s => s.Spec is TextShapeRequest).ToList();
-        Assert.Equal(5 + 2 * 2, overlay.Count);                                // 막대 5 + 마일스톤(◆·이름) 2쌍
-        Assert.All(overlay.Concat(ppt.Slides[0].Where(s => s.Name == result.TableName)), s => Assert.Equal(result.Name, s.Group));
+        var specs = overlay.Select(s => (TextShapeRequest)s.Spec!).ToList();
+        Assert.Equal(5, specs.Count(r => r.Kind == TextShapeKind.RoundedRectangle));       // 막대 5
+        Assert.Equal(2, specs.Count(r => r.Kind == TextShapeKind.Diamond));                // ◆ 2
+        Assert.Equal(["착수보고", "중간보고"], specs.Where(r => r.Kind == TextShapeKind.Rectangle && r.AutoWidth).Select(r => r.Text));
+        Assert.Equal(["2026", "2027"], specs.Where(r => r.Text.StartsWith("20")).Select(r => r.Text));       // 연 머리글
+        Assert.Equal(13, specs.Count(r => r.Text.EndsWith('월')));                                          // 월 머리글
+        Assert.Null(table.BorderColor);                                                    // 칸 테두리 대신 선 도형
+        Assert.Contains(specs, r => r.LineColor is not null && r.FillColor is null);       // 바깥 테두리
+        Assert.All(overlay, s => Assert.Equal(result.Name, s.Group));                      // 막대·눈금은 한 그룹(표는 묶을 수 없다)
 
         // 첫 막대는 7월 칸 왼쪽 끝에서 시작해 그 칸 끝에서 끝난다.
-        var widths = table.ColumnWidths!;
-        float julyLeft = table.Left + widths.Take(4).Sum();
-        var bar = overlay.First();
-        Assert.Equal(julyLeft, bar.Left, 1);
-        Assert.Equal(widths[4], bar.Width, 1);
-        Assert.Equal(TextShapeKind.Diamond, ((TextShapeRequest)overlay[^2].Spec!).Kind);
+        var july = specs.First(r => r.Text == "7월");                                     // 2026년 7월
+        var bar = overlay.First(s => ((TextShapeRequest)s.Spec!).Kind == TextShapeKind.RoundedRectangle);
+        Assert.Equal(table.Left + table.ColumnWidths!.Sum(), july.Left, 1);                   // 눈금은 표 바로 오른쪽
+        Assert.Equal(july.Left, bar.Left, 1);
+        Assert.Equal(july.Width, bar.Width, 1);
     }
 
     [Fact]

@@ -39,7 +39,7 @@ public sealed class StaDispatcher : IDisposable
     public Task InvokeAsync(Action action)
     {
         if (!_isHealthy)
-            throw new PptComUnavailableException("이전 PowerPoint COM 작업이 응답하지 않아 COM 서비스가 격리되었습니다. BckPPT를 다시 시작해 주세요.");
+            throw new PptComUnavailableException("이전 PowerPoint 작업이 아직 끝나지 않았습니다. 끝나면 자동으로 다시 쓸 수 있으니 잠시 뒤 다시 시도해 주세요.");
         if (_queue.IsAddingCompleted)
             throw new ObjectDisposedException(nameof(StaDispatcher));
         var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -54,6 +54,17 @@ public sealed class StaDispatcher : IDisposable
         return result;
     }
 
+    /// <summary>
+    /// 기다리지 않고 줄 끝에 넣는다. 시간 초과로 격리된 동안에도 받아, 멈춘 작업이 끝난 뒤 차례로 실행한다.
+    /// 끊긴 세션이 열어 둔 문서를 닫는 정리용이다(격리되면 닫지 못해 다음 실행이 느려졌다, 2026-10-07).
+    /// </summary>
+    public void Post(Action action)
+    {
+        if (_queue.IsAddingCompleted) return;
+        try { _queue.Add((action, new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously))); }
+        catch (InvalidOperationException) { }
+    }
+
     /// <summary>동기 래퍼 (호출 스레드를 블록한다).</summary>
     public T Invoke<T>(Func<T> func)   => WaitWithTimeout(InvokeAsync(func));
 
@@ -63,22 +74,26 @@ public sealed class StaDispatcher : IDisposable
     private T WaitWithTimeout<T>(Task<T> task)
     {
         try { return task.WaitAsync(DefaultTimeout).GetAwaiter().GetResult(); }
-        catch (TimeoutException ex)
-        {
-            _isHealthy = false;
-            throw new PptComTimeoutException(DefaultTimeout, ex);
-        }
+        catch (TimeoutException ex) { Quarantine(task); throw new PptComTimeoutException(DefaultTimeout, ex); }
     }
 
     private void WaitWithTimeout(Task task)
     {
         try { task.WaitAsync(DefaultTimeout).GetAwaiter().GetResult(); }
-        catch (TimeoutException ex)
-        {
-            _isHealthy = false;
-            throw new PptComTimeoutException(DefaultTimeout, ex);
-        }
+        catch (TimeoutException ex) { Quarantine(task); throw new PptComTimeoutException(DefaultTimeout, ex); }
     }
+
+    /// <summary>
+    /// 멈춘 작업이 끝날 때까지 새 호출을 막고, 끝나면(성공·실패 모두) 다시 연다. 전에는 앱을 다시 시작할 때까지 막혀 있었다.
+    /// </summary>
+    private void Quarantine(Task stuck)
+    {
+        _isHealthy = false;
+        stuck.ContinueWith(_ => { _isHealthy = true; Recovered?.Invoke(); }, TaskScheduler.Default);
+    }
+
+    /// <summary>격리가 풀렸을 때(멈춘 작업이 끝났을 때).</summary>
+    public event Action? Recovered;
 
     public void Dispose()
     {
@@ -88,6 +103,6 @@ public sealed class StaDispatcher : IDisposable
 }
 
 public sealed class PptComTimeoutException(TimeSpan timeout, Exception? inner = null)
-    : TimeoutException($"PowerPoint COM 작업이 {timeout.TotalSeconds:0}초 안에 완료되지 않았습니다. 작업을 중단하고 COM 서비스를 격리했습니다.", inner);
+    : TimeoutException($"PowerPoint COM 작업이 {timeout.TotalSeconds:0}초 안에 완료되지 않았습니다. 그 작업이 끝날 때까지 새 작업을 받지 않습니다.", inner);
 
 public sealed class PptComUnavailableException(string message) : InvalidOperationException(message);

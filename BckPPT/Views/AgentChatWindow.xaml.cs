@@ -255,6 +255,7 @@ public partial class AgentChatWindow : Window, INotifyPropertyChanged
                    .Append("을 작업 사본에서 제거했습니다. 이 PC에 없는 글꼴이면 대체 글꼴로 보이고 줄바꿈이 원래와 다를 수 있습니다.\n");
             // 도구 없이 끝난 답은 이미 메시지로 찍혔으므로 다시 쓰지 않는다.
             log.Append(run.Reason == AgentStopReason.AnsweredWithoutTools ? "\n" : $"\n결과\n{run.Summary}\n");
+            AppendChanges(log, _agentResult.Changes);
             if (run.RemainingIssues.Count > 0)
                 log.Append($"남은 레이아웃 위반 {run.RemainingIssues.Count}건\n")
                    .Append(string.Join("\n", run.RemainingIssues.Select(i => "- " + i.Message))).Append('\n');
@@ -326,6 +327,7 @@ public partial class AgentChatWindow : Window, INotifyPropertyChanged
             _agentResult = await step(progress, _requestCts.Token);
             var run = _agentResult.Run;
             log.Append($"\n결과\n{run.Summary}\n");
+            AppendChanges(log, _agentResult.Changes);
             if (run.RemainingIssues.Count > 0)
                 log.Append($"남은 레이아웃 위반 {run.RemainingIssues.Count}건\n")
                    .Append(string.Join("\n", run.RemainingIssues.Select(i => "- " + i.Message))).Append('\n');
@@ -416,6 +418,18 @@ public partial class AgentChatWindow : Window, INotifyPropertyChanged
         string.Join(" / ", text.Split('\n').Select(l => l.Trim()).Where(l => l.Length > 0).Take(count));
 
     private static string Clip(string text, int max) => text.Length <= max ? text : text[..max] + "…";
+
+    /// <summary>
+    /// 도구가 실제로 바꾼 것을 코드 기록 그대로 붙인다. 모델이 "삭제한 줄 수는 다음과 같습니다:"까지만 쓰고
+    /// 쪽별 숫자를 빼먹은 일이 있었다(2026-10-07). 숫자는 모델 요약이 아니라 이 목록을 믿는다.
+    /// </summary>
+    private static void AppendChanges(StringBuilder log, IReadOnlyList<string> changes)
+    {
+        if (changes.Count == 0) return;
+        log.Append("\n실행 내역\n");
+        foreach (var change in changes.Take(40)) log.Append("- ").Append(change).Append('\n');
+        if (changes.Count > 40) log.Append($"- … 외 {changes.Count - 40}건\n");
+    }
 
     /// <summary>외부 요청(create_job)용 단발 계획 흐름. ApprovalWorkflow의 미리보기·적용 단계를 그대로 쓴다.</summary>
     private async Task SendPlanAsync(string? externalRequestId = null)

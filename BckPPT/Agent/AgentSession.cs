@@ -15,6 +15,7 @@ public sealed class AgentSession : IDisposable
 {
     private readonly List<LlmMessage> _messages = new();
     private readonly List<IDisposable> _openHandles = new();
+    private Action<string, TimeSpan>? _slowCallHandler;
 
     private AgentSession(string sourcePath, string workingPath, AgentToolContext context, AgentSessionLog log)
     {
@@ -83,6 +84,8 @@ public sealed class AgentSession : IDisposable
         }
         catch (Exception ex) { log.Write("keep_open_failed", new { ex.Message }); }
         if (orphans.Count > 0) log.Write("closed_orphans", orphans);
+        session._slowCallHandler = (caller, elapsed) => log.Write("slow_com", new { caller, seconds = Math.Round(elapsed.TotalSeconds, 1) });
+        PptComService.SlowCall += session._slowCallHandler;
         log.Write("start", new { source = sourcePath, working = workingPath });
         session.Append(LlmMessage.System(systemPrompt));
         return session;
@@ -160,6 +163,7 @@ public sealed class AgentSession : IDisposable
 
     public void Dispose()
     {
+        if (_slowCallHandler is not null) PptComService.SlowCall -= _slowCallHandler;
         ReleaseOpenDocuments();
         Log.Dispose();
     }

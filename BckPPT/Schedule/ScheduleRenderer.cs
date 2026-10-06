@@ -78,10 +78,11 @@ public sealed class ScheduleRenderer(IPptComService ppt, string presentationPath
             colItem = widths.Count; widths.Add(area.Width * 0.245f);
             colPeriodText = widths.Count; widths.Add(area.Width * 0.07f);
         }
-        int firstPeriodCol = widths.Count;
-        float periodW = (area.Width - widths.Sum()) / periods.Count;
-        widths.AddRange(Enumerable.Repeat(periodW, periods.Count));
+        // 월 눈금 영역은 표에 넣지 않는다. 빈 칸 수백 개가 칸마다 COM 호출이라 느리고, 서식을 안 주면 18pt 기본 글자로
+        // 행이 늘어나 표가 슬라이드를 넘쳤다(2026-10-07). 표는 단계·항목·기간 열만, 눈금 머리글·띠·선은 도형으로 그린다.
         int cols = widths.Count;
+        float tableWidth = widths.Sum();
+        float periodW = (area.Width - tableWidth) / periods.Count;
 
         // ── 행 높이·글자 ──
         float headH = Math.Min(18f, area.Height / (rows.Count + 2));
@@ -100,19 +101,6 @@ public sealed class ScheduleRenderer(IPptComService ppt, string presentationPath
         {
             cells[0][colItem] = "세부 추진 항목"; merges.Add(new TableMerge(1, colItem + 1, 2, colItem + 1));
             cells[0][colPeriodText] = "기간"; merges.Add(new TableMerge(1, colPeriodText + 1, 2, colPeriodText + 1));
-        }
-        for (int i = 0; i < periods.Count;)
-        {
-            int span = 0;
-            while (i + span < periods.Count && periods[i + span].Year == periods[i].Year) span++;
-            cells[0][firstPeriodCol + i] = periods[i].Year.ToString();
-            if (span > 1) merges.Add(new TableMerge(1, firstPeriodCol + i + 1, 1, firstPeriodCol + i + span));
-            i += span;
-        }
-        for (int i = 0; i < periods.Count; i++)
-        {
-            cells[1][firstPeriodCol + i] = periods[i].Label;
-            styles.Add(new TableCellStyle(2, firstPeriodCol + i + 1, Fill: options.SubHeaderFill, FontColor: options.TextColor, Bold: true));
         }
 
         for (int r = 0; r < rows.Count; r++)
@@ -168,31 +156,133 @@ public sealed class ScheduleRenderer(IPptComService ppt, string presentationPath
 
         var aligns = Enumerable.Range(0, cols).Select(c =>
             c == colGroup ? TextAlign.Left : c == colSub ? TextAlign.Center : c == colItem ? TextAlign.Left : TextAlign.Center).ToList();
-        var layout = ppt.AddTable(presentationPath, slide, new TableRequest(
-            area.Left, area.Top, area.Width, cells.Select(r => (IReadOnlyList<string>)r).ToList(),
-            ColumnWidths: widths, FontSize: font, FontName: options.FontName, HeaderRows: 2,
-            HeaderFill: options.HeaderFill, HeaderFontColor: "#FFFFFF", FontColor: options.TextColor,
-            BandFill: options.BandFill, BorderColor: options.GridColor, BorderWidth: 0.5f,
-            ColumnAligns: aligns, Merges: merges, CellStyles: styles,
-            RowHeights: [headH, headH, .. Enumerable.Repeat(bodyH, rows.Count)], CellPadding: 4f, Name: prefix + "_표"));
+        var rowHeights = new List<float> { headH, headH };
+        rowHeights.AddRange(Enumerable.Repeat(bodyH, rows.Count));
+        TableLayout layout;
+        var leftShapes = new List<TextShapeRequest>();
+        if (table)
+        {
+            // 머리 2행이 모두 세로 병합이면 PowerPoint가 둘째 행을 없앤다(23행 → 22행). 표에는 두 배 높이 머리 1행만 두고,
+            // 눈금 머리글(연·월)을 놓을 때는 다시 두 줄로 나눠 쓴다.
+            var tableCells = cells.Where((_, i) => i != 1).Select(r => (IReadOnlyList<string>)r).ToList();
+            var tableMerges = merges
+                .Select(m => m.Row2 <= 2 ? m with { Row = 1, Row2 = 1 } : m with { Row = m.Row - 1, Row2 = m.Row2 - 1 })
+                .Where(m => m.Row2 > m.Row || m.Column2 > m.Column).ToList();
+            var tableStyles = styles.Where(x => x.Row != 2).Select(x => x.Row > 2 ? x with { Row = x.Row - 1 } : x).ToList();
+            var raw = ppt.AddTable(presentationPath, slide, new TableRequest(
+                area.Left, area.Top, tableWidth, tableCells,
+                ColumnWidths: widths, FontSize: font, FontName: options.FontName, HeaderRows: 1,
+                HeaderFill: options.HeaderFill, HeaderFontColor: "#FFFFFF", FontColor: options.TextColor,
+                BandFill: options.BandFill, BorderColor: null,
+                ColumnAligns: aligns, Merges: tableMerges, CellStyles: tableStyles,
+                RowHeights: [headH * 2, .. Enumerable.Repeat(bodyH, rows.Count)], CellPadding: 4f, Name: prefix + "_표"));
+            float half = raw.RowHeights[0] / 2;
+            layout = raw with
+            {
+                RowTops = [raw.RowTops[0], raw.RowTops[0] + half, .. raw.RowTops.Skip(1)],
+                RowHeights = [half, half, .. raw.RowHeights.Skip(1)],
+            };
+        }
+        else
+        {
+            // 단계 열만 남으면 모든 칸이 세로 병합돼 PowerPoint가 행을 없앴다(23행 → 22행). 표 없이 도형으로 그린다.
+            var tops = rowHeights.Select((_, i) => area.Top + rowHeights.Take(i).Sum()).ToList();
+            var lefts = widths.Select((_, i) => area.Left + widths.Take(i).Sum()).ToList();
+            layout = new TableLayout("", tops, rowHeights, lefts, widths);
+            var covered = new HashSet<(int, int)>();
+            foreach (var m in merges)
+                for (int r = m.Row; r <= m.Row2; r++)
+                    for (int c = m.Column; c <= m.Column2; c++)
+                        if (r != m.Row || c != m.Column) covered.Add((r, c));
+            for (int r = 1; r <= cells.Count; r++)
+                for (int c = 1; c <= cols; c++)
+                {
+                    if (covered.Contains((r, c))) continue;
+                    var merge = merges.FirstOrDefault(m => m.Row == r && m.Column == c) ?? new TableMerge(r, c, r, c);
+                    var style = styles.LastOrDefault(x => x.Row == r && x.Column == c);
+                    bool header = r <= 2;
+                    string? fill = style?.Fill ?? (header ? options.HeaderFill : null);
+                    string text = cells[r - 1][c - 1];
+                    if (fill is null && text.Length == 0) continue;
+                    float x = lefts[c - 1], y = tops[r - 1];
+                    float w = lefts[merge.Column2 - 1] + widths[merge.Column2 - 1] - x;
+                    float h = tops[merge.Row2 - 1] + rowHeights[merge.Row2 - 1] - y;
+                    leftShapes.Add(new TextShapeRequest(text, x, y, w, h, $"{prefix}_단계{r}_{c}", FillColor: fill,
+                        FontName: options.FontName, FontSize: style?.FontSize ?? font, Bold: style?.Bold ?? header,
+                        FontColor: style?.FontColor ?? (header ? "#FFFFFF" : options.TextColor), Padding: 4f,
+                        Align: style?.Align ?? (header ? TextAlign.Center : aligns[c - 1])));
+                }
+        }
 
-        // ── 막대·마일스톤 ──
-        float gridLeft = layout.ColumnLefts[firstPeriodCol];
-        float gridRight = layout.ColumnLefts[^1] + layout.ColumnWidths[^1];
+        // ── 눈금 영역(표 오른쪽) ──
+        float tableLeft = layout.ColumnLefts[0], tableTop = layout.RowTops[0];
+        float tableBottom = layout.RowTops[^1] + layout.RowHeights[^1];
+        float gridLeft = layout.ColumnLefts[^1] + layout.ColumnWidths[^1];
+        float gridRight = gridLeft + periodW * periods.Count;
+        float PeriodLeft(int i) => gridLeft + i * periodW;
         float X(DateTime date)
         {
             for (int i = 0; i < periods.Count; i++)
             {
                 if (date >= periods[i].End && i < periods.Count - 1) continue;
                 double frac = (date - periods[i].Start).TotalDays / (periods[i].End - periods[i].Start).TotalDays;
-                return layout.ColumnLefts[firstPeriodCol + i] + (float)Math.Clamp(frac, 0, 1) * layout.ColumnWidths[firstPeriodCol + i];
+                return PeriodLeft(i) + (float)Math.Clamp(frac, 0, 1) * periodW;
             }
             return gridRight;
         }
 
-        var overlay = new List<TextShapeRequest>();
+        var overlay = new List<TextShapeRequest>(leftShapes);
         int n = 0;
         string Next() => $"{prefix}_{++n}";
+
+        // 연·월 머리글, 본문 띠(표와 같은 줄 걸러)
+        for (int i = 0; i < periods.Count;)
+        {
+            int span = 0;
+            while (i + span < periods.Count && periods[i + span].Year == periods[i].Year) span++;
+            overlay.Add(new TextShapeRequest(periods[i].Year.ToString(), PeriodLeft(i), layout.RowTops[0], span * periodW, layout.RowHeights[0], Next(),
+                FillColor: options.HeaderFill, FontName: options.FontName, FontSize: font, Bold: true, FontColor: "#FFFFFF", Padding: 1f, Align: TextAlign.Center));
+            i += span;
+        }
+        for (int i = 0; i < periods.Count; i++)
+            overlay.Add(new TextShapeRequest(periods[i].Label, PeriodLeft(i), layout.RowTops[1], periodW, layout.RowHeights[1], Next(),
+                FillColor: options.SubHeaderFill, FontName: options.FontName, FontSize: font, Bold: true, FontColor: options.TextColor, Padding: 1f, Align: TextAlign.Center));
+        for (int r = 0; r < rows.Count; r++)
+            if (r % 2 == 1)
+                overlay.Add(new TextShapeRequest("", gridLeft, layout.RowTops[r + 2], gridRight - gridLeft, layout.RowHeights[r + 2], Next(), FillColor: options.BandFill));
+
+        // ── 눈금선 ── 칸 테두리는 칸마다 COM 호출이라 느려(17×23 표에 26초) 가는 선 도형으로 긋는다.
+        void HLine(float x1, float x2, float y, string color, float w = 0.5f) =>
+            overlay.Add(new TextShapeRequest("", x1, y - w / 2, x2 - x1, w, Next(), FillColor: color));
+        void VLine(float x, float y1, float y2, string color, float w = 0.5f) =>
+            overlay.Add(new TextShapeRequest("", x - w / 2, y1, w, y2 - y1, Next(), FillColor: color));
+        float detailLeft = table ? layout.ColumnLefts[colItem] : gridLeft;
+        if (table) VLine(layout.ColumnLefts[colPeriodText], tableTop, tableBottom, options.GridColor);
+        VLine(gridLeft, tableTop, tableBottom, options.GridColor);
+        for (int i = 1; i < periods.Count; i++)
+        {
+            bool yearEdge = periods[i].Year != periods[i - 1].Year;
+            VLine(PeriodLeft(i), yearEdge ? tableTop : layout.RowTops[1], tableBottom,
+                yearEdge ? "#8EA3C4" : options.GridColor, yearEdge ? 0.75f : 0.5f);
+        }
+        // 단계|하위 구분 경계는 하위 구분이 있는 단계에만 긋는다. 전체에 그으면 "1. 대내외 환경|분석"처럼 글자를 갈랐다.
+        if (hasSub)
+            for (int g = 0; g < doc.Groups.Count; g++)
+            {
+                if (!doc.Groups[g].HasSubsections) continue;
+                int first = rows.FindIndex(x => x.Kind == RowKind.Task && x.Group == g), last = rows.FindLastIndex(x => x.Kind == RowKind.Task && x.Group == g);
+                VLine(layout.ColumnLefts[colSub], layout.RowTops[first + 2], layout.RowTops[last + 2] + layout.RowHeights[last + 2], "#FFFFFF");
+            }
+        for (int r = 1; r < rows.Count; r++)
+        {
+            var (prev, next) = (rows[r - 1], rows[r]);
+            float y = layout.RowTops[r + 2];
+            if (prev.Group != next.Group || prev.Kind != next.Kind) HLine(tableLeft, gridRight, y, "#9DB0CF", 0.75f);
+            else if (hasSub && prev.Section != next.Section) HLine(layout.ColumnLefts[colSub], gridRight, y, options.GridColor);
+            else HLine(detailLeft, gridRight, y, options.GridColor);
+        }
+        overlay.Add(new TextShapeRequest("", tableLeft, tableTop, gridRight - tableLeft, tableBottom - tableTop, Next(),
+            LineColor: "#9DB0CF", LineWidth: 0.75f));
         for (int r = 0; r < rows.Count; r++)
         {
             var row = rows[r];
@@ -205,7 +295,7 @@ public sealed class ScheduleRenderer(IPptComService ppt, string presentationPath
                 if (inBar)
                 {
                     // 이름을 막대 안에 쓴다. 안 들어가면 글자를 6.5pt까지 줄이고, 그래도 안 되면 막대 옆에 쓴다.
-                    float barH = h * 0.78f, barW = x2 - x1;
+                    float barH = Math.Min(h * 0.78f, 16f), barW = x2 - x1;
                     // 어림은 실제 글꼴보다 좁게 나와 두 줄로 넘친 막대가 있었다(2026-10-07). 10% 여유를 둔다.
                     bool Fits(float sz) => Estimate(task.Name, sz) * 1.1f + 8f <= barW;
                     float size = font;
@@ -250,15 +340,13 @@ public sealed class ScheduleRenderer(IPptComService ppt, string presentationPath
         }
         var names = ppt.AddTextShapes(presentationPath, slide, overlay);
 
-        // 표와 얹은 도형을 한 그룹으로. 표를 묶을 수 없는 버전이면 얹은 도형만 묶는다.
-        string groupName;
-        try { groupName = ppt.GroupShapes(presentationPath, slide, [layout.Name, .. names], prefix); }
-        catch (Exception) when (names.Count >= 2) { groupName = ppt.GroupShapes(presentationPath, slide, names, prefix + "_막대"); }
+        // PowerPoint는 표를 다른 도형과 묶지 못한다(시도하면 실패하고 3초 넘게 걸렸다). 막대·눈금만 묶는다.
+        string groupName = names.Count >= 2 ? ppt.GroupShapes(presentationPath, slide, names, prefix + "_막대") : names.FirstOrDefault() ?? "";
 
         var firstStart = periods[0].Start; var lastP = periods[^1];
         string unit = periods[0].Label.EndsWith('Q') ? "분기" : "월";
         string summary = $"일정표({(table ? "표형" : inBar ? "막대 안 이름형" : "간트형")}): 구분 {doc.Groups.Count}개·항목 {doc.AllTasks.Count()}개·마일스톤 {doc.MilestoneGroups.Sum(m => m.Milestones.Count)}개, " +
-                         $"{firstStart:yyyy-MM}~{lastP.End.AddDays(-1):yyyy-MM}({unit} {periods.Count}칸). 표 '{layout.Name}', 막대·표시 {names.Count}개, 그룹 '{groupName}'";
+                         $"{firstStart:yyyy-MM}~{lastP.End.AddDays(-1):yyyy-MM}({unit} {periods.Count}칸). {(table ? $"표 '{layout.Name}', " : "")}도형 {names.Count}개, 그룹 '{groupName}'";
         return new ScheduleResult(groupName, layout.Name, rows.Count, periods.Count, names.Count, summary);
     }
 
