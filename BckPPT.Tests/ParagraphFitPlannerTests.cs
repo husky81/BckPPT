@@ -79,11 +79,34 @@ public class SlideOriginsTests
     }
 
     [Fact]
+    public void 작업_사본_번호를_원본_번호로_되돌린다()
+    {
+        var origins = new SlideOrigins();
+        origins.RecordDuplicate(3, 4);    // 원본 3쪽 복제 → 4쪽, 원본 4쪽은 5쪽으로
+        origins.RecordDuplicate(1, 1);    // 원본 1쪽 복제 → 맨 앞(1쪽), 나머지 한 칸씩 밀림
+        Assert.Equal(1, origins.OriginalIndexOf(1));   // 새 슬라이드 → 복제 원본(원본 1쪽)
+        Assert.Equal(1, origins.OriginalIndexOf(2));   // 원본 1쪽
+        Assert.Equal(3, origins.OriginalIndexOf(4));   // 원본 3쪽
+        Assert.Equal(3, origins.OriginalIndexOf(5));   // 새 슬라이드 → 원본 3쪽
+        Assert.Equal(4, origins.OriginalIndexOf(6));   // 원본 4쪽
+    }
+
+    [Fact]
     public void 복제본을_다시_복제해도_처음_원본이_기준이다()
     {
         var origins = new SlideOrigins();
         origins.RecordDuplicate(33, 35);
         origins.RecordDuplicate(35, 36);
         Assert.Equal(33, origins.BaselineOf(36));
+    }
+}
+
+public class PilcrowTests
+{
+    [Fact]
+    public void 미리보기_표기를_흉내_낸_문단은_나눈다()
+    {
+        Assert.Equal(["가", "나", "다"], ParagraphFitPlanner.SplitPilcrows(["가 ¶ 나 ¶ 다"]));
+        Assert.Equal("첫\v둘", ParagraphFitPlanner.NormalizeParagraph("첫 ↵ 둘"));
     }
 }

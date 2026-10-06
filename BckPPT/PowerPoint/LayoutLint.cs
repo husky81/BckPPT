@@ -52,12 +52,12 @@ public static class LayoutLint
     public static IReadOnlyList<LintIssue> Check(LintSlide slide, LintSlide? baseline, LintSettings settings)
     {
         var issues = new List<LintIssue>();
-        foreach (var shape in slide.Shapes.Where(s => s.HasText))
+        foreach (var shape in slide.Shapes.Where(s => s.HasText && !Unchanged(s, baseline)))
         {
             if (baseline?.Shapes.FirstOrDefault(b => b.Address == shape.Address) is { HasText: true } basis &&
                 shape.Lines.Count > basis.Lines.Count)
                 issues.Add(new(LintRule.BaselineLines, shape.Address,
-                    $"{shape.Address} {shape.Lines.Count}줄 > 기준 {basis.Lines.Count}줄"));
+                    $"{shape.Address} {shape.Lines.Count}줄 > 기준 {basis.Lines.Count}줄{ExcessHint(shape.Lines, basis.Lines.Count)}"));
 
             if (IsTitle(shape, settings)) CheckTitleBalance(shape, settings, issues);
             else CheckOrphans(shape, settings, issues);
@@ -66,9 +66,29 @@ public static class LayoutLint
                 issues.Add(new(LintRule.Overflow, shape.Address,
                     $"{shape.Address} 텍스트가 상자보다 {shape.BoundHeight - shape.Height:0.#}pt 넘침"));
         }
-        CheckFormatDrift(slide, issues);
+        CheckFormatDrift(slide, baseline, issues);
         CheckOverlaps(slide, settings, issues);
         return issues;
+    }
+
+    /// <summary>
+    /// 기준과 주소·줄·크기가 모두 같은 상자는 이번 작업에서 손대지 않은 것이다.
+    /// 템플릿에 원래 있던 문제까지 고치라고 하면 모델이 요청 밖의 상자를 건드린다(2026-10-06 실측).
+    /// </summary>
+    public static bool Unchanged(LintShape shape, LintSlide? baseline) =>
+        baseline?.Shapes.FirstOrDefault(b => b.Address == shape.Address) is { } basis &&
+        basis.Height == shape.Height && basis.Width == shape.Width &&
+        basis.Lines.Select(l => l.Text).SequenceEqual(shape.Lines.Select(l => l.Text));
+
+    /// <summary>
+    /// 기준 줄 수를 넘을 때 얼마나 줄여야 하는지. 기준을 넘는 줄의 글자 수 합이 대략 덜어낼 양이다.
+    /// "3줄 > 기준 2줄"만으로는 모델이 감을 못 잡고 문구를 거의 그대로 다시 넣었다(2026-10-06 실측).
+    /// </summary>
+    public static string ExcessHint(IReadOnlyList<TextLineInfo> lines, int budget)
+    {
+        if (lines.Count <= budget) return "";
+        int chars = lines.Skip(budget).Sum(l => l.Text.Trim().Length);
+        return $" — {lines.Count - budget}줄 초과, 약 {chars}자 줄이세요";
     }
 
     public static string Describe(IReadOnlyList<LintIssue> issues) => issues.Count == 0
@@ -132,7 +152,7 @@ public static class LayoutLint
         }
     }
 
-    private static void CheckFormatDrift(LintSlide slide, List<LintIssue> issues)
+    private static void CheckFormatDrift(LintSlide slide, LintSlide? baseline, List<LintIssue> issues)
     {
         var groups = slide.Shapes
             .Where(s => s.Format is not null && RoleOf(s.Name) is not null)
@@ -152,7 +172,8 @@ public static class LayoutLint
             // 과반이 없으면 어느 쪽이 이탈인지 알 수 없으므로 말하지 않는다.
             if (counts.Count < 2 || counts[0].Count() == counts[1].Count()) return;
             var majority = counts[0].Key;
-            foreach (var odd in counts.Skip(1).SelectMany(g => g))
+            // 비교는 모든 상자로 하되, 지적은 이번에 바뀐 상자만 한다.
+            foreach (var odd in counts.Skip(1).SelectMany(g => g).Where(s => !Unchanged(s, baseline)))
                 issues.Add(new(LintRule.FormatDrift, odd.Address,
                     $"{odd.Address} {label} {show(pick(odd.Format!))} (다른 상자 {show(majority)})"));
         }

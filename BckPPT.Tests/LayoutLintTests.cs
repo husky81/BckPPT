@@ -23,7 +23,7 @@ public class LayoutLintTests
         var issues = LayoutLint.Check(new(35, [Lines("C2_rnd", 12)]), new(33, [Lines("C2_rnd", 11)]), Settings);
         var issue = Assert.Single(issues);
         Assert.Equal(LintRule.BaselineLines, issue.Rule);
-        Assert.Equal("C2_rnd 12줄 > 기준 11줄", issue.Message);
+        Assert.Equal("C2_rnd 12줄 > 기준 11줄 — 1줄 초과, 약 9자 줄이세요", issue.Message);
     }
 
     [Fact]

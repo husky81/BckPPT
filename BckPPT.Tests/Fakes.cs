@@ -75,6 +75,19 @@ public sealed class FakePptComService : IPptComService
     public List<string> Calls { get; } = new();
 
     private List<FakeShape> Slide(int index) => Slides[index - 1];
+
+    /// <summary>원본 파일(판정 기준)로 읽힐 상태. 작업 사본과 다른 경로로 읽으면 이 상태를 돌려준다.</summary>
+    public string? OriginalPath { get; private set; }
+    private List<List<FakeShape>>? _original;
+
+    public void SnapshotOriginal(string path)
+    {
+        OriginalPath = path;
+        _original = Slides.Select(s => s.Select(x => x.Clone()).ToList()).ToList();
+    }
+
+    private List<FakeShape> Read(string path, int index) =>
+        _original is not null && path == OriginalPath ? _original[index - 1] : Slides[index - 1];
     private FakeShape Shape(int slide, string address) =>
         Slide(slide).FirstOrDefault(s => s.Name == address)
         ?? throw new InvalidOperationException($"{slide}쪽에서 도형 '{address}'를 찾지 못했습니다.");
@@ -113,7 +126,7 @@ public sealed class FakePptComService : IPptComService
 
     public PptSlideInfo? GetShapeInfo(string presentationPath, int slideIndex, string shapeName)
     {
-        var shape = Slide(slideIndex).FirstOrDefault(s => s.Name == shapeName);
+        var shape = Read(presentationPath, slideIndex).FirstOrDefault(s => s.Name == shapeName);
         if (shape is null) return null;
         var lines = shape.Lines();
         float bound = lines.Count * 10f;
@@ -122,13 +135,14 @@ public sealed class FakePptComService : IPptComService
     }
 
     public IReadOnlyList<TextLineInfo> GetTextLineBreaks(string presentationPath, int slideIndex, string shapeName) =>
-        Slide(slideIndex).FirstOrDefault(s => s.Name == shapeName)?.Lines() ?? [];
+        Read(presentationPath, slideIndex).FirstOrDefault(s => s.Name == shapeName)?.Lines() ?? [];
 
     public IReadOnlyList<ShapeEntry> ListShapes(string presentationPath, int slideIndex) =>
-        Slide(slideIndex).Select(s => new ShapeEntry(s.Name, s.Name, "", 1, s.Left, s.Top, s.Width, s.Height,
+        Read(presentationPath, slideIndex).Select(s => new ShapeEntry(s.Name, s.Name, "", 1, s.Left, s.Top, s.Width, s.Height,
             s.Paragraphs.Any(p => p.Length > 0), string.Join(" ", s.Paragraphs))).ToList();
 
-    public TextFormatInfo GetTextFormat(string presentationPath, int slideIndex, string address) => Shape(slideIndex, address).Format;
+    public TextFormatInfo GetTextFormat(string presentationPath, int slideIndex, string address) =>
+        Read(presentationPath, slideIndex).First(s => s.Name == address).Format;
 
     public int ReplaceTextInShape(string presentationPath, int slideIndex, string address, string find, string replace)
     {

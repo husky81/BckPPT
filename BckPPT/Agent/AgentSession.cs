@@ -52,7 +52,10 @@ public sealed class AgentSession : IDisposable
             $"{Path.GetFileNameWithoutExtension(sourcePath)}_작업_{stamp}_{Guid.NewGuid().ToString("N")[..6]}{Path.GetExtension(sourcePath)}");
         File.Copy(sourcePath, workingPath, overwrite: false);
 
-        var context = new AgentToolContext(ppt, workingPath) { DescribeImage = describeImage, Sources = sources };
+        var context = new AgentToolContext(ppt, workingPath)
+        {
+            DescribeImage = describeImage, Sources = sources, BaselinePath = sourcePath
+        };
         var log = new AgentSessionLog(Path.Combine(logDirectory ?? DefaultLogDirectory, $"{stamp}_{Path.GetFileNameWithoutExtension(workingPath)}.jsonl"));
         var session = new AgentSession(sourcePath, workingPath, context, log);
         log.Write("start", new { source = sourcePath, working = workingPath });

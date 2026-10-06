@@ -23,9 +23,13 @@
                 <StackPanel>
                     <TextBlock Text="현재 대상" Style="{StaticResource Caption}"/>
                     <TextBlock Text="{Binding TargetText}" FontSize="14" Margin="0,5,0,0"/>
+                    <TextBlock Text="{Binding SourcesText}" Foreground="{StaticResource SubTextBr}" Margin="0,5,0,0"
+                               TextTrimming="CharacterEllipsis" ToolTip="{Binding SourcesText}"/>
                     <TextBlock Text="{Binding StatusText}" Foreground="{StaticResource SubTextBr}" Margin="0,5,0,0"/>
                 </StackPanel>
                 <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                    <Button Content="원문 첨부" Style="{StaticResource DarkBtn}" Margin="0,0,8,0" Click="AttachSources_Click"
+                            ToolTip="기획보고서·RFP 등 PDF/PPTX/MD/TXT. 창에 끌어 놓아도 됩니다"/>
                     <Button Content="템플릿 폴더 인덱싱" Style="{StaticResource DarkBtn}" Margin="0,0,8,0" Click="IndexFolder_Click"/>
                     <Button Content="PPT 열기" Style="{StaticResource DarkBtn}" Margin="0,0,8,0" Click="OpenFile_Click"/>
                     <Button Content="현재 PowerPoint 연결" Style="{StaticResource DarkBtn}" Click="Connect_Click"/>
@@ -58,6 +62,12 @@
                             </Border>
                         </DataTemplate></ItemsControl.ItemTemplate>
                     </ItemsControl>
+                    <StackPanel Orientation="Horizontal" Margin="0,18,0,0" Visibility="{Binding AgentControlsVisibility}">
+                        <Button Content="결과 저장" Style="{StaticResource AccentBtn}" IsEnabled="{Binding CanSend}" Click="ApproveAgent_Click"
+                                ToolTip="작업 사본을 원본 옆에 새 파일로 저장합니다. 원본은 바뀌지 않습니다"/>
+                        <Button Content="결과 열어 보기" Style="{StaticResource DarkBtn}" IsEnabled="{Binding CanSend}" Margin="8,0,0,0" Click="OpenWorkingCopy_Click"/>
+                        <Button Content="작업 버리기" Style="{StaticResource DarkBtn}" IsEnabled="{Binding CanSend}" Margin="8,0,0,0" Click="DiscardAgent_Click"/>
+                    </StackPanel>
                     <StackPanel Orientation="Horizontal" Margin="0,18,0,0" Visibility="{Binding JobControlsVisibility}">
                         <Button Content="변경 미리보기" Style="{StaticResource DarkBtn}" IsEnabled="{Binding CanPreview}" Click="Preview_Click"/>
                         <Button Content="적용" Style="{StaticResource AccentBtn}" IsEnabled="{Binding CanApply}" Margin="8,0,0,0" Click="Apply_Click"/>
@@ -68,7 +78,7 @@
         </Border>
         <Grid Grid.Row="3" Margin="0,14,0,0">
             <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-            <TextBox x:Name="InstructionBox" Text="" ToolTip="예: 3쪽의 3번 항목을 한 장으로 구체화해줘"
+            <TextBox x:Name="InstructionBox" Text="" ToolTip="예: 33쪽 카드 레이아웃으로 첨부한 보고서 5개를 정리해줘 · 결과를 본 뒤 '1줄씩 줄여줘'처럼 이어서 요청"
                      Style="{StaticResource DarkInput}" Padding="10,8" KeyDown="InstructionBox_KeyDown"/>
             <StackPanel Grid.Column="1" Orientation="Horizontal" Margin="8,0,0,0">
                 <Button Content="취소" IsEnabled="{Binding IsRequesting}" Style="{StaticResource DarkBtn}" Margin="0,0,8,0" Click="Cancel_Click"/>

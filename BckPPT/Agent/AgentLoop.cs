@@ -24,6 +24,9 @@ public sealed record AgentLoopOptions
 
     /// <summary>finish 전에 건드린 슬라이드를 Lint로 검사해 위반이 있으면 되돌려 보내는 횟수.</summary>
     public int LintRejectionsBeforeFinish { get; init; } = 2;
+
+    /// <summary>슬라이드를 바꾼 뒤 도구도 finish도 없이 답하면 이어가라고 되돌려 보내는 횟수.</summary>
+    public int NudgesWithoutFinish { get; init; } = 1;
 }
 
 public enum AgentStopReason { Finished, AnsweredWithoutTools, TurnLimit, TokenLimit }
@@ -48,6 +51,10 @@ public sealed class AgentLoop(ILlmClient llm, ToolRegistry tools, AgentLoopOptio
 {
     public const string ElidedPrefix = "[이전 도구 결과 생략";
 
+    public const string ContinueNudge =
+        "(자동 안내) 슬라이드를 바꾼 상태입니다. 남은 단계가 있으면 말하지 말고 지금 도구를 호출하세요. " +
+        "다 끝났으면 finish(summary)를 호출하세요. 사용자에게 물어볼 것이 있으면 finish의 summary에 적으세요.";
+
     public async Task<AgentRunResult> RunAsync(
         AgentSession session, string userMessage,
         IProgress<AgentEvent>? progress = null, CancellationToken cancellationToken = default)
@@ -56,6 +63,7 @@ public sealed class AgentLoop(ILlmClient llm, ToolRegistry tools, AgentLoopOptio
         var definitions = tools.Definitions();
         int lintRejections = 0;
         IReadOnlyList<LintIssue>? finishIssues = null;
+        int nudges = 0;
         var runUsage = LlmUsage.Zero;
         session.Context.FinishSummary = null;
 
@@ -78,8 +86,18 @@ public sealed class AgentLoop(ILlmClient llm, ToolRegistry tools, AgentLoopOptio
             if (!string.IsNullOrWhiteSpace(completion.Content))
                 progress?.Report(new(AgentEventKind.Message, completion.Content.Trim()));
 
+            // qwen3는 "이제 lint_slide로 확인하겠습니다"라고 말만 하고 멈추곤 한다(실측). 슬라이드를 바꾼 뒤라면
+            // 한 번은 이어가게 한다. 그래도 도구 없이 답하면 질문일 수 있으므로 끝내고, 바꾼 슬라이드의 판정만 보여준다.
+            if (completion.ToolCalls.Count == 0 && nudges < options.NudgesWithoutFinish &&
+                session.Context.Origins.Touched.Count > 0)
+            {
+                nudges++;
+                session.Append(LlmMessage.User(ContinueNudge));
+                continue;
+            }
             if (completion.ToolCalls.Count == 0)
-                return Result(AgentStopReason.AnsweredWithoutTools, completion.Content.Trim(), turn, runUsage, []);
+                return Result(AgentStopReason.AnsweredWithoutTools, completion.Content.Trim(), turn, runUsage,
+                    await LintTouchedAsync(session.Context, cancellationToken));
 
             foreach (var call in completion.ToolCalls)
             {

@@ -17,6 +17,7 @@ public sealed class AppCompositionRoot : IDisposable
     private readonly DocumentSession _documentSession = new();
     private readonly ILlmClient _llmClient;
     private readonly ApprovalWorkflow _approvalWorkflow;
+    private readonly AgentWorkflow _agentWorkflow;
     private readonly TemporaryArtifactStore _temporaryArtifacts = new();
     private readonly PptIndexer _pptIndexer;
     private readonly ExternalJobRegistry _externalJobs = new();
@@ -29,19 +30,26 @@ public sealed class AppCompositionRoot : IDisposable
     {
         _startupOptions = startupOptions ?? StartupOptions.Empty;
         _uiDispatcher = new WpfDispatcher(dispatcher);
-        try { _llmClient = new GitokyLlmClient(GitokyLlmOptions.FromEnvironment(AppContext.BaseDirectory)); }
+        GitokyLlmOptions? llmOptions = null;
+        try
+        {
+            llmOptions = GitokyLlmOptions.FromEnvironment(AppContext.BaseDirectory);
+            _llmClient = new GitokyLlmClient(llmOptions);
+        }
         catch (Exception ex) { _llmClient = new UnavailableLlmClient(ex.Message); }
         var databasePath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "BckSoft", "BckPPT", "templates.db");
         var repository = new TemplateRepository(databasePath);
         var retriever = new TemplateRetriever(repository);
         _pptIndexer = new PptIndexer(repository);
-        _approvalWorkflow = new ApprovalWorkflow(_pptService,
-            new RenderValidator(_pptService, _temporaryArtifacts), new LayoutDecisionRouter(_pptService, retriever));
+        var renderValidator = new RenderValidator(_pptService, _temporaryArtifacts);
+        _approvalWorkflow = new ApprovalWorkflow(_pptService, renderValidator, new LayoutDecisionRouter(_pptService, retriever));
+        _agentWorkflow = new AgentWorkflow(_llmClient, llmOptions, _pptService, renderValidator,
+            new SourceLibrary(SourceLibrary.DefaultDatabasePath));
     }
 
     public AgentChatWindow CreateAgentChatWindow() =>
-        new(_documentSession, _pptService, _llmClient, _approvalWorkflow, _pptIndexer,
+        new(_documentSession, _pptService, _llmClient, _approvalWorkflow, _agentWorkflow, _pptIndexer,
             _externalJobs, _updateService, OpenEditorWindow, _startupOptions.ResolveInitialDirectory());
 
     public void StartExternalEndpoint(AgentChatWindow window)
@@ -70,6 +78,7 @@ public sealed class AppCompositionRoot : IDisposable
 
     public void Dispose()
     {
+        _agentWorkflow.Dispose();
         (_llmClient as IDisposable)?.Dispose();
         _externalEndpoint?.Dispose();
         _updateService.Dispose();

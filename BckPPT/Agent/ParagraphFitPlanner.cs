@@ -10,7 +10,15 @@ public static class ParagraphFitPlanner
 {
     /// <summary>문단 안 줄바꿈(Shift+Enter)은 PowerPoint의 수직 탭(\v)이다. 모델이 \n으로 보내도 같게 본다.</summary>
     public static string NormalizeParagraph(string text) =>
-        text.Replace("\r\n", "\v").Replace('\n', '\v').Replace('\r', '\v');
+        text.Replace("\r\n", "\v").Replace('\n', '\v').Replace('\r', '\v')
+            .Replace(" ↵ ", "\v").Replace('↵', '\v');
+
+    /// <summary>
+    /// 모델이 미리보기 표기(¶ 문단 경계)를 흉내 내 한 문자열에 여러 문단을 담아 보내면 문단으로 나눈다.
+    /// 2026-10-06 실측: list_shapes 미리보기를 보고 "가 ¶ 나 ¶ 다"를 문단 하나로 보냈다.
+    /// </summary>
+    public static IReadOnlyList<string> SplitPilcrows(IReadOnlyList<string> paragraphs) =>
+        paragraphs.SelectMany(p => p.Contains('¶') ? p.Split('¶').Select(s => s.Trim()) : [p]).ToList();
 
     public static IReadOnlyList<ParagraphEdit> Plan(
         int slideIndex, string address, int currentCount, IReadOnlyList<string> desired)

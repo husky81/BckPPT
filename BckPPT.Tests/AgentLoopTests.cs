@@ -23,6 +23,7 @@ public sealed class AgentLoopTests : IDisposable
             new FakeShape("C1_rnd", 0, 50, 200, 100, 10, "기존 내용 1", "기존 내용 2"),
         ]);
         _ppt.Slides.Add([new FakeShape("Footer", 0, 0, 200, 20, 50, "끝")]);
+        _ppt.SnapshotOriginal(_source);
     }
 
     private AgentSession StartSession() =>
@@ -55,7 +56,7 @@ public sealed class AgentLoopTests : IDisposable
         // 도구 결과가 대화에 붙고, 문단 교체 결과에는 줄 측정이 들어 있다.
         var toolMessages = session.Messages.Where(m => m.Role == "tool").ToList();
         Assert.Equal(3, toolMessages.Count);
-        Assert.Contains("C1_rnd: 2줄", toolMessages[1].Content);
+        Assert.Contains("C1_rnd: 2줄 (기준 2줄 이내)", toolMessages[1].Content);
         Assert.Equal(new LlmUsage(300, 60), result.Usage);
         Assert.All(llm.Requests, r => Assert.NotNull(r.Tools));
     }
@@ -129,6 +130,54 @@ public sealed class AgentLoopTests : IDisposable
         Assert.Equal(2, errors.Count);
         Assert.Contains("찾지 못했습니다", errors[0].Text);
         Assert.Contains("도구는 없습니다", errors[1].Text);
+    }
+
+    [Fact]
+    public async Task 바꾼_뒤_말만_하고_멈추면_한_번_이어가게_한다()
+    {
+        var llm = new FakeLlmClient(
+            FakeLlmClient.Calls(("set_paragraphs", """{"slide": 1, "shape": "C1_rnd", "paragraphs": ["새 내용"]}""")),
+            FakeLlmClient.Text("이제 lint_slide로 확인하겠습니다."),
+            FakeLlmClient.Calls(("finish", """{"summary": "끝"}""")));
+        using var session = StartSession();
+
+        var result = await Loop(llm).RunAsync(session, "채워줘");
+
+        Assert.Equal(AgentStopReason.Finished, result.Reason);
+        Assert.Equal(AgentLoop.ContinueNudge, llm.Requests[2].Messages[^1].Content);
+    }
+
+    [Fact]
+    public async Task 이어가라고_한_뒤에도_말로_답하면_끝낸다()
+    {
+        var llm = new FakeLlmClient(
+            FakeLlmClient.Calls(("set_paragraphs", """{"slide": 1, "shape": "C1_rnd", "paragraphs": ["새 내용"]}""")),
+            FakeLlmClient.Text("어느 카드를 바꿀까요?"),
+            FakeLlmClient.Text("어느 카드를 바꿀까요?"));
+        using var session = StartSession();
+
+        var result = await Loop(llm).RunAsync(session, "채워줘");
+
+        Assert.Equal(AgentStopReason.AnsweredWithoutTools, result.Reason);
+        Assert.Equal(3, result.Turns);
+    }
+
+    [Fact]
+    public async Task 템플릿에_원래_있던_문제는_판정하지_않는다()
+    {
+        // 원본 1쪽 C1_title이 이미 고아 단어를 갖고 있다. 복제 후 본문만 바꾸면 제목은 판정 대상이 아니다.
+        _ppt.Slides[0][0].Paragraphs[0] = "스마트 제조 공정 품질 예측 기술 개발";   // 20자 줄 → '개발' 꼬리
+        _ppt.SnapshotOriginal(_source);
+        var llm = new FakeLlmClient(
+            FakeLlmClient.Calls(("duplicate_slide", """{"source": 1, "after": 1}""")),
+            FakeLlmClient.Calls(("set_paragraphs", """{"slide": 2, "shape": "C1_rnd", "paragraphs": ["새 내용"]}""")),
+            FakeLlmClient.Calls(("finish", """{"summary": "끝"}""")));
+        using var session = StartSession();
+
+        var result = await Loop(llm).RunAsync(session, "채워줘");
+
+        Assert.Equal(3, result.Turns);   // 되돌려 보내지 않았다
+        Assert.Empty(result.RemainingIssues);
     }
 
     [Fact]

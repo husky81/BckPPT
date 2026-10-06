@@ -36,6 +36,12 @@ public sealed class AgentToolContext(IPptComService ppt, string workingPath)
     public string WorkingPath { get; } = workingPath;
     public SlideOrigins Origins { get; } = new();
 
+    /// <summary>
+    /// 판정 기준으로 읽기만 하는 원본 파일. 작업 사본의 슬라이드를 원본의 같은 슬라이드(복제본이면 복제 원본)와 비교한다.
+    /// 도구 인자로는 노출하지 않는다. 없으면 작업 사본 안의 복제 원본을 기준으로 쓴다.
+    /// </summary>
+    public string? BaselinePath { get; init; }
+
     /// <summary>세션 중 추가한 도형 (슬라이드, 주소). 겹침 판정 대상.</summary>
     public HashSet<(int Slide, string Address)> AddedShapes { get; } = new();
 
@@ -46,7 +52,7 @@ public sealed class AgentToolContext(IPptComService ppt, string workingPath)
     public Func<string, string, CancellationToken, Task<string>>? DescribeImage { get; init; }
 
     /// <summary>원문 라이브러리. Phase D 전까지는 비어 있을 수 있다.</summary>
-    public ISourceLibrary? Sources { get; init; }
+    public ISourceLibrary? Sources { get; set; }
 
     public string? FinishSummary { get; set; }
 }
@@ -55,6 +61,9 @@ public sealed class AgentToolContext(IPptComService ppt, string workingPath)
 public interface ISourceLibrary
 {
     IReadOnlyList<SourceHit> Search(string query, int limit);
+
+    /// <summary>문서 목록(document가 null) 또는 한 문서의 절 제목과 쪽 범위.</summary>
+    string Outline(string? document);
     string Read(string document, int fromPage, int toPage);
 }
 

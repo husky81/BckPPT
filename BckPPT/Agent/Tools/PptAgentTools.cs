@@ -61,7 +61,7 @@ public static class PptAgentTools
                 Schema("{" + SlideShape + """, "size": {"type": "number"}, "bold": {"type": "boolean"}, "color": {"type": "string"}, "spacing": {"type": "number"}, "font_name": {"type": "string"}}""",
                     "slide", "shape"), true, SetTextFormat),
             new("lint_slide",
-                "레이아웃 규칙 검사: 기준 슬라이드 대비 줄 수, 고아 단어, 넘침, 제목 균형, 같은 역할 상자 서식 차이, 추가 도형 겹침. baseline_slide를 주지 않으면 복제 원본을 기준으로 쓴다",
+                "레이아웃 규칙 검사: 기준 슬라이드 대비 줄 수, 고아 단어, 넘침, 제목 균형, 같은 역할 상자 서식 차이, 추가 도형 겹침. baseline_slide를 주지 않으면 원본 파일의 같은 슬라이드(복제본이면 복제 원본)를 기준으로 쓰고, 기준과 같은(손대지 않은) 상자는 판정하지 않는다",
                 Schema("""{"slide": {"type": "integer"}, "baseline_slide": {"type": "integer"}}""", "slide"), false, LintSlide),
             new("render_slide", "슬라이드를 이미지로 렌더해 눈으로 확인한 설명을 돌려준다. question에 확인할 점을 적는다",
                 Schema("""{"slide": {"type": "integer"}, "question": {"type": "string"}}""", "slide"), false, RenderSlide),
@@ -70,7 +70,9 @@ public static class PptAgentTools
         };
         if (includeSources)
         {
-            tools.Add(new("search_source", "첨부한 원문 문서에서 관련 쪽을 찾는다. 결과는 문서명·쪽·발췌",
+            tools.Add(new("source_outline", "첨부한 원문의 목차(절 제목과 시작 쪽). document를 비우면 문서 목록. 원문을 읽기 전에 먼저 본다",
+                Schema("""{"document": {"type": "string"}}"""), false, SourceOutline));
+            tools.Add(new("search_source", "첨부한 원문 문서에서 관련 쪽을 찾는다. 결과는 문서명·쪽·〈절 제목〉·발췌",
                 Schema("""{"query": {"type": "string"}, "limit": {"type": "integer"}}""", "query"), false, SearchSource));
             tools.Add(new("read_source", "원문 문서의 쪽 범위를 읽는다",
                 Schema("""{"document": {"type": "string"}, "from_page": {"type": "integer"}, "to_page": {"type": "integer"}}""",
@@ -139,7 +141,11 @@ public static class PptAgentTools
     {
         var lines = await Task.Run(() => ctx.Ppt.GetTextLineBreaks(ctx.WorkingPath, slide, shape), ct);
         if (lines.Count == 0) return $"{shape}: 텍스트 없음(또는 도형을 찾지 못함)";
-        var sb = new StringBuilder($"{shape}: {lines.Count}줄\n");
+        var budget = await BaselineLineCountAsync(ctx, slide, shape, ct);
+        var verdict = budget is not int b ? ""
+            : lines.Count <= b ? $" (기준 {b}줄 이내)"
+            : $" (기준 {b}줄{LayoutLint.ExcessHint(lines, b)})";
+        var sb = new StringBuilder($"{shape}: {lines.Count}줄{verdict}\n");
         int paragraph = 1;
         foreach (var line in lines)
         {
@@ -154,6 +160,19 @@ public static class PptAgentTools
             if (line.BreakType == LineBreakType.Enter) paragraph++;
         }
         return sb.ToString();
+    }
+
+    /// <summary>원본 파일에서 같은 상자(복제본이면 복제 원본의 상자)의 줄 수. 원본에 없는 상자면 null.</summary>
+    private static async Task<int?> BaselineLineCountAsync(AgentToolContext ctx, int slide, string shape, CancellationToken ct)
+    {
+        if (ctx.BaselinePath is not { } original) return null;
+        try
+        {
+            var lines = await Task.Run(() => ctx.Ppt.GetTextLineBreaks(original, ctx.Origins.OriginalIndexOf(slide), shape), ct);
+            return lines.Count > 0 ? lines.Count : null;
+        }
+        catch (OperationCanceledException) { throw; }
+        catch { return null; }
     }
 
     // ── 쓰기 ───────────────────────────────────────────────────
@@ -171,7 +190,7 @@ public static class PptAgentTools
     {
         int slide = ToolArgs.Int(args, "slide");
         string shape = ToolArgs.String(args, "shape");
-        var paragraphs = ToolArgs.StringArray(args, "paragraphs");
+        var paragraphs = ParagraphFitPlanner.SplitPilcrows(ToolArgs.StringArray(args, "paragraphs"));
         if (paragraphs.Count == 0) throw new AgentToolException("paragraphs가 비었습니다. 지우려면 delete_shape를 쓰세요.");
 
         var info = await Task.Run(() => ctx.Ppt.GetShapeInfo(ctx.WorkingPath, slide, shape), ct)
@@ -189,6 +208,8 @@ public static class PptAgentTools
         int slide = ToolArgs.Int(args, "slide");
         string shape = ToolArgs.String(args, "shape"), find = ToolArgs.String(args, "find");
         string replace = ToolArgs.OptionalString(args, "replace") ?? "";
+        if (find.Contains('\n') || find.Contains('\r') || find.Contains('¶'))
+            throw new AgentToolException("replace_text는 문단 경계를 넘어 바꿀 수 없습니다. 여러 문단을 고치려면 set_paragraphs로 문단 전체를 다시 넣으세요.");
         int count = await Task.Run(() => ctx.Ppt.ReplaceTextInShape(
             ctx.WorkingPath, slide, shape, find, ParagraphFitPlanner.NormalizeParagraph(replace)), ct);
         if (count == 0) throw new AgentToolException($"'{find}'를 {shape}에서 찾지 못했습니다. read_text로 현재 문구를 확인하세요.");
@@ -201,6 +222,7 @@ public static class PptAgentTools
     {
         int slide = ToolArgs.Int(args, "slide");
         string shape = ToolArgs.String(args, "shape"), name = ToolArgs.String(args, "new_name");
+        if (shape == name) return $"이미 '{name}'입니다.";
         await Task.Run(() => ctx.Ppt.RenameShape(ctx.WorkingPath, slide, shape, name), ct);
         ctx.Origins.MarkTouched(slide);
         ctx.Changes.Add($"{slide}쪽 {shape} 이름 → {name}");
@@ -291,8 +313,15 @@ public static class PptAgentTools
         var added = ctx.AddedShapes.Where(a => a.Slide == slide).Select(a => a.Address).ToHashSet();
         var target = await Task.Run(() => SlideLintCollector.Collect(ctx.Ppt, ctx.WorkingPath, slide, added), ct);
         LintSlide? baseline = null;
-        if ((baselineSlide ?? ctx.Origins.BaselineOf(slide)) is int b && b != slide)
-            baseline = await Task.Run(() => SlideLintCollector.Collect(ctx.Ppt, ctx.WorkingPath, b), ct);
+        if (baselineSlide is int explicitSlide && explicitSlide != slide)
+            baseline = await Task.Run(() => SlideLintCollector.Collect(ctx.Ppt, ctx.WorkingPath, explicitSlide), ct);
+        else if (ctx.BaselinePath is { } original)
+        {
+            int originalSlide = ctx.Origins.OriginalIndexOf(slide);
+            baseline = await Task.Run(() => SlideLintCollector.Collect(ctx.Ppt, original, originalSlide), ct);
+        }
+        else if (ctx.Origins.BaselineOf(slide) is int origin)
+            baseline = await Task.Run(() => SlideLintCollector.Collect(ctx.Ppt, ctx.WorkingPath, origin), ct);
         return LayoutLint.Check(target, baseline, LintSettings.FromRules(PptRules.Current));
     }
 
@@ -322,9 +351,16 @@ public static class PptAgentTools
     private static Task<string> SearchSource(AgentToolContext ctx, JsonElement args, CancellationToken ct)
     {
         var library = ctx.Sources ?? throw new AgentToolException("첨부된 원문이 없습니다.");
-        var hits = library.Search(ToolArgs.String(args, "query"), Math.Clamp(ToolArgs.OptionalInt(args, "limit") ?? 5, 1, 10));
+        // 1건만 보고 엉뚱한 쪽을 읽는 일이 있어(실측) 최소 3건은 보여준다.
+        var hits = library.Search(ToolArgs.String(args, "query"), Math.Clamp(ToolArgs.OptionalInt(args, "limit") ?? 5, 3, 10));
         if (hits.Count == 0) return Task.FromResult("찾은 쪽이 없습니다. 다른 낱말로 검색하세요.");
         return Task.FromResult(string.Join("\n\n", hits.Select(h => $"[{h.Document} p.{h.Page}] {h.Snippet}")));
+    }
+
+    private static Task<string> SourceOutline(AgentToolContext ctx, JsonElement args, CancellationToken ct)
+    {
+        var library = ctx.Sources ?? throw new AgentToolException("첨부된 원문이 없습니다.");
+        return Task.FromResult(library.Outline(ToolArgs.OptionalString(args, "document")));
     }
 
     private static Task<string> ReadSource(AgentToolContext ctx, JsonElement args, CancellationToken ct)

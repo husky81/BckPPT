@@ -1,6 +1,6 @@
 # BckPPT 도구 루프 에이전트와 일반 사용자 배포 계획
 
-작성: 2026-10-06 · 상태: 진행 중(Phase A~C 구현) · 선행 문서: [독립형 PPT 에이전트 리팩토링 계획](bckppt-agent-first-refactoring.md)
+작성: 2026-10-06 · 상태: 진행 중(Phase A~E 1차 구현) · 선행 문서: [독립형 PPT 에이전트 리팩토링 계획](bckppt-agent-first-refactoring.md)
 
 ## 1. 배경
 
@@ -223,7 +223,20 @@ gitoky의 OpenAI 호환 API가 무엇을 지원하느냐에 따라 두 방식 �
 | A | 완료. 실서버 echo 왕복 테스트 통과(`GITOKY_LLM_API_KEY`가 있을 때만 실행) | `Llm/LlmModels.cs`, `GitokyLlmClient`의 `CompleteAsync`·`BuildPayload`·`ParseCompletion` |
 | B | 완료. 가짜 LLM 대본 테스트에 더해, 실제 PowerPoint + gitoky `agent`로 2카드 슬라이드 복제·채우기를 끝까지 수행(19~20턴, 약 9만 토큰, Lint 위반 0). 첫 실행에서는 `list_shapes` 미리보기(문단을 공백으로 이은 것)를 원문으로 알고 `replace_text`가 3번 실패해, 미리보기에 ¶/↵ 경계를 넣고 프롬프트에 도구 선택 기준을 추가했다. 문구 품질(어색한 개요 문장)은 qwen3-32b의 한계로 보이며 원문 검색(Phase D) 후 다시 본다 | `Agent/AgentLoop.cs`, `AgentSession.cs`, `ParagraphFitPlanner.cs`, `SlideOrigins.cs`, `Agent/Tools/*` |
 | C | 규칙·단위 테스트 완료. finish 때 건드린 슬라이드를 자동 검사해 위반이 있으면 2회까지 되돌려 보낸다 | `PowerPoint/LayoutLint.cs`, `PptRules`의 `OrphanMaxChars`·`TitleSecondLineMinRatio`·`TitleRoles` |
-| D~F | 미착수. `ISourceLibrary` 인터페이스와 `search_source`/`read_source` 도구 자리만 있다 | |
+| D | 완료. pdf(PdfPig)·pptx(OpenXml)·md/txt를 쪽(구간) 단위로 FTS5 trigram 색인, 2글자 낱말은 LIKE 보완, tf-idf + 절 제목·붙여 쓴 구 가산점. 합성 400구간 보고서에서 "연구개발 내용" 절 1위, 실제 RFP PDF 27쪽 2.4초 색인. 채팅창 "원문 첨부" 버튼과 끌어 놓기 | `Rag/SourceLibrary.cs`, 도구 `source_outline`·`search_source`·`read_source` |
+| E | 1차 완료. 채팅 "보내기"가 도구 루프로 바뀌었고(외부 요청 `create_job`은 기존 단발 계획 흐름 유지) 진행 로그·취소·전후 썸네일·"결과 저장/결과 열어 보기/작업 버리기", 후속 요청 이어가기. UI 자동화로 창에서 끝까지 실행 확인 | `Application/AgentWorkflow.cs`, `Views/AgentChatWindow.*` |
+| F | 미착수 | |
+
+실서버 대표 실행(2026-10-06, 카드 2개 + 합성 기획보고서 2종 첨부): 목차 → 요약문·연구개발 내용 쪽 읽기 → 6개 상자 채우기 → Lint 0 → finish, **17턴·약 10.8만 토큰·40초**.
+여기까지 오며 실측으로 고친 것:
+
+- 모델이 미리보기 표기 `¶`를 흉내 내 한 문단에 넣음 → `set_paragraphs`가 `¶`를 문단 경계로, `↵`를 Shift+Enter로 해석
+- 검색 1건만 보고 부록을 읽은 뒤 내용을 지어냄 → `source_outline`(목차) 도구, 검색 최소 3건, 프롬프트에 "목차 먼저"
+- 원문 문장을 그대로 옮겨 줄 수 초과, 문단 경계가 낀 `replace_text`를 반복 실패하며 30턴 소진 → 모든 줄 측정에 "(기준 N줄, 1줄 초과 — 약 28자 줄이세요)"를 붙이고, 문단을 넘는 `replace_text`는 즉시 `set_paragraphs`를 안내
+- "이제 lint_slide 하겠습니다"라고 말만 하고 멈춤 → 슬라이드를 바꾼 뒤 도구 없이 답하면 한 번 이어가게 함
+- 템플릿에 원래 있던 문제(손대지 않은 제목의 고아 단어)까지 지적 → 기준을 **원본 파일의 같은 슬라이드**(복제본은 복제 원본)로 바꾸고, 기준과 같은 상자는 판정하지 않음
+
+남은 품질 문제: 한 문장을 두 문단(Enter)으로 쪼개 줄 수를 맞추는 경우가 있다. 실제 기획보고서 5종(수백 쪽)으로 5장 시나리오 재현은 아직 하지 않았다(원문이 이 PC에 없음).
 
 계획과 달라진 점:
 
@@ -233,7 +246,7 @@ gitoky의 OpenAI 호환 API가 무엇을 지원하느냐에 따라 두 방식 �
 - 겹침은 새로 추가한 도형이 다른 도형에 **걸칠 때만** 잡는다. 패널 안에 완전히 들어간 배지는 의도한 배치로 본다.
 - "상위 카드 아래 경계 초과" overflow는 아직 없다(텍스트 높이 > 상자 높이만 판정).
 - 작업 사본은 `%LOCALAPPDATA%\BckSoft\BckPPT\work\`에 만들고, 승인하면 원본 옆 `이름_BckPPT_시각.pptx`로 복사, 거절하면 지운다(`AgentSession.Approve`/`Discard`).
-- 실서버 스모크: `BCKPPT_LIVE_PPTX`(대상 파일)와 키를 주고 `dotnet test --filter 스모크`. 대화 로그 경로가 출력에 나온다.
+- 실서버 스모크: `BCKPPT_LIVE_PPTX`(대상 파일)와 키를 주고 `dotnet test --filter 스모크`. `BCKPPT_LIVE_SOURCES`(원문, `|` 구분)·`BCKPPT_LIVE_REQUEST`로 바꿀 수 있고, 대화 로그 경로가 출력에 나온다. 원문 검색만 보려면 `BCKPPT_LIVE_SOURCE`·`BCKPPT_LIVE_QUERY`로 `--filter 실문서_검색`.
 
 ## 10. 다른 PC에서 시작하기
 
