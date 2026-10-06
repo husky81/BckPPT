@@ -104,11 +104,16 @@
         </Border>
         <Grid Grid.Row="3" Margin="0,14,0,0">
             <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-            <TextBox x:Name="InstructionBox" Text="" ToolTip="예: 33쪽 카드 레이아웃으로 첨부한 보고서 5개를 정리해줘 · 결과를 본 뒤 '1줄씩 줄여줘'처럼 이어서 요청"
-                     Style="{StaticResource DarkInput}" Padding="10,8" KeyDown="InstructionBox_KeyDown"/>
-            <StackPanel Grid.Column="1" Orientation="Horizontal" Margin="8,0,0,0">
+            <!-- 여러 줄 요청을 붙여넣을 수 있게 한다. Enter는 줄바꿈, Ctrl+Enter는 보내기. -->
+            <TextBox x:Name="InstructionBox" Text=""
+                     ToolTip="Enter: 줄바꿈 · Ctrl+Enter: 보내기&#x0a;예: 33쪽 카드 레이아웃으로 첨부한 보고서 5개를 정리해줘 · 결과를 본 뒤 '1줄씩 줄여줘'처럼 이어서 요청"
+                     Style="{StaticResource DarkInput}" Padding="10,8"
+                     AcceptsReturn="True" AcceptsTab="False" TextWrapping="Wrap"
+                     MinHeight="64" MaxHeight="220" VerticalScrollBarVisibility="Auto" VerticalContentAlignment="Top"
+                     PreviewKeyDown="InstructionBox_KeyDown"/>
+            <StackPanel Grid.Column="1" Orientation="Horizontal" Margin="8,0,0,0" VerticalAlignment="Bottom">
                 <Button Content="취소" IsEnabled="{Binding IsRequesting}" Style="{StaticResource DarkBtn}" Margin="0,0,8,0" Click="Cancel_Click"/>
-                <Button Content="보내기" IsEnabled="{Binding CanSend}" Style="{StaticResource AccentBtn}" Click="Send_Click"/>
+                <Button Content="보내기" IsEnabled="{Binding CanSend}" Style="{StaticResource AccentBtn}" Click="Send_Click" ToolTip="Ctrl+Enter"/>
             </StackPanel>
         </Grid>
     </Grid>

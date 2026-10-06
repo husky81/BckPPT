@@ -164,7 +164,8 @@ public partial class AgentChatWindow : Window, INotifyPropertyChanged
 
     private async void InstructionBox_KeyDown(object sender, KeyEventArgs e)
     {
-        if (e.Key != Key.Enter || Keyboard.Modifiers.HasFlag(ModifierKeys.Shift)) return;
+        // Enter는 줄바꿈(여러 줄 요청·붙여넣기), Ctrl+Enter만 보낸다.
+        if (e.Key != Key.Enter || !Keyboard.Modifiers.HasFlag(ModifierKeys.Control)) return;
         e.Handled = true;
         await SendAsync();
     }
