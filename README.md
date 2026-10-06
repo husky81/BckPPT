@@ -77,6 +77,37 @@ dotnet build BckPPT.csproj -c Debug -p:Platform=x64
 
 빌드 결과는 `bin/x64/Debug/net8.0-windows/`에 생성됩니다.
 
+## 도형 주소와 편집 API
+
+도형을 이름으로 지정하는 모든 API(`SetShapeText`, `SetParagraphTexts`, `GetTextLineBreaks`,
+`GetShapeInfo` 등)는 그룹 안 도형까지 찾고, 다음 주소 규약을 따릅니다.
+
+| 주소 | 뜻 |
+| --- | --- |
+| `Text 19` | 그룹 안까지 펼친 순서에서 첫 번째 `Text 19` |
+| `Text 19#3` | 같은 이름 중 세 번째 (카드를 복사해 이름이 겹칠 때) |
+| `Group 171/Text 19` | 바로 위 그룹이 `Group 171`인 것 |
+| `Table 1 [R2C3]` | 표 셀. 위 형식과 함께 쓸 수 있음 |
+
+`ListShapes`가 슬라이드의 모든 도형과 그 주소를 돌려주므로, 이름이 겹치면 거기서 `#n` 주소를 확인합니다.
+배치·서식 API로 `RenameShape`, `SetShapeGeometry`(뒤집힌 도형도 위치 유지), `DeleteShape`,
+`AddTextShape`(범례·배지용, 글자 폭 자동 맞춤과 오른쪽 끝 정렬), `SetTextColor`(특정 글자만 색 지정),
+`SetTextFormat`이 있습니다. 색은 `#RRGGBB`로 지정합니다.
+
+디버그 API(`http://localhost:38700`)로도 같은 작업을 할 수 있습니다. 대상 문서는 `path`가 있으면 그 파일,
+없으면 선택된 프레젠테이션입니다.
+
+| 요청 | 본문/쿼리 |
+| --- | --- |
+| `GET /api/shapes` | `slide` |
+| `GET /api/line-breaks` | `slide`, `shape` |
+| `POST /api/shapes/rename` | `slide`, `shape`, `newName` |
+| `POST /api/shapes/geometry` | `slide`, `shape`, `left?`, `top?`, `width?`, `height?` |
+| `POST /api/shapes/delete` | `slide`, `shape` |
+| `POST /api/shapes/add-text` | `slide`, `text`, `left`, `top`, `width`, `height`, `name?`, `kind?`(`roundRect`), `fillColor?`, `fontName?`, `fontSize?`, `bold?`, `fontColor?`, `autoWidth?`, `rightEdge?` |
+| `POST /api/shapes/text-color` | `slide`, `shape`, `find`, `color` |
+| `POST /api/shapes/text-format` | `slide`, `shape`, `size?`, `bold?`, `color?`, `spacing?`, `fontName?` |
+
 ## 외부 작업 요청
 
 외부 요청은 항상 `saveMode: copy`만 허용하며 채팅창의 미리보기·승인 절차를 거칩니다.

@@ -11,6 +11,8 @@
     <NoWarn>MVVMTK0045</NoWarn>
     <Version>2.1.0</Version>
     <ApplicationIcon>Assets\icon.ico</ApplicationIcon>
+    <!-- 루트 아래 작업 폴더의 obj(AssemblyInfo 등)가 섞이면 특성 중복으로 빌드가 깨진다. -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);tmp\**;artifacts\**;BckPPT.Tests\**</DefaultItemExcludes>
   </PropertyGroup>
 
   <ItemGroup>

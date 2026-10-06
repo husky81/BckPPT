@@ -95,6 +95,14 @@ public class DebugApiServer
                 ("GET",  "/api/images")          => await HandleImageList(ctx),
                 ("POST", "/api/images/replace")  => await HandleImageReplace(ctx),
                 ("POST", "/api/set-shape-text")  => await HandleSetShapeText(ctx),
+                ("GET",  "/api/shapes")             => await HandleListShapes(ctx),
+                ("GET",  "/api/line-breaks")        => await HandleLineBreaks(ctx),
+                ("POST", "/api/shapes/rename")      => await HandleShapeEdit(ctx, ShapeRename),
+                ("POST", "/api/shapes/geometry")    => await HandleShapeEdit(ctx, ShapeGeometryEdit),
+                ("POST", "/api/shapes/delete")      => await HandleShapeEdit(ctx, ShapeDelete),
+                ("POST", "/api/shapes/add-text")    => await HandleShapeEdit(ctx, ShapeAddText),
+                ("POST", "/api/shapes/text-color")  => await HandleShapeEdit(ctx, ShapeTextColor),
+                ("POST", "/api/shapes/text-format") => await HandleShapeEdit(ctx, ShapeTextFormat),
                 // ── prefix 라우팅 ───────────────────────────────────────────
                 ("GET",  var p) when p.StartsWith("/api/node/")
                     => await HandleNodeDetail(ctx, p),
@@ -478,6 +486,137 @@ public class DebugApiServer
         await UI(() => { _vm.RefreshCommand.Execute(null); return true; });
 
         return new { ok = true, slide, shapeName, text };
+    }
+
+    // ── 도형 목록·줄바꿈·배치·서식 ───────────────────────────────
+    // 대상 문서는 body/query의 "path"가 있으면 그 파일, 없으면 선택된 프레젠테이션.
+    // "shape"는 ShapeAddress 규약("이름", "이름#2", "그룹/이름")을 따른다.
+
+    /// <summary>GET /api/shapes?slide=35[&amp;path=...] — 그룹 안까지 펼친 도형과 주소.</summary>
+    private async Task<object> HandleListShapes(HttpListenerContext ctx)
+    {
+        var q = ctx.Request.QueryString;
+        string? path = q["path"] ?? _vm.SelectedPresentation?.Path;
+        if (path is null) return new { error = "프레젠테이션이 선택되지 않았습니다." };
+        if (!int.TryParse(q["slide"], out int slide)) return new { error = "slide 파라미터가 필요합니다." };
+
+        var shapes = await Task.Run(() => new PptComService().ListShapes(path, slide));
+        return new { slide, shapes };
+    }
+
+    /// <summary>GET /api/line-breaks?slide=35&amp;shape=C1_rnd — PowerPoint가 실제로 나눈 줄.</summary>
+    private async Task<object> HandleLineBreaks(HttpListenerContext ctx)
+    {
+        var q = ctx.Request.QueryString;
+        string? path = q["path"] ?? _vm.SelectedPresentation?.Path;
+        if (path is null) return new { error = "프레젠테이션이 선택되지 않았습니다." };
+        if (!int.TryParse(q["slide"], out int slide)) return new { error = "slide 파라미터가 필요합니다." };
+        string? shape = q["shape"];
+        if (string.IsNullOrEmpty(shape)) return new { error = "shape 파라미터가 필요합니다." };
+
+        var lines = await Task.Run(() => new PptComService().GetTextLineBreaks(path, slide, shape));
+        return new
+        {
+            slide, shape, lineCount = lines.Count,
+            lines = lines.Select(l => new { l.LineNumber, l.Text, breakType = l.BreakLabel, l.BulletText }),
+        };
+    }
+
+    /// <summary>편집 요청 공통부: path·slide·shape를 꺼내 작업을 실행하고 UI를 새로고침한다.</summary>
+    private async Task<object> HandleShapeEdit(
+        HttpListenerContext ctx, Func<PptComService, string, int, JsonElement, object> edit)
+    {
+        var body = await ReadBody(ctx);
+        string? path = body.TryGetProperty("path", out var p) ? p.GetString() : _vm.SelectedPresentation?.Path;
+        if (path is null) return new { error = "프레젠테이션이 선택되지 않았습니다." };
+        if (!body.TryGetProperty("slide", out var slideProp)) return new { error = "missing 'slide'" };
+        int slide = slideProp.GetInt32();
+
+        var result = await Task.Run(() => edit(new PptComService(), path, slide, body));
+        await UI(() => { _vm.RefreshCommand.Execute(null); return true; });
+        return result;
+    }
+
+    private static string RequiredString(JsonElement body, string name)
+        => body.TryGetProperty(name, out var v) && v.GetString() is { Length: > 0 } s
+            ? s : throw new ArgumentException($"missing '{name}'");
+
+    private static float? OptionalFloat(JsonElement body, string name)
+        => body.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number ? (float)v.GetDouble() : null;
+
+    private static bool? OptionalBool(JsonElement body, string name)
+        => body.TryGetProperty(name, out var v) && v.ValueKind is JsonValueKind.True or JsonValueKind.False
+            ? v.GetBoolean() : null;
+
+    private static string? OptionalString(JsonElement body, string name)
+        => body.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+
+    /// <summary>{ slide, shape, newName }</summary>
+    private static object ShapeRename(PptComService com, string path, int slide, JsonElement body)
+    {
+        string shape = RequiredString(body, "shape"), newName = RequiredString(body, "newName");
+        com.RenameShape(path, slide, shape, newName);
+        return new { ok = true, slide, shape, newName };
+    }
+
+    /// <summary>{ slide, shape, left?, top?, width?, height? }</summary>
+    private static object ShapeGeometryEdit(PptComService com, string path, int slide, JsonElement body)
+    {
+        string shape = RequiredString(body, "shape");
+        com.SetShapeGeometry(path, slide, shape, new ShapeGeometry(
+            OptionalFloat(body, "left"), OptionalFloat(body, "top"),
+            OptionalFloat(body, "width"), OptionalFloat(body, "height")));
+        return new { ok = true, slide, shape };
+    }
+
+    /// <summary>{ slide, shape }</summary>
+    private static object ShapeDelete(PptComService com, string path, int slide, JsonElement body)
+    {
+        string shape = RequiredString(body, "shape");
+        com.DeleteShape(path, slide, shape);
+        return new { ok = true, slide, shape };
+    }
+
+    /// <summary>
+    /// { slide, text, left, top, width, height, name?, kind?("rect"|"roundRect"), fillColor?, fontName?,
+    ///   fontSize?, bold?, fontColor?, autoWidth?, rightEdge?, padding? }
+    /// </summary>
+    private static object ShapeAddText(PptComService com, string path, int slide, JsonElement body)
+    {
+        var request = new TextShapeRequest(
+            RequiredString(body, "text"),
+            OptionalFloat(body, "left") ?? 0f, OptionalFloat(body, "top") ?? 0f,
+            OptionalFloat(body, "width") ?? 200f, OptionalFloat(body, "height") ?? 22f,
+            Name:      OptionalString(body, "name"),
+            Kind:      OptionalString(body, "kind") == "roundRect" ? TextShapeKind.RoundedRectangle : TextShapeKind.Rectangle,
+            FillColor: OptionalString(body, "fillColor"),
+            FontName:  OptionalString(body, "fontName") ?? "",
+            FontSize:  OptionalFloat(body, "fontSize") ?? 10f,
+            Bold:      OptionalBool(body, "bold") ?? false,
+            FontColor: OptionalString(body, "fontColor") ?? "#000000",
+            AutoWidth: OptionalBool(body, "autoWidth") ?? false,
+            RightEdge: OptionalFloat(body, "rightEdge"),
+            Padding:   OptionalFloat(body, "padding") ?? 8f);
+        string name = com.AddTextShape(path, slide, request);
+        return new { ok = true, slide, name };
+    }
+
+    /// <summary>{ slide, shape, find, color("#RRGGBB") }</summary>
+    private static object ShapeTextColor(PptComService com, string path, int slide, JsonElement body)
+    {
+        string shape = RequiredString(body, "shape");
+        int count = com.SetTextColor(path, slide, shape, RequiredString(body, "find"), RequiredString(body, "color"));
+        return new { ok = true, slide, shape, count };
+    }
+
+    /// <summary>{ slide, shape, size?, bold?, color?, spacing?, fontName? }</summary>
+    private static object ShapeTextFormat(PptComService com, string path, int slide, JsonElement body)
+    {
+        string shape = RequiredString(body, "shape");
+        com.SetTextFormat(path, slide, shape, new TextFormatPatch(
+            OptionalFloat(body, "size"), OptionalBool(body, "bold"), OptionalString(body, "color"),
+            OptionalFloat(body, "spacing"), OptionalString(body, "fontName")));
+        return new { ok = true, slide, shape };
     }
 
     // ── node detail / slide summary ──────────────────────────────

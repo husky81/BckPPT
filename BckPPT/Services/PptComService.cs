@@ -89,6 +89,55 @@ public class PptComService : IPptComService
         }
     }
 
+    /// <summary>FlattenShapes와 같은 순서로 펼치되 각 도형의 조상 그룹 이름을 함께 돌려준다.</summary>
+    private static List<(dynamic Shape, IReadOnlyList<string> Path)> FlattenShapesWithPath(
+        dynamic shapeCollection, IReadOnlyList<string>? parent = null)
+    {
+        parent ??= Array.Empty<string>();
+        var result = new List<(dynamic, IReadOnlyList<string>)>();
+        foreach (dynamic shape in shapeCollection)
+        {
+            int t = 0;
+            try { t = (int)shape.Type; } catch { }
+            if (t == 6) // msoGroup
+            {
+                var path = parent.Append((string)shape.Name).ToArray();
+                try { result.AddRange(FlattenShapesWithPath(shape.GroupItems, path)); }
+                catch { }
+            }
+            else
+            {
+                result.Add((shape, parent));
+            }
+        }
+        return result;
+    }
+
+    /// <summary><see cref="ShapeAddress"/> 규약으로 도형을 찾는다. 그룹 안 도형과 겹치는 이름도 구분한다.</summary>
+    private static dynamic? ResolveShape(dynamic slide, ShapeAddress address)
+    {
+        List<(dynamic Shape, IReadOnlyList<string> Path)> shapes = FlattenShapesWithPath(slide.Shapes);
+        var candidates = shapes
+            .Select(s => (s.Path, (string)s.Shape.Name))
+            .ToList();
+        int index = address.Select(candidates);
+        return index < 0 ? null : shapes[index].Shape;
+    }
+
+    private static dynamic RequireShape(dynamic slide, int slideIndex, string address)
+        => ResolveShape(slide, ShapeAddress.Parse(address))
+           ?? throw new InvalidOperationException($"{slideIndex}쪽에서 도형 '{address}'를 찾지 못했습니다.");
+
+    /// <summary>
+    /// 주소(<see cref="ShapeAddress"/>)에 맞는 도형을 0개 또는 1개 담아 돌려준다.
+    /// 기존 foreach/break 흐름에 그대로 끼워 그룹 안 도형과 겹치는 이름을 지원하기 위한 것.
+    /// </summary>
+    private static IEnumerable<dynamic> MatchingShape(dynamic slide, string address)
+    {
+        dynamic? shape = ResolveShape(slide, ShapeAddress.Parse(address));
+        return shape is null ? Array.Empty<object>() : new object[] { shape };
+    }
+
     /// <summary>TextFrame2의 첫 5문단 중 불릿이 하나라도 있으면 true.</summary>
     private static bool ReadHasBullet(dynamic tf)
     {
@@ -986,9 +1035,8 @@ public class PptComService : IPptComService
                     string tableName = cellMatch.Groups[1].Value;
                     int    row       = int.Parse(cellMatch.Groups[2].Value);
                     int    col       = int.Parse(cellMatch.Groups[3].Value);
-                    foreach (dynamic shape in slide.Shapes)
+                    foreach (dynamic shape in MatchingShape(slide, shapeName))
                     {
-                        if ((string)shape.Name != tableName) continue;
                         if ((int)shape.HasTable != MsoTrue) break;
                         shape.Table.Cell(row, col).Shape.TextFrame2.TextRange.Text = newText;
                         break;
@@ -996,9 +1044,8 @@ public class PptComService : IPptComService
                 }
                 else
                 {
-                    foreach (dynamic shape in slide.Shapes)
+                    foreach (dynamic shape in MatchingShape(slide, shapeName))
                     {
-                        if ((string)shape.Name != shapeName) continue;
                         if ((int)shape.HasTextFrame != MsoTrue) break;
 
                         var    tf        = shape.TextFrame2;
@@ -1065,18 +1112,16 @@ public class PptComService : IPptComService
             string tableName = cellMatch.Groups[1].Value;
             int    row       = int.Parse(cellMatch.Groups[2].Value);
             int    col       = int.Parse(cellMatch.Groups[3].Value);
-            foreach (dynamic shape in FlattenShapes(slide.Shapes))
+            foreach (dynamic shape in MatchingShape(slide, shapeName))
             {
-                if ((string)shape.Name != tableName) continue;
                 if ((int)shape.HasTable != MsoTrue) break;
                 return shape.Table.Cell(row, col).Shape.TextFrame2;
             }
             return null;
         }
 
-        foreach (dynamic shape in FlattenShapes(slide.Shapes))
+        foreach (dynamic shape in MatchingShape(slide, shapeName))
         {
-            if ((string)shape.Name != shapeName) continue;
             if ((int)shape.HasTextFrame != MsoTrue) break;
             return shape.TextFrame2;
         }
@@ -1340,6 +1385,172 @@ public class PptComService : IPptComService
             }
         });
 
+    // ── 도형 목록·배치·서식 ──────────────────────────────────────
+    // 주소는 모두 ShapeAddress 규약("이름", "이름#2", "그룹/이름")을 따른다.
+
+    /// <summary>슬라이드 하나의 작업을 열린 문서(없으면 직접 연 문서)에서 수행한다.</summary>
+    private static T OnSlide<T>(string presentationPath, int slideIndex, bool save, Func<dynamic, T> work)
+        => RunOnSta(() =>
+        {
+            dynamic pptApp = GetOrCreateInstance();
+            dynamic? prs   = FindOpenPresentation(pptApp, presentationPath);
+            bool ownedByUs = prs is null;
+            if (ownedByUs)
+                prs = pptApp.Presentations.Open(presentationPath, save ? MsoFalse : MsoTrue, MsoFalse, MsoFalse);
+            try
+            {
+                T result = work(prs!.Slides[slideIndex]);
+                if (save) prs.Save();
+                return result;
+            }
+            finally { if (ownedByUs) SafeClose(prs); }
+        });
+
+    /// <summary>그룹 안까지 펼친 도형 목록. 이름이 겹치면 주소에 "#n"을 붙여 구분한다.</summary>
+    public IReadOnlyList<ShapeEntry> ListShapes(string presentationPath, int slideIndex)
+        => OnSlide(presentationPath, slideIndex, save: false, slide =>
+        {
+            List<(dynamic Shape, IReadOnlyList<string> Path)> shapes = FlattenShapesWithPath(slide.Shapes);
+            List<string> names = shapes.Select(s => (string)s.Shape.Name).ToList();
+            var seen   = new Dictionary<string, int>();
+            var result = new List<ShapeEntry>(shapes.Count);
+            for (int i = 0; i < shapes.Count; i++)
+            {
+                dynamic shape = shapes[i].Shape;
+                string  name  = names[i];
+                seen[name] = seen.GetValueOrDefault(name) + 1;
+
+                bool   hasText = false;
+                string preview = "";
+                try
+                {
+                    if ((int)shape.HasTextFrame == MsoTrue)
+                    {
+                        string text = (string)shape.TextFrame2.TextRange.Text;
+                        hasText = text.Length > 0;
+                        preview = text[..Math.Min(60, text.Length)].Replace('\r', ' ').Replace('\v', ' ');
+                    }
+                }
+                catch { }
+
+                int type = 0;
+                try { type = (int)shape.Type; } catch { }
+                result.Add(new ShapeEntry(
+                    ShapeAddress.Format(name, seen[name], names.Count(n => n == name)),
+                    name, string.Join("/", shapes[i].Path), type,
+                    (float)shape.Left, (float)shape.Top, (float)shape.Width, (float)shape.Height,
+                    hasText, preview));
+            }
+            return (IReadOnlyList<ShapeEntry>)result;
+        });
+
+    public void RenameShape(string presentationPath, int slideIndex, string address, string newName)
+        => OnSlide(presentationPath, slideIndex, save: true, slide =>
+        {
+            RequireShape(slide, slideIndex, address).Name = newName;
+            return true;
+        });
+
+    public void SetShapeGeometry(string presentationPath, int slideIndex, string address, ShapeGeometry geometry)
+        => OnSlide(presentationPath, slideIndex, save: true, slide =>
+        {
+            dynamic shape = RequireShape(slide, slideIndex, address);
+            // 좌우 반전된 도형은 너비를 바꾸면 Left가 밀리므로 크기를 먼저 바꾸고 위치를 다시 맞춘다.
+            float left = (float)shape.Left, top = (float)shape.Top;
+            if (geometry.Width  is float w) shape.Width  = w;
+            if (geometry.Height is float h) shape.Height = h;
+            shape.Left = geometry.Left ?? left;
+            shape.Top  = geometry.Top  ?? top;
+            return true;
+        });
+
+    public void DeleteShape(string presentationPath, int slideIndex, string address)
+        => OnSlide(presentationPath, slideIndex, save: true, slide =>
+        {
+            RequireShape(slide, slideIndex, address).Delete();
+            return true;
+        });
+
+    /// <summary>텍스트를 담은 사각형(둥근 모서리 가능)을 추가하고 최종 이름을 돌려준다.</summary>
+    public string AddTextShape(string presentationPath, int slideIndex, TextShapeRequest request)
+        => OnSlide(presentationPath, slideIndex, save: true, slide =>
+        {
+            const int msoShapeRectangle = 1, msoShapeRoundedRectangle = 5;
+            int kind = request.Kind == TextShapeKind.RoundedRectangle ? msoShapeRoundedRectangle : msoShapeRectangle;
+            dynamic shape = slide.Shapes.AddShape(kind, request.Left, request.Top, request.Width, request.Height);
+            if (!string.IsNullOrEmpty(request.Name)) shape.Name = request.Name;
+            if (request.Kind == TextShapeKind.RoundedRectangle)
+                try { shape.Adjustments[1] = 0.5f; } catch { }
+
+            if (request.FillColor is null) shape.Fill.Visible = MsoFalse;
+            else shape.Fill.ForeColor.RGB = OleColor.FromHex(request.FillColor);
+            shape.Line.Visible = MsoFalse;
+            try { shape.Shadow.Visible = MsoFalse; } catch { }
+
+            dynamic tf = shape.TextFrame2;
+            tf.MarginLeft = request.Padding; tf.MarginRight = request.Padding;
+            tf.MarginTop  = 0f;              tf.MarginBottom = 0f;
+            tf.VerticalAnchor = 3; // msoAnchorMiddle
+            tf.WordWrap = request.AutoWidth ? MsoFalse : MsoTrue;
+
+            dynamic tr = tf.TextRange;
+            tr.Text = request.Text;
+            tr.ParagraphFormat.Alignment = 1; // msoAlignLeft
+            if (!string.IsNullOrEmpty(request.FontName))
+            {
+                tr.Font.Name = request.FontName;
+                tr.Font.NameFarEast = request.FontName;
+            }
+            tr.Font.Size = request.FontSize;
+            tr.Font.Bold = request.Bold ? MsoTrue : MsoFalse;
+            tr.Font.Fill.ForeColor.RGB = OleColor.FromHex(request.FontColor);
+
+            if (request.AutoWidth)
+            {
+                // 글자 폭에 맞춰 늘린 뒤 높이는 요청값으로 되돌린다(자동 맞춤은 높이도 줄인다).
+                tf.AutoSize = 1; // msoAutoSizeShapeToFitText
+                tf.AutoSize = 0;
+                shape.Height = request.Height;
+            }
+            shape.Top  = request.Top;
+            shape.Left = request.RightEdge is float right ? right - (float)shape.Width : request.Left;
+            return (string)shape.Name;
+        });
+
+    /// <summary>도형 텍스트에서 <paramref name="find"/>가 나오는 곳마다 글자색을 바꾼다. 바꾼 횟수를 돌려준다.</summary>
+    public int SetTextColor(string presentationPath, int slideIndex, string address, string find, string color)
+        => OnSlide(presentationPath, slideIndex, save: true, slide =>
+        {
+            if (string.IsNullOrEmpty(find)) return 0;
+            dynamic tr   = RequireShape(slide, slideIndex, address).TextFrame2.TextRange;
+            string  text = (string)tr.Text;
+            int     ole  = OleColor.FromHex(color);
+            int     count = 0;
+            for (int i = text.IndexOf(find, StringComparison.Ordinal); i >= 0;
+                 i = text.IndexOf(find, i + find.Length, StringComparison.Ordinal))
+            {
+                tr.Characters(i + 1, find.Length).Font.Fill.ForeColor.RGB = ole;
+                count++;
+            }
+            return count;
+        });
+
+    public void SetTextFormat(string presentationPath, int slideIndex, string address, TextFormatPatch patch)
+        => OnSlide(presentationPath, slideIndex, save: true, slide =>
+        {
+            dynamic font = RequireShape(slide, slideIndex, address).TextFrame2.TextRange.Font;
+            if (patch.Size    is float size)    font.Size    = size;
+            if (patch.Bold    is bool  bold)    font.Bold    = bold ? MsoTrue : MsoFalse;
+            if (patch.Spacing is float spacing) font.Spacing = spacing;
+            if (patch.Color   is string color)  font.Fill.ForeColor.RGB = OleColor.FromHex(color);
+            if (!string.IsNullOrEmpty(patch.FontName))
+            {
+                font.Name = patch.FontName;
+                font.NameFarEast = patch.FontName;
+            }
+            return true;
+        });
+
     // ── 단일 Shape 정보 읽기 ─────────────────────────────────────
 
     public PptSlideInfo? GetShapeInfo(string presentationPath, int slideIndex, string shapeName)
@@ -1362,9 +1573,8 @@ public class PptComService : IPptComService
                     string tableName = cellMatch.Groups[1].Value;
                     int    row       = int.Parse(cellMatch.Groups[2].Value);
                     int    col       = int.Parse(cellMatch.Groups[3].Value);
-                    foreach (dynamic shape in slide.Shapes)
+                    foreach (dynamic shape in MatchingShape(slide, shapeName))
                     {
-                        if ((string)shape.Name != tableName) continue;
                         if ((int)shape.HasTable != MsoTrue) break;
                         try
                         {
@@ -1396,9 +1606,8 @@ public class PptComService : IPptComService
                 }
 
                 // 일반 텍스트 shape
-                foreach (dynamic shape in slide.Shapes)
+                foreach (dynamic shape in MatchingShape(slide, shapeName))
                 {
-                    if ((string)shape.Name != shapeName) continue;
                     if ((int)shape.HasTextFrame != MsoTrue) return null;
                     try
                     {
@@ -1656,9 +1865,8 @@ public class PptComService : IPptComService
                     string tableName = cellMatch.Groups[1].Value;
                     int row = int.Parse(cellMatch.Groups[2].Value);
                     int col = int.Parse(cellMatch.Groups[3].Value);
-                    foreach (dynamic shape in slide.Shapes)
+                    foreach (dynamic shape in MatchingShape(slide, shapeName))
                     {
-                        if ((string)shape.Name != tableName) continue;
                         if ((int)shape.HasTable != MsoTrue) break;
                         tf = shape.Table.Cell(row, col).Shape.TextFrame2;
                         break;
@@ -1666,9 +1874,8 @@ public class PptComService : IPptComService
                 }
                 else
                 {
-                    foreach (dynamic shape in slide.Shapes)
+                    foreach (dynamic shape in MatchingShape(slide, shapeName))
                     {
-                        if ((string)shape.Name != shapeName) continue;
                         if ((int)shape.HasTextFrame != MsoTrue) break;
                         tf = shape.TextFrame2;
                         break;
