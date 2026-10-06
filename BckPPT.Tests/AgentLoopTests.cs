@@ -213,6 +213,28 @@ public sealed class AgentLoopTests : IDisposable
     }
 
     [Fact]
+    public async Task 묶음_도구로_이름과_문단을_한_번에_바꾼다()
+    {
+        var llm = new FakeLlmClient(
+            FakeLlmClient.Calls(("rename_shapes", """{"slide": 1, "items": [{"shape": "C1_title", "new_name": "K_title"}, {"shape": "C1_rnd", "new_name": "K_rnd"}, {"shape": "없음", "new_name": "X"}]}""")),
+            FakeLlmClient.Calls(("set_texts", """{"slide": 1, "items": [{"shape": "K_title", "paragraphs": ["새 제목"]}, {"shape": "K_rnd", "paragraphs": ["가", "나"]}]}""")),
+            FakeLlmClient.Calls(("finish", """{"summary": "끝"}""")));
+        using var session = StartSession();
+
+        var result = await Loop(llm).RunAsync(session, "채워줘");
+
+        Assert.Equal(AgentStopReason.Finished, result.Reason);
+        Assert.Equal(["K_title", "K_rnd"], _ppt.Slides[0].Select(s => s.Name));
+        Assert.Equal(["새 제목"], _ppt.Slides[0][0].Paragraphs);
+        Assert.Equal(["가", "나"], _ppt.Slides[0][1].Paragraphs);
+        var tools = session.Messages.Where(m => m.Role == "tool").Select(m => m.Content).ToList();
+        Assert.Contains("2개 이름을 바꿨습니다", tools[0]);
+        Assert.Contains("없음", tools[0]);                         // 실패는 적고 나머지는 계속
+        Assert.Contains("K_title: 1줄", tools[1]);
+        Assert.Contains("K_rnd: 2줄", tools[1]);
+    }
+
+    [Fact]
     public async Task 턴_상한에서_멈춘다()
     {
         var calls = Enumerable.Range(0, 3).Select(_ => FakeLlmClient.Calls(("list_shapes", """{"slide": 1}"""))).ToArray();

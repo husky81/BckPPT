@@ -39,8 +39,21 @@ public static class PptAgentTools
             new("replace_text", "도형 안의 문자열을 바꾼다. 글자 크기가 섞인 제목처럼 서식을 지켜야 할 때 쓴다. 적용 후 줄 측정 결과를 돌려준다",
                 Schema("{" + SlideShape + """, "find": {"type": "string"}, "replace": {"type": "string"}}""",
                     "slide", "shape", "find", "replace"), true, ReplaceText),
-            new("rename_shape", "도형 이름을 바꾼다. 같은 이름이 여러 개면 C{열}_{역할}처럼 구분되는 이름을 붙인다",
+            new("rename_shape", "도형 이름을 바꾼다. 여러 개면 rename_shapes로 한 번에 바꾼다",
                 Schema("{" + SlideShape + """, "new_name": {"type": "string"}}""", "slide", "shape", "new_name"), true, RenameShape),
+            new("rename_shapes", "한 슬라이드의 도형 이름을 한 번에 바꾼다. 카드마다 C{카드}_{역할} 이름을 붙일 때 쓴다(한 번 호출로 슬라이드 전체)",
+                Schema("""
+                    {"slide": {"type": "integer"},
+                     "items": {"type": "array", "items": {"type": "object",
+                       "properties": {"shape": {"type": "string"}, "new_name": {"type": "string"}}, "required": ["shape", "new_name"]}}}
+                    """, "slide", "items"), true, RenameShapes),
+            new("set_texts", "여러 상자의 문단을 한 번에 바꾸고 상자마다 줄 측정 결과를 돌려준다. 카드 하나의 제목·개요·문제점·연구개발 내용을 한 번에 채울 때 쓴다",
+                Schema("""
+                    {"slide": {"type": "integer"},
+                     "items": {"type": "array", "items": {"type": "object",
+                       "properties": {"shape": {"type": "string"}, "paragraphs": {"type": "array", "items": {"type": "string"}}},
+                       "required": ["shape", "paragraphs"]}}}
+                    """, "slide", "items"), true, SetTexts),
             new("set_geometry", "도형 위치·크기(pt)를 바꾼다. 준 값만 바뀐다",
                 Schema("{" + SlideShape + """, "left": {"type": "number"}, "top": {"type": "number"}, "width": {"type": "number"}, "height": {"type": "number"}}""",
                     "slide", "shape"), true, SetGeometry),
@@ -244,11 +257,56 @@ public static class PptAgentTools
         return $"{source}쪽을 복제해 {created}쪽에 넣었습니다. {created}쪽 이후 기존 슬라이드 번호는 1씩 밀렸습니다.";
     }
 
-    private static async Task<string> SetParagraphs(AgentToolContext ctx, JsonElement args, CancellationToken ct)
+    private static Task<string> SetParagraphs(AgentToolContext ctx, JsonElement args, CancellationToken ct) =>
+        FillAsync(ctx, ToolArgs.Int(args, "slide"), ToolArgs.String(args, "shape"),
+            ParagraphFitPlanner.SplitPilcrows(ToolArgs.StringArray(args, "paragraphs")), ct);
+
+    /// <summary>
+    /// qwen3는 한 턴에 도구를 하나씩만 불러 이름 바꾸기에만 80턴을 썼다(2026-10-06 실측). 묶음 도구로 턴을 줄인다.
+    /// 상자 하나가 실패해도 나머지는 계속하고, 실패는 결과에 적는다.
+    /// </summary>
+    private static async Task<string> SetTexts(AgentToolContext ctx, JsonElement args, CancellationToken ct)
     {
         int slide = ToolArgs.Int(args, "slide");
-        string shape = ToolArgs.String(args, "shape");
-        var paragraphs = ParagraphFitPlanner.SplitPilcrows(ToolArgs.StringArray(args, "paragraphs"));
+        var sb = new StringBuilder();
+        foreach (var item in ToolArgs.ObjectArray(args, "items"))
+        {
+            string shape = ToolArgs.String(item, "shape");
+            try { sb.Append(await FillAsync(ctx, slide, shape, ParagraphFitPlanner.SplitPilcrows(ToolArgs.StringArray(item, "paragraphs")), ct)); }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex) { sb.Append($"{shape}: 오류 — {ex.GetBaseException().Message}\n"); }
+        }
+        return sb.ToString();
+    }
+
+    private static async Task<string> RenameShapes(AgentToolContext ctx, JsonElement args, CancellationToken ct)
+    {
+        int slide = ToolArgs.Int(args, "slide");
+        var done = new List<string>();
+        var failed = new List<string>();
+        foreach (var item in ToolArgs.ObjectArray(args, "items"))
+        {
+            string shape = ToolArgs.String(item, "shape"), name = ToolArgs.String(item, "new_name");
+            if (shape == name) continue;
+            try
+            {
+                await Task.Run(() => ctx.Ppt.RenameShape(ctx.WorkingPath, slide, shape, name), ct);
+                done.Add($"{shape}→{name}");
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex) { failed.Add($"{shape}: {ex.GetBaseException().Message}"); }
+        }
+        if (done.Count > 0)
+        {
+            ctx.Origins.MarkTouched(slide);
+            ctx.Changes.Add($"{slide}쪽 도형 {done.Count}개 이름 변경");
+        }
+        return $"{done.Count}개 이름을 바꿨습니다." + (failed.Count == 0 ? "" : "\n실패:\n" + string.Join("\n", failed));
+    }
+
+    private static async Task<string> FillAsync(
+        AgentToolContext ctx, int slide, string shape, IReadOnlyList<string> paragraphs, CancellationToken ct)
+    {
         if (paragraphs.Count == 0) throw new AgentToolException("paragraphs가 비었습니다. 지우려면 delete_shape를 쓰세요.");
 
         var info = await Task.Run(() => ctx.Ppt.GetShapeInfo(ctx.WorkingPath, slide, shape), ct)

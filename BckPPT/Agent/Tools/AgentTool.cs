@@ -150,6 +150,21 @@ public static class ToolArgs
             ? v.ValueKind == JsonValueKind.String ? v.GetString() : v.GetRawText()
             : null;
 
+    public static IReadOnlyList<JsonElement> ObjectArray(JsonElement args, string name)
+    {
+        if (!args.TryGetProperty(name, out var v)) throw new AgentToolException($"인자 '{name}'(객체 배열)가 필요합니다.");
+        // 모델이 배열을 JSON 문자열로 한 번 더 감싸 보내기도 한다.
+        if (v.ValueKind == JsonValueKind.String)
+        {
+            try { v = JsonDocument.Parse(v.GetString()!).RootElement.Clone(); }
+            catch (JsonException) { throw new AgentToolException($"인자 '{name}'는 객체 배열이어야 합니다."); }
+        }
+        if (v.ValueKind != JsonValueKind.Array) throw new AgentToolException($"인자 '{name}'는 객체 배열이어야 합니다.");
+        var items = v.EnumerateArray().Where(e => e.ValueKind == JsonValueKind.Object).ToList();
+        if (items.Count == 0) throw new AgentToolException($"인자 '{name}'가 비었습니다.");
+        return items;
+    }
+
     public static IReadOnlyList<string> StringArray(JsonElement args, string name)
     {
         if (!args.TryGetProperty(name, out var v) || v.ValueKind != JsonValueKind.Array)
