@@ -84,23 +84,10 @@ public static class PptAgentTools
         if (includeSources)
         {
             tools.Add(new("fill_cards",
-                "카드형 템플릿 슬라이드를 복제해 카드를 채운다. 카드 구조 파악·복제·남는 카드 삭제·패널 폭·이름 붙이기·원문 요점·문안 작성·길이 맞춤을 한 번에 한다. " +
-                "보고서 여러 개를 카드로 정리하는 요청은 이 도구 한 번으로 처리하고, 결과의 남은 위반만 다른 도구로 고친다. " +
-                "slides는 만들 슬라이드 순서대로, 각 슬라이드의 cards는 왼쪽 카드부터. document는 원문 별칭(D1 등)",
-                Schema("""
-                    {"template_slide": {"type": "integer", "description": "복제할 카드 템플릿 슬라이드"},
-                     "after": {"type": "integer", "description": "이 슬라이드 뒤에 새 슬라이드를 넣는다"},
-                     "slides": {"type": "array", "items": {"type": "object", "properties": {
-                         "title": {"type": "string", "description": "슬라이드 제목(선택)"},
-                         "cards": {"type": "array", "items": {"type": "object", "properties": {
-                             "number": {"type": "string"}, "title": {"type": "string"},
-                             "tag": {"type": "string", "description": "카드 머리 태그(선택)"},
-                             "document": {"type": "string", "description": "원문 별칭 D1 등(선택)"}},
-                           "required": ["number", "title"]}}},
-                       "required": ["cards"]}},
-                     "header": {"type": "string", "description": "패널 위 머리말(선택)"},
-                     "legend": {"type": "string", "description": "오른쪽 위 범례 문구(선택)"}}
-                    """, "template_slide", "after", "slides"), true, FillCards));
+                "카드형 템플릿 슬라이드를 복제해 보고서들을 카드로 정리한다. 요청 해석·복제·남는 카드 삭제·패널 폭·이름·원문 요점·문안 작성·길이 맞춤을 한 번에 한다. " +
+                "이런 요청은 다른 도구를 부르기 전에 이 도구를 먼저 한 번 부른다(슬라이드를 미리 복제하지 않는다). " +
+                "request에는 사용자 요청을 줄이지 말고 그대로 넣는다",
+                Schema("""{"request": {"type": "string", "description": "사용자 요청 전문"}}"""), true, FillCards));
             tools.Add(new("brief_source",
                 "원문 한 문서에서 요약문·개요, 문제점·필요성, 연구개발 내용·목표 절을 찾아 읽고 요점만 정리해 돌려준다(쪽 번호 포함). " +
                 "카드를 채울 때 문서마다 이것을 먼저 부른다. document는 D1 같은 별칭. focus로 원하는 항목을 바꿀 수 있다",
@@ -518,14 +505,10 @@ public static class PptAgentTools
 
     private static async Task<string> FillCards(AgentToolContext ctx, JsonElement args, CancellationToken ct)
     {
-        var slides = ToolArgs.ObjectArray(args, "slides").Select(slide => new Cards.CardSlideSpec(
-            ToolArgs.ObjectArray(slide, "cards").Select(card => new Cards.CardSpec(
-                ToolArgs.String(card, "number"), ToolArgs.String(card, "title"),
-                ToolArgs.OptionalString(card, "tag"), ToolArgs.OptionalString(card, "document"))).ToList(),
-            ToolArgs.OptionalString(slide, "title"))).ToList();
-        var job = new Cards.CardJob(ToolArgs.Int(args, "template_slide"), ToolArgs.Int(args, "after"), slides,
-            ToolArgs.OptionalString(args, "header"), ToolArgs.OptionalString(args, "legend"));
-        return await new Cards.CardPipeline(ctx).RunAsync(job, ct);
+        // 모델이 요약해 넘긴 문장보다 사용자 원문이 정확하다. 원문이 있으면 그것으로 사양을 뽑는다.
+        string request = ctx.UserRequest is { Length: > 0 } original ? original
+            : ToolArgs.OptionalString(args, "request") ?? throw new AgentToolException("request(사용자 요청)가 필요합니다.");
+        return await new Cards.CardPipeline(ctx).RunFromRequestAsync(request, ct);
     }
 
     /// <summary>요점 정리에 넘길 절을 찾는 질의. 국가 R&D 기획보고서의 공통 절 이름이다.</summary>

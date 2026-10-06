@@ -182,3 +182,42 @@ public sealed class CardPipelineTests : IDisposable
         try { Directory.Delete(_dir, true); } catch { }
     }
 }
+
+public class CardJobExtractorTests
+{
+    private const string Request =
+        "33쪽 카드 레이아웃을 복제해 34쪽 뒤에 2쪽을 만들어줘. 35쪽: 1번 노후 도로시설물, 6번 AI 기반 TBM. 36쪽: 11번 디지털 트윈";
+
+    [Fact]
+    public void 사양_JSON을_읽는다()
+    {
+        const string answer = """
+            {"template_slide": "33", "after": 34, "slides": [
+              {"title": "연계(1/2)", "cards": [{"number": 1, "title": "노후 도로시설물", "tag": "시공 안전성 ●", "document": "D1"},
+                                              {"number": "6", "title": "AI 기반 TBM", "document": "D2"}]},
+              {"cards": [{"number": "11", "title": "디지털 트윈"}]}],
+             "header": "기존 기획과제 中 직접 연계 과제"}
+            """;
+        var job = CardJobExtractor.Parse(answer);
+        Assert.Equal((33, 34, 2), (job.TemplateSlide, job.InsertAfter, job.Slides.Count));
+        Assert.Equal(["1", "6"], job.Slides[0].Cards.Select(c => c.Number));
+        Assert.Equal("D1", job.Slides[0].Cards[0].Document);
+        Assert.Null(job.Slides[1].Title);
+        Assert.Equal("기존 기획과제 中 직접 연계 과제", job.Header);
+        Assert.Empty(CardJobExtractor.MissingNumbers(Request, job));
+    }
+
+    [Fact]
+    public void 요청의_카드_번호가_빠지면_알려준다()
+    {
+        // 실행 10: 카드 5장을 쪽마다 1장으로 줄였다.
+        var job = CardJobExtractor.Parse("""{"template_slide": 33, "after": 34, "slides": [{"cards": [{"number": "1", "title": "x"}]}, {"cards": [{"number": "11", "title": "y"}]}]}""");
+        Assert.Equal(["6"], CardJobExtractor.MissingNumbers(Request, job));
+    }
+
+    [Fact]
+    public void 쪽_번호가_없으면_거부한다()
+    {
+        Assert.Throws<FormatException>(() => CardJobExtractor.Parse("""{"slides": [{"cards": [{"number": "1", "title": "x"}]}]}"""));
+    }
+}

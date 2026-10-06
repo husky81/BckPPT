@@ -214,3 +214,21 @@ public class StableAddressTests
         Assert.Contains("set_geometry로 폭을 넓히세요(지금 50pt)", issue.Message);
     }
 }
+
+public class TemplateOverflowTests
+{
+    [Fact]
+    public void 템플릿도_같은_줄_수로_넘쳐_있으면_넘침이_아니다()
+    {
+        TextLineInfo L(int n, LineBreakType t) => new(n, "충분히 긴 한 줄", t);
+        IReadOnlyList<TextLineInfo> Lines(int n) => Enumerable.Range(1, n).Select(i => L(i, i < n ? LineBreakType.Enter : LineBreakType.None)).ToList();
+        var basis = new LintShape("@81", "Text 19", 0, 0, 204, 99, Lines(10), BoundHeight: 140, Id: 81);
+        var same = new LintShape("C1_rnd", "C1_rnd", 0, 0, 204, 99, Lines(9), BoundHeight: 130, Id: 81);
+        var more = same with { Lines = Lines(11), BoundHeight = 150 };
+
+        Assert.Empty(LayoutLint.Check(new(35, [same]), new(33, [basis]), new LintSettings()));
+        var issues = LayoutLint.Check(new(35, [more]), new(33, [basis]), new LintSettings());
+        Assert.Contains(issues, i => i.Rule == LintRule.Overflow);
+        Assert.Contains(issues, i => i.Rule == LintRule.BaselineLines);
+    }
+}

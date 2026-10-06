@@ -165,5 +165,71 @@ public static class CardFillPrompts
         Regex.Replace(item.Trim(), @"^(?:[-•·▪◦*]|\d+[.)])\s*", "").TrimEnd('.', '。').Trim();
 }
 
+/// <summary>
+/// 사용자 요청 문장에서 <see cref="CardJob"/>을 뽑는다. 루프 모델이 중첩 인자를 직접 쓰게 하니
+/// 카드 5장을 쪽마다 1장으로 줄이고 제목을 "기존 기획보고서"로 넣었다(2026-10-06 실행 10).
+/// 단발 호출에 예시를 붙이고, 결과를 검증해 틀리면 한 번 더 묻는다.
+/// </summary>
+public static class CardJobExtractor
+{
+    public const string System = """
+        사용자의 PPT 요청에서 "카드 템플릿 채우기" 작업 사양을 JSON으로 뽑는다. 요청에 있는 값만 쓴다.
+        - template_slide: 복제할 카드 템플릿 쪽 번호
+        - after: 새 쪽을 넣을 위치(이 쪽 뒤). "34쪽 뒤", "35·36쪽을 만들고"면 34
+        - slides: 만들 쪽 순서대로. 각 쪽의 cards는 왼쪽 카드부터 요청에 적힌 순서 그대로, 빠짐없이
+          - number: 카드 번호(문자열), title: 과제명(요청에 적힌 그대로), tag: 카드 머리 태그(요청에 있으면)
+          - document: 그 과제의 원문 별칭. 원문 목록에서 과제명과 가장 맞는 것
+          - title(쪽): 그 쪽의 슬라이드 제목(요청에 있으면)
+        - header: 패널 위 머리말(요청에 있으면), legend: 범례 문구(요청에 있으면)
+        JSON 하나만 답한다.
+        예: {"template_slide": 33, "after": 34, "slides": [{"title": "…(1/2)", "cards": [{"number": "1", "title": "…", "tag": "…", "document": "D1"}, …]}, …], "header": "…", "legend": "…"}
+        """;
+
+    public static string Request(string userRequest, string documents) =>
+        $"원문 목록\n{documents}\n\n요청\n{userRequest}";
+
+    public static CardJob Parse(string text)
+    {
+        using var document = JsonDocument.Parse(CardFillPrompts.ExtractJson(text));
+        var root = document.RootElement;
+        int Int(JsonElement e, string name) =>
+            e.TryGetProperty(name, out var v) && (v.ValueKind == JsonValueKind.Number ? v.TryGetInt32(out var i) : int.TryParse(v.GetString(), out i))
+                ? i : throw new FormatException($"'{name}'(쪽 번호)가 없습니다.");
+        string? Str(JsonElement e, string name) =>
+            e.TryGetProperty(name, out var v) && v.ValueKind is JsonValueKind.String or JsonValueKind.Number
+                ? (v.ValueKind == JsonValueKind.String ? v.GetString() : v.GetRawText())?.Trim() is { Length: > 0 } s ? s : null
+                : null;
+
+        if (!root.TryGetProperty("slides", out var slidesElement) || slidesElement.ValueKind != JsonValueKind.Array)
+            throw new FormatException("'slides' 배열이 없습니다.");
+        var slides = new List<CardSlideSpec>();
+        foreach (var slide in slidesElement.EnumerateArray())
+        {
+            if (!slide.TryGetProperty("cards", out var cardsElement) || cardsElement.ValueKind != JsonValueKind.Array)
+                throw new FormatException("각 쪽에 'cards' 배열이 있어야 합니다.");
+            var cards = cardsElement.EnumerateArray().Select(card => new CardSpec(
+                Str(card, "number") ?? throw new FormatException("카드 'number'가 없습니다."),
+                Str(card, "title") ?? throw new FormatException("카드 'title'이 없습니다."),
+                Str(card, "tag"), Str(card, "document"))).ToList();
+            if (cards.Count == 0) throw new FormatException("카드가 없는 쪽이 있습니다.");
+            slides.Add(new CardSlideSpec(cards, Str(slide, "title")));
+        }
+        if (slides.Count == 0) throw new FormatException("만들 쪽이 없습니다.");
+        return new CardJob(Int(root, "template_slide"), Int(root, "after"), slides, Str(root, "header"), Str(root, "legend"));
+    }
+
+    /// <summary>요청에 "N번"으로 적힌 카드 번호가 사양에 모두 들어갔는지 본다. 빠졌으면 빠진 번호를 돌려준다.</summary>
+    public static IReadOnlyList<string> MissingNumbers(string userRequest, CardJob job)
+    {
+        var mentioned = Regex.Matches(userRequest, @"(?<![\d.])(\d{1,3})번").Select(m => m.Groups[1].Value).Distinct().ToList();
+        var used = job.Slides.SelectMany(s => s.Cards).Select(c => c.Number).ToHashSet();
+        return mentioned.Where(n => !used.Contains(n)).ToList();
+    }
+
+    public static string Describe(CardJob job) =>
+        $"템플릿 {job.TemplateSlide}쪽 → {job.InsertAfter}쪽 뒤에 {job.Slides.Count}쪽: " +
+        string.Join(" | ", job.Slides.Select(s => string.Join(", ", s.Cards.Select(c => $"{c.Number} {c.Title}{(c.Document is null ? "" : $"[{c.Document}]")}"))));
+}
+
 /// <summary>템플릿 카드 하나의 실제 문구. 문체·길이 예시로 문안 작성에 준다.</summary>
 public sealed record CardLayoutSample(string Title, IReadOnlyList<(string Label, IReadOnlyList<string> Items)> Sections);

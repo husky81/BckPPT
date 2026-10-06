@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.Json;
 using BckPPT.Agent.Tools;
 using BckPPT.Models;
 using BckPPT.PowerPoint;
@@ -18,7 +19,32 @@ namespace BckPPT.Agent.Cards;
 /// </summary>
 public sealed class CardPipeline(AgentToolContext ctx)
 {
-    public const int MaxFitRounds = 3;
+    public const int MaxFitRounds = 2;
+
+    /// <summary>사용자 요청 문장에서 사양을 뽑아 실행한다. 사양 추출은 작성 모델 단발 호출(약 3천 토큰)이다.</summary>
+    public async Task<string> RunFromRequestAsync(string userRequest, CancellationToken ct)
+    {
+        var ask = ctx.Write ?? ctx.Summarize ?? throw new AgentToolException("사양을 뽑을 LLM이 없습니다.");
+        Status("요청에서 카드 사양을 뽑는 중");
+        string documents = ctx.Sources?.Outline(null) ?? "(첨부 원문 없음)";
+        string request = CardJobExtractor.Request(userRequest, documents);
+        CardJob? job = null;
+        string? problem = null;
+        for (int attempt = 1; attempt <= 2 && job is null; attempt++)
+        {
+            var answer = await ask(CardJobExtractor.System, problem is null ? request : $"{request}\n\n앞의 답 문제: {problem}. 고쳐서 다시 답한다.", ct);
+            try
+            {
+                var parsed = CardJobExtractor.Parse(answer);
+                var missing = CardJobExtractor.MissingNumbers(userRequest, parsed);
+                if (missing.Count > 0 && attempt < 2) { problem = $"요청의 카드 {string.Join(", ", missing)}번이 빠졌다"; continue; }
+                job = parsed;
+            }
+            catch (Exception ex) when (ex is FormatException or JsonException && attempt < 2) { problem = ex.Message; }
+        }
+        if (job is null) throw new AgentToolException($"요청에서 카드 사양을 뽑지 못했습니다: {problem}");
+        return $"사양: {CardJobExtractor.Describe(job)}\n" + await RunAsync(job, ct);
+    }
 
     public async Task<string> RunAsync(CardJob job, CancellationToken ct)
     {
@@ -294,6 +320,25 @@ public sealed class CardPipeline(AgentToolContext ctx)
             }
         }
         report.Append($"길이 맞춤 {fixedCount}회\n");
+
+        // 그래도 줄 수를 넘으면 마지막 항목부터 코드로 뺀다. qwen이 "31자 줄여라"를 3바퀴 동안 못 맞춘 일이 있었다(실행 10).
+        for (int i = 0; i < filled.Count; i++)
+        {
+            var f = filled[i];
+            var items = f.Items.ToList();
+            var dropped = new List<string>();
+            var lines = await Task.Run(() => ctx.Ppt.GetTextLineBreaks(ctx.WorkingPath, f.Slide, f.Address), ct);
+            while (lines.Count > f.Budget.Lines && items.Count > 1)
+            {
+                dropped.Insert(0, items[^1]);
+                items.RemoveAt(items.Count - 1);
+                await FillAsync(f.Slide, f.Address, items, ct);
+                lines = await Task.Run(() => ctx.Ppt.GetTextLineBreaks(ctx.WorkingPath, f.Slide, f.Address), ct);
+            }
+            if (dropped.Count == 0) continue;
+            filled[i] = f with { Items = items };
+            report.Append($"{f.Slide}쪽 {f.Budget.Label}: 줄 수를 맞추려고 뺀 항목 — {string.Join(" / ", dropped)}\n");
+        }
     }
 
     public static bool Violates(IReadOnlyList<TextLineInfo> lines, TextBudget budget) =>

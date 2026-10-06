@@ -68,7 +68,7 @@ public static class LayoutLint
             if (IsTitle(shape, settings)) CheckTitleBalance(shape, settings, issues);
             else CheckOrphans(shape, settings, issues);
 
-            if (shape.BoundHeight > shape.Height + settings.OverflowTolerance)
+            if (shape.BoundHeight > shape.Height + settings.OverflowTolerance && !TemplateOverflowsAlike(shape, baseline, settings))
                 issues.Add(new(LintRule.Overflow, shape.Address,
                     $"{shape.Address} 텍스트가 상자보다 {shape.BoundHeight - shape.Height:0.#}pt 넘침{WidenHint(shape)}"));
         }
@@ -202,6 +202,15 @@ public static class LayoutLint
             }
         }
     }
+
+    /// <summary>
+    /// 기준 상자도 원래 넘쳐 있고(카드 배경 안에서 넘치게 디자인한 템플릿) 줄 수가 기준 이내면 넘침으로 보지 않는다.
+    /// 착수보고 33쪽 본문 상자가 모두 이랬는데, 같은 줄 수인데도 지적해 루프가 헛돌았다(2026-10-06 실행 10).
+    /// </summary>
+    private static bool TemplateOverflowsAlike(LintShape shape, LintSlide? baseline, LintSettings settings) =>
+        shape.Counterpart(baseline) is { HasText: true } basis &&
+        basis.BoundHeight > basis.Height + settings.OverflowTolerance &&
+        shape.Lines.Count <= basis.Lines.Count;
 
     /// <summary>
     /// 태그·배지처럼 짧은 한 문단 상자가 줄바꿈되면 문구가 아니라 폭이 문제다.

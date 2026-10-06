@@ -66,6 +66,9 @@ public sealed class AgentToolContext(IPptComService ppt, string workingPath)
     /// <summary>모델별 사용량. 파이프라인 결과에 함께 보고한다.</summary>
     public BckPPT.Llm.UsageMeter? Meter { get; set; }
 
+    /// <summary>이번 요청의 사용자 원문. 사양을 뽑는 도구가 모델의 요약 대신 이것을 쓴다.</summary>
+    public string? UserRequest { get; set; }
+
     /// <summary>원문 라이브러리. Phase D 전까지는 비어 있을 수 있다.</summary>
     public ISourceLibrary? Sources { get; set; }
 

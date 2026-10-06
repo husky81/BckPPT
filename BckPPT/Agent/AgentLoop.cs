@@ -72,6 +72,7 @@ public sealed class AgentLoop(ILlmClient llm, ToolRegistry tools, AgentLoopOptio
         int nudges = 0;
         var runUsage = LlmUsage.Zero;
         session.Context.FinishSummary = null;
+        session.Context.UserRequest = userMessage;
 
         for (int turn = 1; turn <= options.MaxTurns; turn++)
         {
