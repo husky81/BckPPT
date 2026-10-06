@@ -1,0 +1,194 @@
+using System.IO;
+using BckPPT.Agent;
+using BckPPT.Agent.Tools;
+using BckPPT.Llm;
+
+namespace BckPPT.Tests;
+
+public sealed class AgentLoopTests : IDisposable
+{
+    private readonly string _dir = Path.Combine(Path.GetTempPath(), "bckppt-agent-tests-" + Guid.NewGuid().ToString("N")[..8]);
+    private readonly string _source;
+    private readonly FakePptComService _ppt = new();
+
+    public AgentLoopTests()
+    {
+        Directory.CreateDirectory(_dir);
+        _source = Path.Combine(_dir, "착수보고.pptx");
+        File.WriteAllText(_source, "원본");
+        // 1쪽: 카드 템플릿. 본문 상자는 한 줄에 10자.
+        _ppt.Slides.Add(
+        [
+            new FakeShape("C1_title", 0, 0, 200, 40, 20, "과제명"),
+            new FakeShape("C1_rnd", 0, 50, 200, 100, 10, "기존 내용 1", "기존 내용 2"),
+        ]);
+        _ppt.Slides.Add([new FakeShape("Footer", 0, 0, 200, 20, 50, "끝")]);
+    }
+
+    private AgentSession StartSession() =>
+        AgentSession.Start(_ppt, _source, AgentPrompts.System,
+            workDirectory: Path.Combine(_dir, "work"), logDirectory: Path.Combine(_dir, "logs"));
+
+    private static AgentLoop Loop(ILlmClient llm, AgentLoopOptions? options = null) =>
+        new(llm, AgentFactory.CreateRegistry(includeSources: false), options ?? new AgentLoopOptions());
+
+    [Fact]
+    public async Task 복제하고_문단을_바꾼_뒤_끝낸다()
+    {
+        var llm = new FakeLlmClient(
+            FakeLlmClient.Calls(("duplicate_slide", """{"source": 1, "after": 1}""")),
+            FakeLlmClient.Calls(("set_paragraphs", """{"slide": 2, "shape": "C1_rnd", "paragraphs": ["새 내용 하나", "둘"]}""")),
+            FakeLlmClient.Calls(("finish", """{"summary": "2쪽에 카드를 채웠습니다."}""")));
+        using var session = StartSession();
+
+        var result = await Loop(llm).RunAsync(session, "1쪽 카드로 새 쪽을 만들어 채워줘");
+
+        Assert.Equal(AgentStopReason.Finished, result.Reason);
+        Assert.Equal("2쪽에 카드를 채웠습니다.", result.Summary);
+        Assert.Equal(3, result.Turns);
+        Assert.Empty(result.RemainingIssues);
+        Assert.Equal(3, _ppt.Slides.Count);
+        Assert.Equal(["새 내용 하나", "둘"], _ppt.Slides[1][1].Paragraphs);
+        Assert.Equal(["기존 내용 1", "기존 내용 2"], _ppt.Slides[0][1].Paragraphs);   // 템플릿은 그대로
+        Assert.Equal(1, session.Context.Origins.BaselineOf(2));
+
+        // 도구 결과가 대화에 붙고, 문단 교체 결과에는 줄 측정이 들어 있다.
+        var toolMessages = session.Messages.Where(m => m.Role == "tool").ToList();
+        Assert.Equal(3, toolMessages.Count);
+        Assert.Contains("C1_rnd: 2줄", toolMessages[1].Content);
+        Assert.Equal(new LlmUsage(300, 60), result.Usage);
+        Assert.All(llm.Requests, r => Assert.NotNull(r.Tools));
+    }
+
+    [Fact]
+    public async Task 작업은_사본에만_하고_원본_파일은_그대로다()
+    {
+        var llm = new FakeLlmClient(FakeLlmClient.Text("무엇을 할까요?"));
+        using var session = StartSession();
+        await Loop(llm).RunAsync(session, "안녕");
+
+        Assert.NotEqual(_source, session.WorkingPath);
+        Assert.True(File.Exists(session.WorkingPath));
+        var result = session.Approve();
+        Assert.StartsWith(Path.Combine(_dir, "착수보고_BckPPT_"), result);
+        Assert.Equal("원본", File.ReadAllText(_source));
+        session.Discard();
+        Assert.False(File.Exists(session.WorkingPath));
+        Assert.True(File.Exists(result));
+    }
+
+    [Fact]
+    public async Task 위반이_남은_채_끝내려_하면_돌려보낸다()
+    {
+        // 한 줄 10자 상자에 꼬리가 넘어가는 문구 → 고아 단어. 고친 뒤에야 끝난다.
+        var llm = new FakeLlmClient(
+            FakeLlmClient.Calls(("set_paragraphs", """{"slide": 1, "shape": "C1_rnd", "paragraphs": ["품질 예측 기술 고도화 개발"]}""")),
+            FakeLlmClient.Calls(("finish", """{"summary": "끝"}""")),
+            FakeLlmClient.Calls(("set_paragraphs", """{"slide": 1, "shape": "C1_rnd", "paragraphs": ["예측 기술 개발"]}""")),
+            FakeLlmClient.Calls(("finish", """{"summary": "고쳤습니다"}""")));
+        using var session = StartSession();
+
+        var result = await Loop(llm).RunAsync(session, "채워줘");
+
+        Assert.Equal(AgentStopReason.Finished, result.Reason);
+        Assert.Equal("고쳤습니다", result.Summary);
+        var rejection = session.Messages.Where(m => m.Role == "tool").ElementAt(1).Content;
+        Assert.Contains("아직 끝낼 수 없습니다", rejection);
+        Assert.Contains("만 남음", rejection);
+        Assert.Empty(result.RemainingIssues);
+    }
+
+    [Fact]
+    public async Task 되돌려_보낼_횟수를_넘기면_남은_위반과_함께_끝낸다()
+    {
+        var llm = new FakeLlmClient(
+            FakeLlmClient.Calls(("set_paragraphs", """{"slide": 1, "shape": "C1_rnd", "paragraphs": ["품질 예측 기술 고도화 개발"]}""")),
+            FakeLlmClient.Calls(("finish", """{"summary": "끝"}""")),
+            FakeLlmClient.Calls(("finish", """{"summary": "그래도 끝"}""")));
+        using var session = StartSession();
+
+        var result = await Loop(llm, new AgentLoopOptions { LintRejectionsBeforeFinish = 1 }).RunAsync(session, "채워줘");
+
+        Assert.Equal(AgentStopReason.Finished, result.Reason);
+        Assert.Contains(result.RemainingIssues, i => i.Rule == BckPPT.PowerPoint.LintRule.OrphanWord);
+    }
+
+    [Fact]
+    public async Task 잘못된_인자는_오류로_돌려주고_계속한다()
+    {
+        var llm = new FakeLlmClient(
+            FakeLlmClient.Calls(("read_text", """{"slide": 1, "shape": "없는 도형"}"""), ("no_such_tool", "{}")),
+            FakeLlmClient.Text("도형을 찾지 못했습니다."));
+        using var session = StartSession();
+        var events = new List<AgentEvent>();
+
+        var result = await Loop(llm).RunAsync(session, "읽어줘", new SyncProgress<AgentEvent>(events.Add));
+
+        Assert.Equal(AgentStopReason.AnsweredWithoutTools, result.Reason);
+        var errors = events.Where(e => e.Kind == AgentEventKind.ToolFinished && e.IsError).ToList();
+        Assert.Equal(2, errors.Count);
+        Assert.Contains("찾지 못했습니다", errors[0].Text);
+        Assert.Contains("도구는 없습니다", errors[1].Text);
+    }
+
+    [Fact]
+    public async Task 턴_상한에서_멈춘다()
+    {
+        var calls = Enumerable.Range(0, 3).Select(_ => FakeLlmClient.Calls(("list_shapes", """{"slide": 1}"""))).ToArray();
+        using var session = StartSession();
+        var result = await Loop(new FakeLlmClient(calls), new AgentLoopOptions { MaxTurns = 3 }).RunAsync(session, "봐줘");
+        Assert.Equal(AgentStopReason.TurnLimit, result.Reason);
+    }
+
+    [Fact]
+    public async Task 후속_요청은_같은_대화를_이어간다()
+    {
+        var llm = new FakeLlmClient(FakeLlmClient.Text("첫 답"), FakeLlmClient.Text("둘째 답"));
+        using var session = StartSession();
+        var loop = Loop(llm);
+        await loop.RunAsync(session, "첫 요청");
+        await loop.RunAsync(session, "1줄씩 줄여줘");
+
+        var second = llm.Requests[1].Messages;
+        Assert.Equal(["system", "user", "assistant", "user"], second.Select(m => m.Role));
+        Assert.Equal("1줄씩 줄여줘", second[^1].Content);
+    }
+
+    [Fact]
+    public void 예산을_넘으면_오래된_도구_결과부터_줄인다()
+    {
+        var messages = new List<LlmMessage> { LlmMessage.System("s"), LlmMessage.User("u") };
+        for (int i = 0; i < 10; i++)
+        {
+            messages.Add(LlmMessage.Assistant("", [new LlmToolCall($"c{i}", "line_breaks", "{}")]));
+            messages.Add(LlmMessage.Tool($"c{i}", new string('가', 1000)));
+        }
+
+        int elided = AgentLoop.Compact(messages, budget: 5000);
+
+        Assert.True(elided > 0);
+        Assert.True(messages.Sum(m => m.Content.Length) <= 5000);
+        Assert.Equal(22, messages.Count);                                    // 메시지는 지우지 않는다
+        Assert.StartsWith(AgentLoop.ElidedPrefix, messages[3].Content);
+        Assert.Equal(1000, messages[^1].Content.Length);                     // 최근 결과는 남긴다
+    }
+
+    [Fact]
+    public void 긴_도구_결과는_자른다()
+    {
+        var text = AgentLoop.Truncate(new string('x', 9000), 8000);
+        Assert.StartsWith(new string('x', 8000), text);
+        Assert.Contains("1000자 생략", text);
+    }
+
+    public void Dispose()
+    {
+        try { Directory.Delete(_dir, recursive: true); } catch { }
+    }
+
+    /// <summary>Progress&lt;T&gt;는 동기화 컨텍스트로 넘겨 비동기로 부르므로 테스트에서는 바로 부른다.</summary>
+    private sealed class SyncProgress<T>(Action<T> report) : IProgress<T>
+    {
+        public void Report(T value) => report(value);
+    }
+}

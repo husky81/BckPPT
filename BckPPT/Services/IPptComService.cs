@@ -74,4 +74,6 @@ public interface IPptComService
     string AddTextShape(string presentationPath, int slideIndex, TextShapeRequest request);
     int    SetTextColor(string presentationPath, int slideIndex, string address, string find, string color);
     void   SetTextFormat(string presentationPath, int slideIndex, string address, TextFormatPatch patch);
+    TextFormatInfo GetTextFormat(string presentationPath, int slideIndex, string address);
+    int    ReplaceTextInShape(string presentationPath, int slideIndex, string address, string find, string replace);
 }

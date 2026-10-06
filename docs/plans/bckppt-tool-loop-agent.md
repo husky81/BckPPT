@@ -1,6 +1,6 @@
 # BckPPT 도구 루프 에이전트와 일반 사용자 배포 계획
 
-작성: 2026-10-06 · 상태: 계획 · 선행 문서: [독립형 PPT 에이전트 리팩토링 계획](bckppt-agent-first-refactoring.md)
+작성: 2026-10-06 · 상태: 진행 중(Phase A~C 구현) · 선행 문서: [독립형 PPT 에이전트 리팩토링 계획](bckppt-agent-first-refactoring.md)
 
 ## 1. 배경
 
@@ -143,7 +143,7 @@ gitoky의 OpenAI 호환 API가 무엇을 지원하느냐에 따라 두 방식 �
 - **승인**: 미리보기(전후 썸네일, 슬라이드별 변경 목록, Lint 결과) 후 적용. 거절하면 사본 삭제.
 - **비용 상한**: 세션별 턴·토큰 상한, 사용량(`usage`) 누적 표시.
 - **데이터 전송 고지**: 첫 실행 시 "문서 텍스트와 슬라이드 이미지가 gitoky LLM으로 전송됨" 동의. 보낼 문맥은 도구 결과로 필요한 만큼만(기존 데이터 최소화 원칙).
-- **로그**: 세션 대화·도구 호출·결과를 `%LOCALAPPDATA%\BckPPT\sessions\`에 JSONL로 저장(재현·디버깅용). 원문 전체는 저장하지 않는다.
+- **로그**: 세션 대화·도구 호출·결과를 `%LOCALAPPDATA%\BckSoft\BckPPT\sessions\`에 JSONL로 저장(재현·디버깅용). 원문 전체는 저장하지 않는다.
 
 ## 7. 일반 사용자 배포
 
@@ -201,16 +201,39 @@ gitoky의 OpenAI 호환 API가 무엇을 지원하느냐에 따라 두 방식 �
 
 완료 기준: 개발 환경이 없는 PC에 설치해 5장 시나리오 성공
 
-## 9. 확인할 것 (Phase A에서 채움)
+## 9. 확인한 것 (Phase A, 2026-10-06 실측)
+
+`GET /v1/models`와 직접 요청으로 확인했다. 결론: **4.5의 1번(네이티브 function calling)을 쓴다.** JSON 행동 프로토콜 디코더는 만들지 않았다.
 
 | 항목 | 결과 |
 | --- | --- |
-| 품질 모델 이름/라우트 | |
-| `tools` / `tool_calls` 지원 | |
-| 이미지 입력 지원 | |
-| 최대 문맥·출력 길이 | |
-| 스트리밍 중 `tool_calls` 전달 방식 | |
-| 요청당 비용·속도 | |
+| 품질 모델 이름/라우트 | `agent` (qwen3-32b, Bedrock 도쿄). "Agent loops" 전용이고 `auto`는 여기로 보내지 않으므로 명시 지정한다. 그 밖에 `general`(같은 모델), `code`(qwen3-coder-30b), `fast`(nova-micro), `vision`(nova-lite) |
+| `tools` / `tool_calls` 지원 | 지원. 다섯 라우트 모두 capabilities에 tools. `role: tool` + `tool_call_id` 왕복 확인. 모델이 정수 인자를 `"1"`처럼 문자열로 보내기도 해서 `ToolArgs`가 둘 다 받는다 |
+| 이미지 입력 지원 | `agent`는 거부(`403 model_not_allowed`). `vision`은 `image_url` data URL로 동작(색·글자를 정확히 읽음). → `render_slide`는 vision 라우트에 따로 묻고 **글 설명**을 루프에 돌려준다 |
+| 최대 문맥·출력 길이 | `agent` context_window 32,768 토큰. 루프는 대화가 36,000자를 넘으면 오래된 도구 결과부터 한 줄로 줄인다(`AgentLoop.Compact`). 출력은 턴당 max_tokens 4,096 |
+| 스트리밍 중 `tool_calls` 전달 방식 | 조각내지 않고 한 청크에 `id`·`name`·`arguments` 전체가 온다. 루프는 비스트리밍 `CompleteAsync`를 쓴다 |
+| 요청당 비용·속도 | 평소 1턴 0.7초 안팎(입력 약 200토큰). 응답 헤더 `X-LLM-Cache: unsupported_model` — 프롬프트 캐시 없음. **같은 날 18시 40분경 게이트웨이 전체 지연이 8~15초로 늘었고(`/`, `/v1/models` 포함) 15초 근처에서 응답 없이 연결이 끊겼다**(HTTP 000, 스트리밍도 같음). 클라이언트는 재시도 후 `connection_lost`로 알린다. 비용 단가는 미확인 |
+
+설정: `GITOKY_LLM_AGENT_MODEL`(기본 `agent`), `GITOKY_LLM_VISION_MODEL`(기본 `vision`).
+
+## 9-1. 구현 현황
+
+| Phase | 상태 | 주요 파일 |
+| --- | --- | --- |
+| A | 완료. 실서버 echo 왕복 테스트 통과(`GITOKY_LLM_API_KEY`가 있을 때만 실행) | `Llm/LlmModels.cs`, `GitokyLlmClient`의 `CompleteAsync`·`BuildPayload`·`ParseCompletion` |
+| B | 완료. 가짜 LLM 대본 테스트에 더해, 실제 PowerPoint + gitoky `agent`로 2카드 슬라이드 복제·채우기를 끝까지 수행(19~20턴, 약 9만 토큰, Lint 위반 0). 첫 실행에서는 `list_shapes` 미리보기(문단을 공백으로 이은 것)를 원문으로 알고 `replace_text`가 3번 실패해, 미리보기에 ¶/↵ 경계를 넣고 프롬프트에 도구 선택 기준을 추가했다. 문구 품질(어색한 개요 문장)은 qwen3-32b의 한계로 보이며 원문 검색(Phase D) 후 다시 본다 | `Agent/AgentLoop.cs`, `AgentSession.cs`, `ParagraphFitPlanner.cs`, `SlideOrigins.cs`, `Agent/Tools/*` |
+| C | 규칙·단위 테스트 완료. finish 때 건드린 슬라이드를 자동 검사해 위반이 있으면 2회까지 되돌려 보낸다 | `PowerPoint/LayoutLint.cs`, `PptRules`의 `OrphanMaxChars`·`TitleSecondLineMinRatio`·`TitleRoles` |
+| D~F | 미착수. `ISourceLibrary` 인터페이스와 `search_source`/`read_source` 도구 자리만 있다 | |
+
+계획과 달라진 점:
+
+- 4.2의 도구는 모두 만들었다(`search_source`/`read_source`는 원문 라이브러리가 있을 때만 노출). 쓰기 도구(`set_paragraphs`, `replace_text`, `set_text_format`)는 적용 직후 줄 측정 결과를 함께 돌려줘 측정 턴을 아낀다.
+- `replace_text`는 기존 `ReplaceText`(최상위 도형 이름만, 런 단위)가 아니라 새 `ReplaceTextInShape`(주소 규약, `TextRange2.Replace`)를 쓴다.
+- 서식 이탈 규칙을 위해 `GetTextFormat`(첫 런의 글꼴·크기·자간·굵기·색)을 추가했다. 같은 역할은 이름 규약 `C{n}_{역할}`로 묶고, 과반 서식과 다른 상자만 지적한다.
+- 겹침은 새로 추가한 도형이 다른 도형에 **걸칠 때만** 잡는다. 패널 안에 완전히 들어간 배지는 의도한 배치로 본다.
+- "상위 카드 아래 경계 초과" overflow는 아직 없다(텍스트 높이 > 상자 높이만 판정).
+- 작업 사본은 `%LOCALAPPDATA%\BckSoft\BckPPT\work\`에 만들고, 승인하면 원본 옆 `이름_BckPPT_시각.pptx`로 복사, 거절하면 지운다(`AgentSession.Approve`/`Discard`).
+- 실서버 스모크: `BCKPPT_LIVE_PPTX`(대상 파일)와 키를 주고 `dotnet test --filter 스모크`. 대화 로그 경로가 출력에 나온다.
 
 ## 10. 다른 PC에서 시작하기
 

@@ -1,0 +1,61 @@
+using BckPPT.Agent.Tools;
+using BckPPT.Llm;
+using BckPPT.Services;
+
+namespace BckPPT.Agent;
+
+public static class AgentPrompts
+{
+    public const string System = """
+        너는 PowerPoint 편집 도우미 BckPPT다. 도구로 작업 사본을 고친다. 원본은 건드리지 않고, 사용자가 결과를 보고 승인한다.
+
+        ## 원칙
+        - 추측하지 말고 측정한다. 문구를 넣은 뒤에는 반드시 줄 측정(set_paragraphs·replace_text 결과 또는 line_breaks)을 보고 판단한다.
+        - 측정 → 수정 → 재측정을 위반이 없어질 때까지 반복한다. 고칠 때는 위반한 문단만 고친다.
+        - 끝내기 전에 바꾼 슬라이드마다 lint_slide를 돌려 "위반 없음"을 확인한다. 필요하면 render_slide로 눈으로 확인한다.
+        - 슬라이드 번호는 1부터. 도형은 list_shapes가 준 주소를 그대로 쓴다("이름", "이름#2", "그룹/이름").
+        - duplicate_slide 뒤에는 뒤쪽 슬라이드 번호가 밀린다. 돌려받은 새 번호를 쓴다.
+        - 상자 문구를 통째로 바꿀 때는 set_paragraphs, 일부 낱말만 바꿀 때(서식이 섞인 제목 등)는 replace_text를 쓴다.
+        - 한 번에 도구 여러 개를 불러도 된다. 다만 결과를 봐야 정할 수 있는 것은 결과를 본 뒤에 부른다.
+
+        ## 문구 맞추기
+        - 복제 원본(기준) 상자의 줄 수를 넘기지 않는다.
+        - 자동 줄바꿈으로 문단 마지막 줄에 4자 이하만 남으면(고아 단어) 문구를 줄이거나 바꿔 앞줄로 올린다.
+        - 2줄 제목은 줄 길이가 비슷하도록 \n(Shift+Enter)으로 끊는다.
+        - 같은 역할 상자끼리는 서식(글꼴·크기·자간)을 맞춘다. 글자를 줄이려고 서식을 바꾸지 말고 문구를 고친다.
+        - 개조식으로 간결하게 쓰고 원문에 없는 사실은 만들지 않는다.
+
+        ## 원문 찾기
+        - search_source로 "요약문", "최종목표", "구성기술", "연구개발 내용", "RFP", "문제점" 같은 절 제목을 먼저 찾고, read_source로 그 쪽을 읽는다.
+        - 긴 원문을 통째로 읽지 말고 필요한 쪽만 읽는다.
+
+        ## 마치기
+        - 다 했으면 finish(summary)를 부른다. summary에는 바꾼 슬라이드와 내용, 남은 문제를 짧게 적는다.
+        - 요청이 모호하거나 할 수 없는 일이면 도구 없이 이유와 필요한 정보를 답한다.
+        """;
+}
+
+/// <summary>설정값으로 루프·도구·이미지 확인을 묶는다. UI와 테스트 모두 여기서 만든다.</summary>
+public static class AgentFactory
+{
+    public static ToolRegistry CreateRegistry(bool includeSources) => new(PptAgentTools.Create(includeSources));
+
+    public static AgentLoop CreateLoop(ILlmClient llm, GitokyLlmOptions? options, bool includeSources) =>
+        new(llm, CreateRegistry(includeSources), new AgentLoopOptions { Model = options?.AgentModel });
+
+    public static AgentSession StartSession(
+        ILlmClient llm, GitokyLlmOptions? options, IPptComService ppt, string sourcePath, ISourceLibrary? sources = null) =>
+        AgentSession.Start(ppt, sourcePath, AgentPrompts.System,
+            describeImage: options is null ? null : (png, question, ct) => DescribeImageAsync(llm, options.VisionModel, png, question, ct),
+            sources: sources);
+
+    /// <summary>agent 라우트는 이미지를 받지 않으므로 렌더 확인은 vision 라우트에 따로 묻고 글로 돌려받는다.</summary>
+    public static async Task<string> DescribeImageAsync(
+        ILlmClient llm, string visionModel, string pngPath, string question, CancellationToken ct)
+    {
+        var bytes = await System.IO.File.ReadAllBytesAsync(pngPath, ct);
+        var message = LlmMessage.User(question) with { ImageDataUrls = ["data:image/png;base64," + Convert.ToBase64String(bytes)] };
+        var completion = await llm.CompleteAsync(new LlmRequest([message], visionModel, 800), ct);
+        return completion.Content.Trim();
+    }
+}

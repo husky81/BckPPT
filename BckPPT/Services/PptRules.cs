@@ -31,6 +31,15 @@ public class PptRules
     public float SpacingStep        { get; set; } = 0.5f;
     public float SpaceAfterStep     { get; set; } = 2f;
 
+    // ── LayoutLint 기준 ──────────────────────────────────────────
+
+    /// <summary>자동 줄바꿈된 문단의 마지막 줄이 이 글자 수 이하이면 고아 단어로 본다.</summary>
+    public int   OrphanMaxChars          { get; set; } = 4;
+    /// <summary>2줄 제목의 둘째 줄이 첫 줄 대비 이 비율 미만이면 균형을 맞추라고 한다.</summary>
+    public float TitleSecondLineMinRatio { get; set; } = 0.3f;
+    /// <summary>이름의 역할 부분(C2_title → title)에 이 문자열이 들어가면 제목으로 본다.</summary>
+    public List<string> TitleRoles { get; set; } = ["title", "제목"];
+
     // ── 글꼴 규칙 ────────────────────────────────────────────────
 
     public List<string> AllowedFonts { get; set; } =

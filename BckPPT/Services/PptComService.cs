@@ -1428,7 +1428,8 @@ public class PptComService : IPptComService
                     {
                         string text = (string)shape.TextFrame2.TextRange.Text;
                         hasText = text.Length > 0;
-                        preview = text[..Math.Min(60, text.Length)].Replace('\r', ' ').Replace('\v', ' ');
+                        // 문단 경계를 남겨야 미리보기를 원문으로 착각하지 않는다(¶ 문단, ↵ Shift+Enter).
+                        preview = text[..Math.Min(60, text.Length)].Replace("\r", " ¶ ").Replace("\v", " ↵ ");
                     }
                 }
                 catch { }
@@ -1549,6 +1550,46 @@ public class PptComService : IPptComService
                 font.NameFarEast = patch.FontName;
             }
             return true;
+        });
+
+    /// <summary>
+    /// 한 도형 안에서만 치환한다. TextRange2.Replace는 바뀐 자리 첫 글자의 서식을 이어받으므로
+    /// 글자 크기가 섞인 제목도 서식을 지킨다. 런 경계에 걸친 문자열도 찾는다.
+    /// </summary>
+    public int ReplaceTextInShape(string presentationPath, int slideIndex, string address, string find, string replace)
+        => OnSlide(presentationPath, slideIndex, save: true, slide =>
+        {
+            if (string.IsNullOrEmpty(find)) return 0;
+            dynamic tr = RequireShape(slide, slideIndex, address).TextFrame2.TextRange;
+            int count = 0, after = 0;
+            while (count < 1000)
+            {
+                dynamic? hit = tr.Replace(find, replace, after, MsoTrue, MsoFalse);
+                if (hit is null) break;
+                count++;
+                // 바꾼 글자 뒤부터 다시 찾는다. replace에 find가 들어 있어도 끝나도록.
+                after = (int)hit.Start - 1 + (int)hit.Length;
+            }
+            return count;
+        });
+
+    /// <summary>첫 런의 서식. 한 상자 안에서 섞인 서식은 LayoutLint가 첫 런 기준으로 비교한다.</summary>
+    public TextFormatInfo GetTextFormat(string presentationPath, int slideIndex, string address)
+        => OnSlide(presentationPath, slideIndex, save: false, slide =>
+        {
+            dynamic range = RequireShape(slide, slideIndex, address).TextFrame2.TextRange;
+            dynamic font  = (int)range.Runs.Count > 0 ? range.Runs(1, 1).Font : range.Font;
+            string name = "";
+            try { name = (string)font.NameFarEast; } catch { }
+            if (string.IsNullOrEmpty(name)) try { name = (string)font.Name; } catch { }
+            float size = 0f, spacing = 0f;
+            bool  bold = false;
+            string color = "";
+            try { size    = (float)Math.Round((float)font.Size, 1); }    catch { }
+            try { spacing = (float)Math.Round((float)font.Spacing, 1); } catch { }
+            try { bold    = (int)font.Bold == MsoTrue; }                  catch { }
+            try { color   = OleColor.ToHex((int)font.Fill.ForeColor.RGB); } catch { }
+            return new TextFormatInfo(name, size, spacing, bold, color);
         });
 
     // ── 단일 Shape 정보 읽기 ─────────────────────────────────────

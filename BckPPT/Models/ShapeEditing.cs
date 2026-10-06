@@ -26,6 +26,9 @@ public record TextFormatPatch(
     float?  Spacing  = null,
     string? FontName = null);
 
+/// <summary>도형 텍스트 첫 런의 서식. 색은 "#RRGGBB", 자간(Spacing)은 pt.</summary>
+public record TextFormatInfo(string FontName, float Size, float Spacing, bool Bold, string Color);
+
 public enum TextShapeKind { Rectangle, RoundedRectangle }
 
 /// <summary>
