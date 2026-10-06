@@ -18,7 +18,12 @@ public static class AgentPrompts
         - 상자 문구를 통째로 바꿀 때는 set_paragraphs, 일부 낱말만 바꿀 때(서식이 섞인 제목 등)는 replace_text를 쓴다.
         - 한 번에 도구 여러 개를 불러도 된다. 다만 결과를 봐야 정할 수 있는 것은 결과를 본 뒤에 부른다.
 
-        ## 템플릿 복제해 채우기
+        ## 카드 템플릿 채우기
+        - 템플릿 카드 슬라이드를 복제해 보고서들을 카드로 정리하는 요청은 fill_cards 한 번으로 처리한다.
+          요청에서 템플릿 쪽, 넣을 위치, 쪽마다 카드(번호·과제명·태그·원문 별칭), 머리말, 제목, 범례를 뽑아 넘긴다.
+        - fill_cards 결과에 남은 위반이 있으면 그 상자만 set_texts나 replace_text로 고치고 finish 한다.
+
+        ## 템플릿 복제해 채우기(fill_cards로 안 되는 경우)
         - list_shapes는 도형을 [카드 n]별로 위에서 아래 순서로 묶어 보여준다. (소제목) 상자("개요", "문제점" 등)는 바꾸지 않는다.
         - 지울 카드는 이름을 붙이기 전에 먼저 지운다(delete_shape에 with_contents=true).
         - 이름이 겹치는 도형(@숫자 주소)은, 채우기 전에 rename_shapes 한 번으로 슬라이드의 남길 카드 전부에 C{카드번호}_{역할} 이름을 붙인다.
@@ -62,6 +67,7 @@ public static class AgentFactory
         AgentSession.Start(ppt, sourcePath, AgentPrompts.System,
             describeImage: options is null ? null : (png, question, ct) => DescribeImageAsync(llm, options.VisionModel, png, question, ct),
             summarize: (instruction, content, ct) => SummarizeAsync(llm, options?.AgentModel, instruction, content, ct),
+            write: (instruction, content, ct) => SummarizeAsync(llm, options?.WriterModel ?? options?.AgentModel, instruction, content, ct, 4000),
             sources: sources);
 
     /// <summary>
@@ -69,10 +75,10 @@ public static class AgentFactory
     /// 발췌 수만 자가 주 대화의 32k 문맥을 채우지 않아, 문서 5개를 읽어도 루프가 버틴다.
     /// </summary>
     public static async Task<string> SummarizeAsync(
-        ILlmClient llm, string? model, string instruction, string content, CancellationToken ct)
+        ILlmClient llm, string? model, string instruction, string content, CancellationToken ct, int maxTokens = 1200)
     {
         var completion = await llm.CompleteAsync(new LlmRequest(
-            [LlmMessage.System(instruction), LlmMessage.User(content)], model, 1200), ct);
+            [LlmMessage.System(instruction), LlmMessage.User(content)], model, maxTokens), ct);
         return completion.Content.Trim();
     }
 

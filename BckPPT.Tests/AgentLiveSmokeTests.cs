@@ -55,6 +55,7 @@ public class AgentLiveSmokeTests(ITestOutputHelper output)
             output.WriteLine(run.Summary);
             foreach (var issue in run.RemainingIssues) output.WriteLine("남은 위반: " + issue.Message);
             output.WriteLine($"썸네일 전 {result.BeforeThumbnails.Count} / 후 {result.AfterThumbnails.Count}");
+            output.WriteLine("모델별 사용량: " + UsageMeter.Describe(result.UsageByModel ?? new Dictionary<string, (int, LlmUsage)>()));
             foreach (var change in result.Changes) output.WriteLine("변경: " + change);
             output.WriteLine("log: " + workflow.Session?.Log.FilePath);
             Assert.NotEqual(AgentStopReason.TokenLimit, run.Reason);

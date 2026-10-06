@@ -57,6 +57,15 @@ public sealed class AgentToolContext(IPptComService ppt, string workingPath)
     /// </summary>
     public Func<string, string, CancellationToken, Task<string>>? Summarize { get; init; }
 
+    /// <summary>카드 문안처럼 품질이 중요한 글을 쓰는 호출(GITOKY_LLM_WRITER_MODEL). 없으면 Summarize를 쓴다.</summary>
+    public Func<string, string, CancellationToken, Task<string>>? Write { get; init; }
+
+    /// <summary>진행 상황(파이프라인 단계)을 알리는 곳. 채팅창 진행 로그로 간다.</summary>
+    public IProgress<string>? Status { get; set; }
+
+    /// <summary>모델별 사용량. 파이프라인 결과에 함께 보고한다.</summary>
+    public BckPPT.Llm.UsageMeter? Meter { get; set; }
+
     /// <summary>원문 라이브러리. Phase D 전까지는 비어 있을 수 있다.</summary>
     public ISourceLibrary? Sources { get; set; }
 

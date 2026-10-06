@@ -9,7 +9,8 @@ public sealed record GitokyLlmOptions(
     TimeSpan Timeout,
     int MaxRetries,
     string AgentModel = "agent",
-    string VisionModel = "vision")
+    string VisionModel = "vision",
+    string? WriterModel = null)
 {
     public static GitokyLlmOptions FromEnvironment(string baseDirectory)
     {
@@ -31,7 +32,9 @@ public sealed record GitokyLlmOptions(
             new Uri(baseUrl + "/", UriKind.Absolute), key,
             Read("GITOKY_LLM_MODEL", "auto"), TimeSpan.FromSeconds(90), 2,
             // 도구 루프는 tools를 지원하는 라우트, 렌더 확인은 이미지 입력 라우트가 필요하다.
-            Read("GITOKY_LLM_AGENT_MODEL", "agent"), Read("GITOKY_LLM_VISION_MODEL", "vision"));
+            Read("GITOKY_LLM_AGENT_MODEL", "agent"), Read("GITOKY_LLM_VISION_MODEL", "vision"),
+            // 카드 문안처럼 한두 번만 쓰는 글쓰기 호출. 비우면 agent 모델을 쓴다(예: quality로 opus).
+            Read("GITOKY_LLM_WRITER_MODEL") is { Length: > 0 } writer ? writer : null);
     }
 
     private static string FindDotEnv(string baseDirectory)

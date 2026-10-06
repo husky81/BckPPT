@@ -216,14 +216,16 @@ public partial class AgentChatWindow : Window, INotifyPropertyChanged
                 log.Append($"남은 레이아웃 위반 {run.RemainingIssues.Count}건\n")
                    .Append(string.Join("\n", run.RemainingIssues.Select(i => "- " + i.Message))).Append('\n');
             ConversationText = log.ToString();
-            var usage = _agentWorkflow.Session?.Usage;
             SetStatus(run.Reason switch
             {
                 AgentStopReason.Finished or AgentStopReason.AnsweredWithoutTools =>
                     "완료 · 미리보기를 확인하고 '결과 저장' 또는 후속 요청을 해 주세요.",
                 AgentStopReason.TurnLimit => "턴 상한에 도달해 멈췄습니다 · 이어서 요청하거나 결과를 확인해 주세요.",
                 _ => "토큰 상한에 도달해 멈췄습니다."
-            } + $" · {run.Turns}턴 · 누적 {usage?.TotalTokens ?? 0:N0}토큰");
+            } + $" · {run.Turns}턴");
+            if (_agentResult.UsageByModel is { Count: > 0 } byModel)
+                log.Append("LLM 사용: ").Append(UsageMeter.Describe(byModel)).Append('\n');
+            ConversationText = log.ToString();
         }
         catch (OperationCanceledException) { SetStatus("작업을 중단했습니다. 지금까지의 변경은 작업 사본에 남아 있습니다."); }
         catch (LlmException ex) { SetStatus(ToUserMessage(ex) + " · 작업 사본은 유지됩니다. 다시 요청하면 이어갑니다."); }

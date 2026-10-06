@@ -12,7 +12,8 @@ public sealed record AgentTurnResult(
     AgentRunResult Run,
     IReadOnlyList<string> BeforeThumbnails,
     IReadOnlyList<string> AfterThumbnails,
-    IReadOnlyList<string> Changes);
+    IReadOnlyList<string> Changes,
+    IReadOnlyDictionary<string, (int Calls, LlmUsage Usage)>? UsageByModel = null);
 
 /// <summary>
 /// 채팅창과 도구 루프 사이. 대상 PPT마다 세션(작업 사본 + 대화)을 하나 두고, 같은 대상에 대한 후속 요청은
@@ -23,6 +24,8 @@ public sealed class AgentWorkflow(
     : IDisposable
 {
     private readonly List<string> _attached = new();
+    private UsageMeter? _meter;
+    private MeteredLlmClient? _metered;
 
     public AgentSession? Session { get; private set; }
 
@@ -71,7 +74,17 @@ public sealed class AgentWorkflow(
         sourcePath = Path.GetFullPath(sourcePath);
         if (Session is not null && !string.Equals(Session.SourcePath, sourcePath, StringComparison.OrdinalIgnoreCase))
             Discard();
-        Session ??= AgentFactory.StartSession(llm, options, ppt, sourcePath);
+        if (Session is null)
+        {
+            // 세션의 모든 LLM 호출(루프·요약·문안·길이 맞춤·이미지)을 모델별로 센다.
+            _meter = new UsageMeter();
+            _metered = new MeteredLlmClient(llm, _meter, options?.Model ?? "auto");
+            Session = AgentFactory.StartSession(_metered, options, ppt, sourcePath);
+            Session.Context.Meter = _meter;
+        }
+        var meterBefore = _meter!.Snapshot();
+        Session.Context.Status = progress is null ? null
+            : new Progress<string>(text => progress.Report(new AgentEvent(AgentEventKind.Message, text)));
 
         bool hasSources = _attached.Count > 0;
         var scoped = hasSources ? library.WithScope(_attached) : null;
@@ -80,13 +93,14 @@ public sealed class AgentWorkflow(
             ? instruction
             : $"{instruction}\n\n(첨부 원문: {string.Join(", ", scoped.Documents().Select(d => $"{d.Alias}={d.Name}"))})";
 
-        var run = await AgentFactory.CreateLoop(llm, options, hasSources, LoopOptions).RunAsync(Session, request, progress, ct);
+        var run = await AgentFactory.CreateLoop(_metered!, options, hasSources, LoopOptions).RunAsync(Session, request, progress, ct);
 
         var touched = Session.Context.Origins.Touched.ToHashSet();
         var after = touched.Count == 0 ? [] : await renderer.RenderSlidesAsync(Session.WorkingPath, touched, ct);
         var originals = touched.Select(Session.Context.Origins.OriginalIndexOf).ToHashSet();
         var before = originals.Count == 0 ? [] : await renderer.RenderSlidesAsync(sourcePath, originals, ct);
-        return new AgentTurnResult(run, before, after, Session.Context.Changes.ToList());
+        return new AgentTurnResult(run, before, after, Session.Context.Changes.ToList(),
+            UsageMeter.Delta(meterBefore, _meter.Snapshot()));
     }
 
     /// <summary>작업 사본을 원본 옆 결과 파일로 남기고 세션을 끝낸다. 결과 파일 경로를 돌려준다.</summary>
