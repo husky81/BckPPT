@@ -508,7 +508,11 @@ public static class PptAgentTools
         // 모델이 요약해 넘긴 문장보다 사용자 원문이 정확하다. 원문이 있으면 그것으로 사양을 뽑는다.
         string request = ctx.UserRequest is { Length: > 0 } original ? original
             : ToolArgs.OptionalString(args, "request") ?? throw new AgentToolException("request(사용자 요청)가 필요합니다.");
-        return await new Cards.CardPipeline(ctx).RunFromRequestAsync(request, ct);
+        var report = await new Cards.CardPipeline(ctx).RunFromRequestAsync(request, ct);
+        // 파이프라인 뒤에 qwen 루프가 남은 위반을 고치게 두면 이름·패널·문구를 망쳤다(실행 11, 35만 토큰).
+        // 결과를 그대로 사용자에게 보여주고 끝낸다. 추가 수정은 사용자가 짚어서 요청한다.
+        ctx.FinishSummary = "카드 작성을 마쳤습니다. 남은 위반이 있으면 상자를 짚어 후속 요청해 주세요.\n" + report;
+        return report;
     }
 
     /// <summary>요점 정리에 넘길 절을 찾는 질의. 국가 R&D 기획보고서의 공통 절 이름이다.</summary>

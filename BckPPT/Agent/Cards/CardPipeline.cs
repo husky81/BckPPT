@@ -54,6 +54,7 @@ public sealed class CardPipeline(AgentToolContext ctx)
 
         // 1. 템플릿 구조와 예산
         Status("템플릿 카드 구조를 읽는 중");
+        _templateSlide = job.TemplateSlide;
         var templateShapes = await Task.Run(() => ppt.ListShapes(path, job.TemplateSlide), ct);
         var template = CardLayoutAnalyzer.Analyze(templateShapes);
         if (template.Cards.Count == 0)
@@ -66,6 +67,17 @@ public sealed class CardPipeline(AgentToolContext ctx)
         var budgets = new List<TextBudget>();
         foreach (var section in model.Sections)
             budgets.Add(TextBudget.Measure(section.Role, section.Label, await Lines(job.TemplateSlide, section.Body, ct)));
+        // 판정은 같은 자리 템플릿 카드와 비교하므로(Id가 같다) 길이 맞춤도 자리별 예산을 쓴다.
+        // 1번 카드 예산만 쓰니 3번 자리 문제점(템플릿 3줄)에 4줄이 들어가 위반으로 남았다(실행 11).
+        var positionBudgets = new List<(TextBudget Title, IReadOnlyList<TextBudget> Sections)>();
+        foreach (var card in template.Cards)
+        {
+            var title = card.Title is null ? titleBudget : TextBudget.Measure("title", "제목", await Lines(job.TemplateSlide, card.Title, ct));
+            var sections = new List<TextBudget>();
+            foreach (var section in card.Sections)
+                sections.Add(TextBudget.Measure(section.Role, section.Label, await Lines(job.TemplateSlide, section.Body, ct)));
+            positionBudgets.Add((title, sections));
+        }
         var sample = await SampleAsync(job.TemplateSlide, model, ct);
         int maxCards = template.Cards.Count;
         var tooMany = job.Slides.Select((s, i) => (s, i)).Where(x => x.s.Cards.Count > maxCards).ToList();
@@ -91,6 +103,7 @@ public sealed class CardPipeline(AgentToolContext ctx)
             int slide = await Task.Run(() => ppt.DuplicateSlide(path, job.TemplateSlide, insertAfter), ct);
             ctx.Origins.RecordDuplicate(job.TemplateSlide, slide);
             if (job.TemplateSlide > insertAfter) job = job with { TemplateSlide = job.TemplateSlide + 1 };
+            _templateSlide = job.TemplateSlide;
             insertAfter = slide;
 
             var layout = CardLayoutAnalyzer.Analyze(await Task.Run(() => ppt.ListShapes(path, slide), ct));
@@ -105,8 +118,11 @@ public sealed class CardPipeline(AgentToolContext ctx)
                 var card = layout.Cards[c];
                 var cardSpec = spec.Cards[c];
                 var draft = drafts.FirstOrDefault(d => d.Number == cardSpec.Number) ?? drafts.ElementAtOrDefault(allCards.IndexOf(cardSpec));
-                filled.AddRange(await FillCardAsync(slide, c + 1, card, cardSpec, draft, titleBudget, budgets, ct));
+                var (positionTitle, positionSections) = positionBudgets[Math.Min(c, positionBudgets.Count - 1)];
+                filled.AddRange(await FillCardAsync(slide, c + 1, card, cardSpec, draft, positionTitle,
+                    positionSections.Count > 0 ? positionSections : budgets, ct));
             }
+            await UnifySpacingAsync(slide, template, ct);
             ctx.Changes.Add($"{slide}쪽 카드 {string.Join("·", spec.Cards.Select(x => x.Number))} 작성");
             report.Append($"{slide}쪽: 카드 {string.Join("·", spec.Cards.Select(x => x.Number))}\n");
         }
@@ -276,8 +292,9 @@ public sealed class CardPipeline(AgentToolContext ctx)
         // 템플릿 패널의 오른쪽 끝에 맞춘다(카드를 줄인 쪽도 범례 위치는 같게).
         var panel = template.Panel ?? layout.Panel;
         if (panel is null) return;
-        float top = layout.Header?.Top ?? panel.Top - 24;
         float height = layout.Header?.Height ?? 20;
+        // 머리말과 같은 줄에 두되 패널과 겹치지 않게 패널 바로 위에서 끝낸다(겹침 판정 대상).
+        float top = Math.Min(layout.Header?.Top ?? float.MaxValue, panel.Top - height - 1);
         var request = new TextShapeRequest(legend, panel.Left, top, 200, height, "범례", TextShapeKind.RoundedRectangle,
             FillColor: "#3B3B3B", FontSize: 9, Bold: true, FontColor: "#FFFFFF", AutoWidth: true, RightEdge: panel.Left + panel.Width);
         string name = await Task.Run(() => ctx.Ppt.AddTextShape(ctx.WorkingPath, slide, request), ct);
@@ -344,6 +361,38 @@ public sealed class CardPipeline(AgentToolContext ctx)
     public static bool Violates(IReadOnlyList<TextLineInfo> lines, TextBudget budget) =>
         lines.Count > budget.Lines ||
         LayoutLint.Segments(lines).Any(s => s.Count >= 2 && s[^1].Text.Trim().Length is > 0 and <= 4);
+
+    /// <summary>
+    /// 같은 역할 본문 상자의 자간을 템플릿 다수 값으로 맞춘다. 착수보고 33쪽 1번 카드 개요만 자간 -1.5였고,
+    /// 채운 뒤에도 그대로 남아 서식 이탈로 지적됐다(2026-10-06 사례와 실행 11).
+    /// </summary>
+    private async Task UnifySpacingAsync(int slide, SlideCards template, CancellationToken ct)
+    {
+        var layout = CardLayoutAnalyzer.Analyze(await Task.Run(() => ctx.Ppt.ListShapes(ctx.WorkingPath, slide), ct));
+        foreach (var role in template.Cards.SelectMany(c => c.Sections).Select(s => s.Role).Distinct())
+        {
+            var templateSpacing = new List<float>();
+            foreach (var body in template.Cards.SelectMany(c => c.Sections).Where(s => s.Role == role).Select(s => s.Body))
+            {
+                try { templateSpacing.Add((await Task.Run(() => ctx.Ppt.GetTextFormat(ctx.WorkingPath, _templateSlide, CardLayoutAnalyzer.Addr(body)), ct)).Spacing); }
+                catch (OperationCanceledException) { throw; }
+                catch { }
+            }
+            var groups = templateSpacing.GroupBy(x => x).OrderByDescending(g => g.Count()).ToList();
+            if (groups.Count < 2 || groups[0].Count() == groups[1].Count()) continue;   // 과반이 없으면 손대지 않는다
+            float majority = groups[0].Key;
+            foreach (var body in layout.Cards.SelectMany(c => c.Sections).Where(s => s.Role == role).Select(s => s.Body))
+            {
+                string address = CardLayoutAnalyzer.Addr(body);
+                var format = await Task.Run(() => ctx.Ppt.GetTextFormat(ctx.WorkingPath, slide, address), ct);
+                if (Math.Abs(format.Spacing - majority) > 0.05f)
+                    await Task.Run(() => ctx.Ppt.SetTextFormat(ctx.WorkingPath, slide, address, new TextFormatPatch(Spacing: majority)), ct);
+            }
+        }
+    }
+
+    /// <summary>작업 사본에서 템플릿 슬라이드의 현재 번호. 앞에 쪽을 끼우면 밀린다.</summary>
+    private int _templateSlide;
 
     // ── 도우미 ─────────────────────────────────────────────────
 
