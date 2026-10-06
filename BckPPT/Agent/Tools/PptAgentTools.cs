@@ -109,10 +109,10 @@ public static class PptAgentTools
                     "source", "after"), true, NewBlankSlide),
             new("draw_schedule",
                 "일정 md(구분 ## 1. …, 하위 ### …, | 항목 | 시작 | 끝 | 표, 마일스톤은 번호 없는 ## 아래 | 이름 | 시점 |)로 일정표를 그린다. " +
-                "style: table(단계·항목·기간 칸+막대) 또는 gantt(막대 옆에 항목 이름). slide를 주면 그 슬라이드에, 아니면 template_slide를 after 뒤에 빈 슬라이드로 복제해 그린다. " +
+                "style: table(단계·항목·기간 칸+막대), gantt(막대 옆에 항목 이름), inbar(막대 안에 항목 이름). slide를 주면 그 슬라이드에, 아니면 template_slide를 after 뒤에 빈 슬라이드로 복제해 그린다. " +
                 "md에는 내용을, md_path에는 파일 경로를 준다",
                 Schema("""
-                    {"md": {"type": "string"}, "md_path": {"type": "string"}, "style": {"type": "string", "enum": ["table", "gantt"]},
+                    {"md": {"type": "string"}, "md_path": {"type": "string"}, "style": {"type": "string", "enum": ["table", "gantt", "inbar"]},
                      "slide": {"type": "integer"}, "template_slide": {"type": "integer"}, "after": {"type": "integer"}, "title": {"type": "string"},
                      "left": {"type": "number"}, "top": {"type": "number"}, "width": {"type": "number"}, "height": {"type": "number"},
                      "palette": {"type": "array", "items": {"type": "string"}}, "accent": {"type": "string"}}
@@ -697,7 +697,12 @@ public static class PptAgentTools
         var area = ScheduleAreaFrom(args);
         var palette = args.TryGetProperty("palette", out _) ? ToolArgs.StringArray(args, "palette") : null;
         var options = new Schedule.ScheduleOptions(
-            ToolArgs.OptionalString(args, "style")?.ToLowerInvariant() == "gantt" ? Schedule.ScheduleStyle.Gantt : Schedule.ScheduleStyle.Table,
+            ToolArgs.OptionalString(args, "style")?.ToLowerInvariant() switch
+            {
+                "gantt" => Schedule.ScheduleStyle.Gantt,
+                "inbar" or "in_bar" => Schedule.ScheduleStyle.InBar,
+                _ => Schedule.ScheduleStyle.Table,
+            },
             area, palette, Accent: ToolArgs.OptionalString(args, "accent") ?? "#E46C0A");
         var result = await Task.Run(() => new Schedule.ScheduleRenderer(ctx.Ppt, ctx.WorkingPath).Draw(slide, doc, options), ct);
         ctx.Origins.MarkTouched(slide);

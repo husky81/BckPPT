@@ -54,6 +54,10 @@ public sealed class AgentSession : IDisposable
         if (!File.Exists(sourcePath)) throw new FileNotFoundException("대상 PPT 파일을 찾을 수 없습니다.", sourcePath);
         workDirectory ??= DefaultWorkDirectory;
         Directory.CreateDirectory(workDirectory);
+        // 끊긴 세션이 창 없이 남긴 사본·원본을 먼저 닫는다. 남아 있으면 PowerPoint가 느려져 같은 단계에서 또 시간 초과가 났다.
+        IReadOnlyList<string> orphans = [];
+        try { orphans = ppt.CloseOrphanedPresentations(workDirectory, [sourcePath]); }
+        catch { /* 정리는 보조 작업이다. 실패해도 새 작업은 시작한다. */ }
         var stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
         var workingPath = Path.Combine(workDirectory,
             $"{Path.GetFileNameWithoutExtension(sourcePath)}_작업_{stamp}_{Guid.NewGuid().ToString("N")[..6]}{Path.GetExtension(sourcePath)}");
@@ -78,6 +82,7 @@ public sealed class AgentSession : IDisposable
             session._openHandles.Add(ppt.KeepOpen(sourcePath, readOnly: true));
         }
         catch (Exception ex) { log.Write("keep_open_failed", new { ex.Message }); }
+        if (orphans.Count > 0) log.Write("closed_orphans", orphans);
         log.Write("start", new { source = sourcePath, working = workingPath });
         session.Append(LlmMessage.System(systemPrompt));
         return session;

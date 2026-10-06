@@ -130,6 +130,22 @@ public sealed class ScheduleTests
     }
 
     [Fact]
+    public void 막대_안_이름형은_들어가면_막대_안에_안_들어가면_옆에_쓴다()
+    {
+        var ppt = new FakePptComService();
+        ppt.Slides.Add([]);
+        new ScheduleRenderer(ppt, "work.pptx").Draw(1, ScheduleMarkdown.Parse(Md), new ScheduleOptions(ScheduleStyle.InBar));
+
+        var requests = ppt.Slides[0].Select(s => s.Spec).OfType<TextShapeRequest>().ToList();
+        var inside = requests.Single(r => r.Text == "세부 연구내용 작성");                       // 두 달짜리 막대
+        Assert.Equal(TextShapeKind.RoundedRectangle, inside.Kind);
+        Assert.Equal(TextAlign.Center, inside.Align);
+        Assert.Equal("#FFFFFF", inside.FontColor);
+        var outside = requests.Single(r => r.Text == "동향조사");                               // 한 달짜리 막대: 7월 칸이 좁으면 옆에
+        Assert.True(outside.Kind == TextShapeKind.RoundedRectangle || outside.AutoWidth);
+    }
+
+    [Fact]
     public async Task 일정표_도구는_빈_새_쪽을_만들어_그린다()
     {
         var ppt = new FakePptComService();

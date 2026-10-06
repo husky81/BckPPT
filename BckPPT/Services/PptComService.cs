@@ -886,7 +886,44 @@ public class PptComService : IPptComService
             return true;
         });
         if (opened && !readOnly) lock (KeptOpen) KeptOpen.Add(presentationPath);
+        if (opened) lock (HeldOpen) HeldOpen.Add(presentationPath);
         return new OpenHandle(opened ? presentationPath : null);
+    }
+
+    /// <summary>이 프로세스가 KeepOpen으로 열어 둔 문서(읽기 전용 포함). 정리할 때 건드리지 않는다.</summary>
+    private static readonly HashSet<string> HeldOpen = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// 끊긴 세션이 창 없이 남긴 문서를 저장하지 않고 닫는다. 대상은 작업 폴더 안의 사본과 <paramref name="alsoPaths"/>(새 작업의 원본)뿐이고,
+    /// 창이 있는 문서(사용자가 연 것)와 이 프로세스가 열어 둔 문서는 두지 않고 건너뛴다.
+    /// 시간 초과로 끊긴 실행의 사본 4개와 원본 2개가 남아 다음 실행이 같은 단계에서 또 45초를 넘겼다(2026-10-07).
+    /// </summary>
+    public IReadOnlyList<string> CloseOrphanedPresentations(string workDirectory, IEnumerable<string> alsoPaths)
+    {
+        var extra = new HashSet<string>(alsoPaths.Select(Path.GetFullPath), StringComparer.OrdinalIgnoreCase);
+        string work = Path.TrimEndingDirectorySeparator(Path.GetFullPath(workDirectory)) + Path.DirectorySeparatorChar;
+        return RunOnSta(() =>
+        {
+            var closed = new List<string>();
+            if (TryGetActiveInstance() is not { } app) return (IReadOnlyList<string>)closed;
+            var presentations = new List<dynamic>();
+            foreach (dynamic prs in app.Presentations) presentations.Add(prs);
+            foreach (dynamic prs in presentations)
+            {
+                try
+                {
+                    string path = (string)prs.FullName;
+                    if ((int)prs.Windows.Count > 0) continue;
+                    lock (HeldOpen) if (HeldOpen.Contains(path)) continue;
+                    if (!path.StartsWith(work, StringComparison.OrdinalIgnoreCase) && !extra.Contains(path)) continue;
+                    prs.Saved = MsoTrue;   // 묻지 않고, 저장하지 않고 닫는다
+                    prs.Close();
+                    closed.Add(Path.GetFileName(path));
+                }
+                catch { }
+            }
+            return (IReadOnlyList<string>)closed;
+        });
     }
 
     /// <summary>
@@ -912,6 +949,7 @@ public class PptComService : IPptComService
             if (Interlocked.Exchange(ref _path, null) is not { } path) return;
             bool deferred;
             lock (KeptOpen) deferred = KeptOpen.Remove(path);
+            lock (HeldOpen) HeldOpen.Remove(path);
             try
             {
                 RunOnSta(() =>

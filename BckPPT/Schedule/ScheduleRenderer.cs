@@ -9,6 +9,8 @@ public enum ScheduleStyle
     Table,
     /// <summary>단계 | 월 눈금. 항목 이름을 막대 옆에 적는다(착수보고 43쪽 형태). 눈금 칸이 넓다.</summary>
     Gantt,
+    /// <summary>단계 | 월 눈금. 항목 이름을 두꺼운 막대 안에 적는다. 막대가 짧아 안 들어가면 옆에 적는다.</summary>
+    InBar,
 }
 
 /// <summary>그릴 영역(pt). 없으면 16:9(960×540) 슬라이드의 제목 아래 본문 영역.</summary>
@@ -62,6 +64,7 @@ public sealed class ScheduleRenderer(IPptComService ppt, string presentationPath
         foreach (var m in doc.MilestoneGroups) rows.Add(new BodyRow(RowKind.Milestones, -1, 0, null, m));
 
         bool table = options.Style == ScheduleStyle.Table;
+        bool inBar = options.Style == ScheduleStyle.InBar;
         bool hasSub = doc.Groups.Any(g => g.HasSubsections);
 
         // ── 열 ──
@@ -198,9 +201,28 @@ public sealed class ScheduleRenderer(IPptComService ppt, string presentationPath
             {
                 var task = row.Task!;
                 float x1 = X(task.Start), x2 = Math.Max(X(task.End.AddDays(1)), x1 + 3f);
-                float barH = Math.Min(table ? 9f : 8f, h * 0.45f);
                 string color = palette[row.Group % palette.Count];
-                overlay.Add(new TextShapeRequest("", x1, mid - barH / 2, x2 - x1, barH, Next(), TextShapeKind.RoundedRectangle, color));
+                if (inBar)
+                {
+                    // 이름을 막대 안에 쓴다. 안 들어가면 글자를 6.5pt까지 줄이고, 그래도 안 되면 막대 옆에 쓴다.
+                    float barH = h * 0.78f, barW = x2 - x1;
+                    // 어림은 실제 글꼴보다 좁게 나와 두 줄로 넘친 막대가 있었다(2026-10-07). 10% 여유를 둔다.
+                    bool Fits(float sz) => Estimate(task.Name, sz) * 1.1f + 8f <= barW;
+                    float size = font;
+                    while (size > 6.5f && !Fits(size)) size -= 0.5f;
+                    if (Fits(size))
+                    {
+                        overlay.Add(new TextShapeRequest(task.Name, x1, mid - barH / 2, barW, barH, Next(), TextShapeKind.RoundedRectangle, color,
+                            FontName: options.FontName, FontSize: size, FontColor: "#FFFFFF", Padding: 3f, Align: TextAlign.Center));
+                        continue;
+                    }
+                    overlay.Add(new TextShapeRequest("", x1, mid - barH / 2, barW, barH, Next(), TextShapeKind.RoundedRectangle, color));
+                }
+                else
+                {
+                    float barH = Math.Min(table ? 9f : 8f, h * 0.45f);
+                    overlay.Add(new TextShapeRequest("", x1, mid - barH / 2, x2 - x1, barH, Next(), TextShapeKind.RoundedRectangle, color));
+                }
                 if (!table)
                 {
                     // 이름은 막대 오른쪽, 자리가 없으면 왼쪽.
@@ -235,7 +257,7 @@ public sealed class ScheduleRenderer(IPptComService ppt, string presentationPath
 
         var firstStart = periods[0].Start; var lastP = periods[^1];
         string unit = periods[0].Label.EndsWith('Q') ? "분기" : "월";
-        string summary = $"일정표({(table ? "표형" : "간트형")}): 구분 {doc.Groups.Count}개·항목 {doc.AllTasks.Count()}개·마일스톤 {doc.MilestoneGroups.Sum(m => m.Milestones.Count)}개, " +
+        string summary = $"일정표({(table ? "표형" : inBar ? "막대 안 이름형" : "간트형")}): 구분 {doc.Groups.Count}개·항목 {doc.AllTasks.Count()}개·마일스톤 {doc.MilestoneGroups.Sum(m => m.Milestones.Count)}개, " +
                          $"{firstStart:yyyy-MM}~{lastP.End.AddDays(-1):yyyy-MM}({unit} {periods.Count}칸). 표 '{layout.Name}', 막대·표시 {names.Count}개, 그룹 '{groupName}'";
         return new ScheduleResult(groupName, layout.Name, rows.Count, periods.Count, names.Count, summary);
     }

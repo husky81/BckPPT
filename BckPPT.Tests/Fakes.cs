@@ -239,6 +239,13 @@ public sealed class FakePptComService : IPptComService
 
     public Task<string?> GetSlideThumbnailAsync(string presentationPath, int slideIndex) => Task.FromResult<string?>(null);
 
+    public List<string> Orphans { get; } = new();
+    public IReadOnlyList<string> CloseOrphanedPresentations(string workDirectory, IEnumerable<string> alsoPaths)
+    {
+        Calls.Add($"close_orphans {workDirectory}");
+        var closed = Orphans.ToList(); Orphans.Clear(); return closed;
+    }
+
     // ── 에이전트 도구가 쓰지 않는 멤버 ──
     public IReadOnlyList<PptPresentation> GetOpenPresentations() => [];
     public MarkdownExportResult ExportMarkdown(string presentationPath, string outputPath, CancellationToken cancellationToken = default) => throw new NotSupportedException();

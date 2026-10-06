@@ -29,6 +29,8 @@ public interface IPptComService
 
     /// <summary>문서를 창 없이 열어 두고 핸들을 해제하면 닫는다. 이미 열린 문서는 그대로 둔다.</summary>
     IDisposable KeepOpen(string presentationPath, bool readOnly);
+    /// <summary>끊긴 세션이 창 없이 남긴 문서(작업 폴더의 사본, alsoPaths)를 저장하지 않고 닫는다. 닫은 파일 이름을 돌려준다.</summary>
+    IReadOnlyList<string> CloseOrphanedPresentations(string workDirectory, IEnumerable<string> alsoPaths);
 
     /// <summary>슬라이드 번호와 제목만 빠르게 읽는다(도형 측정 없음).</summary>
     IReadOnlyList<(int Index, string Title)> ListSlides(string presentationPath);

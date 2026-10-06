@@ -35,6 +35,18 @@ public sealed class AgentLoopTests : IDisposable
         new(llm, AgentFactory.CreateRegistry(includeSources: false), options ?? new AgentLoopOptions());
 
     [Fact]
+    public void 새_작업은_끊긴_세션이_남긴_문서를_먼저_닫고_기록한다()
+    {
+        _ppt.Orphans.Add("이전_작업_사본.pptx");
+        string logPath;
+        using (var session = StartSession()) logPath = session.Log.FilePath;
+
+        Assert.Contains(_ppt.Calls, c => c.StartsWith("close_orphans "));
+        Assert.Empty(_ppt.Orphans);
+        Assert.Contains("closed_orphans", File.ReadAllText(logPath));
+    }
+
+    [Fact]
     public async Task 복제하고_문단을_바꾼_뒤_끝낸다()
     {
         var llm = new FakeLlmClient(
