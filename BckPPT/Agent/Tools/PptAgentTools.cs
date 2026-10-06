@@ -54,6 +54,10 @@ public static class PptAgentTools
                        "properties": {"shape": {"type": "string"}, "paragraphs": {"type": "array", "items": {"type": "string"}}},
                        "required": ["shape", "paragraphs"]}}}
                     """, "slide", "items"), true, SetTexts),
+            new("remove_blank_lines",
+                "슬라이드들의 글 상자에서 빈 줄(빈 문단)과 상자 끝에 남은 Enter를 지운다. '공백줄·빈 줄·빈 칸 삭제' 요청에 쓴다. 상자를 몰라도 슬라이드 번호만 주면 된다",
+                Schema("""{"from_slide": {"type": "integer"}, "to_slide": {"type": "integer", "description": "없으면 from_slide 한 쪽"}}""", "from_slide"),
+                true, RemoveBlankLines),
             new("set_geometry", "도형 위치·크기(pt)를 바꾼다. 준 값만 바뀐다",
                 Schema("{" + SlideShape + """, "left": {"type": "number"}, "top": {"type": "number"}, "width": {"type": "number"}, "height": {"type": "number"}}""",
                     "slide", "shape"), true, SetGeometry),
@@ -308,6 +312,63 @@ public static class PptAgentTools
             ctx.Changes.Add($"{slide}쪽 도형 {done.Count}개 이름 변경");
         }
         return $"{done.Count}개 이름을 바꿨습니다." + (failed.Count == 0 ? "" : "\n실패:\n" + string.Join("\n", failed));
+    }
+
+    /// <summary>
+    /// 빈 문단과 상자 끝 Enter를 지운다. 끝 Enter는 화면에서 보이지 않고 COM 문단 수에도 안 잡혀,
+    /// "38~41쪽 공백줄 삭제해줘"에 모델이 무엇을 지울지 몰라 되묻기만 했다(2026-10-07).
+    /// </summary>
+    private static async Task<string> RemoveBlankLines(AgentToolContext ctx, JsonElement args, CancellationToken ct)
+    {
+        int from = ToolArgs.Int(args, "from_slide"), to = ToolArgs.OptionalInt(args, "to_slide") ?? from;
+        if (to < from) (from, to) = (to, from);
+        var report = new StringBuilder();
+        int total = 0;
+        for (int slide = from; slide <= to; slide++)
+        {
+            var shapes = await Task.Run(() => ctx.Ppt.ListShapes(ctx.WorkingPath, slide), ct);
+            var edits = new List<ParagraphEdit>();
+            int count = 0;
+            foreach (var shape in shapes.Where(s => s.HasText))
+            {
+                var info = await Task.Run(() => ctx.Ppt.GetShapeInfo(ctx.WorkingPath, slide, shape.Address), ct);
+                if (info is null || string.IsNullOrWhiteSpace(info.FullText)) continue;
+                var plan = BlankLinePlan(slide, shape.Address, info.FullText);
+                if (plan.Removed == 0) continue;
+                edits.AddRange(plan.Edits);
+                count += plan.Removed;
+            }
+            if (edits.Count == 0) continue;
+            var result = await Task.Run(() => ctx.Ppt.SetParagraphTexts(ctx.WorkingPath, edits, markRed: false), ct);
+            ctx.Origins.MarkTouched(slide);
+            ctx.Changes.Add($"{slide}쪽 빈 줄 {count}개 삭제");
+            report.Append($"{slide}쪽: 빈 줄 {count}개 삭제\n");
+            foreach (var failure in result.Failures) report.Append("  실패: " + failure + "\n");
+            total += count;
+        }
+        return total == 0 ? $"{from}~{to}쪽에 지울 빈 줄이 없습니다." : report.ToString();
+    }
+
+    /// <summary>
+    /// 상자 텍스트에서 지울 빈 문단 편집. 빈 문단은 Delete로, 끝 Enter는 첫 문단을 그대로 다시 써서
+    /// SetParagraphTexts의 끝 Enter 정리를 태운다. 상자가 통째로 비면 건드리지 않는다.
+    /// </summary>
+    public static (IReadOnlyList<ParagraphEdit> Edits, int Removed) BlankLinePlan(int slide, string address, string fullText)
+    {
+        var parts = fullText.Split('\r');
+        bool trailing = parts.Length > 1 && parts[^1].Length == 0;
+        int countable = trailing ? parts.Length - 1 : parts.Length;     // COM이 세는 문단
+        int trailingBlanks = 0;
+        for (int i = countable - 1; i >= 0 && string.IsNullOrWhiteSpace(parts[i]); i--) trailingBlanks++;
+        if (trailingBlanks == countable) return ([], 0);
+        var edits = new List<ParagraphEdit>();
+        for (int i = 0; i < countable; i++)
+            if (string.IsNullOrWhiteSpace(parts[i]))
+                edits.Add(new ParagraphEdit(slide, address, i + 1, "", ParagraphEditKind.Delete));
+        int removed = edits.Count + (trailing ? 1 : 0);
+        if (trailing && edits.Count == 0)
+            edits.Add(new ParagraphEdit(slide, address, 1, parts[0]));
+        return (edits, removed);
     }
 
     private static async Task<string> FillAsync(

@@ -2,6 +2,7 @@ using System.IO;
 using BckPPT.Agent;
 using BckPPT.Agent.Tools;
 using BckPPT.Llm;
+using BckPPT.Models;
 
 namespace BckPPT.Tests;
 
@@ -319,6 +320,22 @@ public sealed class AgentLoopTests : IDisposable
 
 public class ToolArgumentTests
 {
+    [Fact]
+    public void 빈_문단과_끝_Enter를_지울_편집을_만든다()
+    {
+        var (edits, removed) = PptAgentTools.BlankLinePlan(3, "본문", "가\r\r나\r \r다\r");
+        Assert.Equal(3, removed);                                                // 빈 문단 2 + 끝 Enter 1
+        Assert.Equal([2, 4], edits.Select(e => e.ParagraphIndex));
+        Assert.All(edits, e => Assert.Equal(ParagraphEditKind.Delete, e.Kind));
+
+        var (onlyTrailing, n) = PptAgentTools.BlankLinePlan(3, "제목", "AI 기반 TBM 기술\r");
+        Assert.Equal(1, n);                                                      // 첫 문단을 그대로 다시 써서 끝 Enter 정리를 태운다
+        Assert.Equal(ParagraphEditKind.Replace, Assert.Single(onlyTrailing).Kind);
+
+        Assert.Equal(0, PptAgentTools.BlankLinePlan(3, "빈", "\r\r").Removed);    // 통째로 빈 상자는 두고
+        Assert.Equal(0, PptAgentTools.BlankLinePlan(3, "본문", "가\r나").Removed);
+    }
+
     [Theory]
     [InlineData("216*4", 864f)]
     [InlineData("32 + 236", 268f)]
