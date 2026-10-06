@@ -1,5 +1,11 @@
 ﻿# 아이디어
 
+## 2026-10-06
+- docs/plans/bckppt-tool-loop-agent.md <!-- oky:source:document -->
+
+## 2026-10-06 18:06 · 
+- docs/plans/bckppt-tool-loop-agent.md <!-- oky:source:document -->
+
 ## 2026-09-15 14:22 · 
 - docs/plans/cellbox-tray-plugin.md <!-- oky:source:document -->
 
