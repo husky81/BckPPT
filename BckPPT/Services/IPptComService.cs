@@ -70,6 +70,7 @@ public interface IPptComService
     IReadOnlyList<TextLineInfo> GetTextLineBreaks(string presentationPath, int slideIndex, string shapeName);
 
     // 아래 도형 API의 address는 ShapeAddress 규약("이름", "이름#2", "그룹/이름")을 따른다.
+    // 그룹 이름도 받는다(그룹 통째로 지우기·옮기기). 같은 이름의 그룹 안 도형이 있으면 그 도형이 먼저다.
     // 위의 shapeName 인자들도 같은 규약을 받으며 그룹 안 도형까지 찾는다.
 
     /// <summary>그룹 안까지 펼친 도형 목록. 겹치는 이름은 주소에 "#n"이 붙는다.</summary>
@@ -78,6 +79,16 @@ public interface IPptComService
     void   SetShapeGeometry(string presentationPath, int slideIndex, string address, ShapeGeometry geometry);
     void   DeleteShape(string presentationPath, int slideIndex, string address);
     string AddTextShape(string presentationPath, int slideIndex, TextShapeRequest request);
+    /// <summary>여러 도형을 한 번에 추가한다(문서 열기·저장 한 번). 만든 이름을 순서대로 돌려준다.</summary>
+    IReadOnlyList<string> AddTextShapes(string presentationPath, int slideIndex, IReadOnlyList<TextShapeRequest> requests);
+    string AddLine(string presentationPath, int slideIndex, LineRequest request);
+    TableLayout AddTable(string presentationPath, int slideIndex, TableRequest request);
+    /// <summary>최상위 도형들을 그룹으로 묶고 그룹 이름을 돌려준다. 그룹 안 도형은 묶을 수 없다.</summary>
+    string GroupShapes(string presentationPath, int slideIndex, IReadOnlyList<string> addresses, string? name);
+    /// <summary>그룹을 풀고 풀린 도형 이름을 돌려준다.</summary>
+    IReadOnlyList<string> UngroupShape(string presentationPath, int slideIndex, string address);
+    /// <summary>keep에 든 도형(이름·주소)만 남기고 최상위 도형을 모두 지운다. 지운 수를 돌려준다.</summary>
+    int ClearSlide(string presentationPath, int slideIndex, IReadOnlyCollection<string> keep);
     int    SetTextColor(string presentationPath, int slideIndex, string address, string find, string color);
     void   SetTextFormat(string presentationPath, int slideIndex, string address, TextFormatPatch patch);
     TextFormatInfo GetTextFormat(string presentationPath, int slideIndex, string address);

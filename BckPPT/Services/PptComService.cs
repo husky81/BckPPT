@@ -123,13 +123,44 @@ public class PptComService : IPptComService
             {
                 try { if ((int)shape.Id == id) return shape; } catch { }
             }
+            List<(dynamic Shape, IReadOnlyList<string> Path)> idGroups = GroupsWithPath(slide.Shapes);
+            foreach (var entry in idGroups)
+            {
+                try { if ((int)entry.Shape.Id == id) return entry.Shape; } catch { }
+            }
             return null;
         }
         var candidates = shapes
             .Select(s => (s.Path, (string)s.Shape.Name))
             .ToList();
         int index = address.Select(candidates);
-        return index < 0 ? null : shapes[index].Shape;
+        if (index >= 0) return shapes[index].Shape;
+
+        // 그룹 자체. 펼친 목록에는 그룹이 없어 그룹 이름으로 지우려 하면 "찾지 못함"이 났다(2026-10-07 일정표 작업).
+        List<(dynamic Shape, IReadOnlyList<string> Path)> groups = GroupsWithPath(slide.Shapes);
+        if (address.Id is null)
+        {
+            int g = address.Select(groups.Select(x => (x.Path, (string)x.Shape.Name)).ToList());
+            if (g >= 0) return groups[g].Shape;
+        }
+        return null;
+    }
+
+    private static List<(dynamic Shape, IReadOnlyList<string> Path)> GroupsWithPath(
+        dynamic shapeCollection, IReadOnlyList<string>? parent = null)
+    {
+        parent ??= Array.Empty<string>();
+        var result = new List<(dynamic, IReadOnlyList<string>)>();
+        foreach (dynamic shape in shapeCollection)
+        {
+            int t = 0;
+            try { t = (int)shape.Type; } catch { }
+            if (t != 6) continue;
+            result.Add((shape, parent));
+            try { result.AddRange(GroupsWithPath(shape.GroupItems, parent.Append((string)shape.Name).ToArray())); }
+            catch { }
+        }
+        return result;
     }
 
     private static dynamic RequireShape(dynamic slide, int slideIndex, string address)
@@ -1614,51 +1645,249 @@ public class PptComService : IPptComService
             return true;
         });
 
-    /// <summary>텍스트를 담은 사각형(둥근 모서리 가능)을 추가하고 최종 이름을 돌려준다.</summary>
     public string AddTextShape(string presentationPath, int slideIndex, TextShapeRequest request)
+        => OnSlide(presentationPath, slideIndex, save: true, slide => AddTextShapeOn(slide, request));
+
+    public IReadOnlyList<string> AddTextShapes(string presentationPath, int slideIndex, IReadOnlyList<TextShapeRequest> requests)
+        => OnSlide(presentationPath, slideIndex, save: true, slide =>
+            (IReadOnlyList<string>)requests.Select(r => (string)AddTextShapeOn(slide, r)).ToList());
+
+    private static int AutoShapeType(TextShapeKind kind) => kind switch
+    {
+        TextShapeKind.RoundedRectangle => 5,   // msoShapeRoundedRectangle
+        TextShapeKind.Diamond          => 4,
+        TextShapeKind.Ellipse          => 9,
+        TextShapeKind.Triangle         => 7,   // 이등변 삼각형
+        TextShapeKind.Chevron          => 52,
+        TextShapeKind.Pentagon         => 51,  // 오각형 화살표(홈 플레이트)
+        TextShapeKind.RightArrow       => 33,
+        _                              => 1,
+    };
+
+    private static int AlignmentOf(TextAlign align) => align switch
+    {
+        TextAlign.Center => 2, TextAlign.Right => 3, _ => 1   // msoAlignCenter / Right / Left
+    };
+
+    /// <summary>텍스트(빈 값 가능)를 담은 도형을 추가하고 최종 이름을 돌려준다.</summary>
+    private static string AddTextShapeOn(dynamic slide, TextShapeRequest request)
+    {
+        dynamic shape = slide.Shapes.AddShape(AutoShapeType(request.Kind), request.Left, request.Top, request.Width, request.Height);
+        if (!string.IsNullOrEmpty(request.Name)) shape.Name = request.Name;
+        if (request.Kind == TextShapeKind.RoundedRectangle)
+            try { shape.Adjustments[1] = 0.5f; } catch { }
+
+        if (request.FillColor is null) shape.Fill.Visible = MsoFalse;
+        else { shape.Fill.Visible = MsoTrue; shape.Fill.Solid(); shape.Fill.ForeColor.RGB = OleColor.FromHex(request.FillColor); }
+        if (request.LineColor is null) shape.Line.Visible = MsoFalse;
+        else
+        {
+            shape.Line.Visible = MsoTrue;
+            shape.Line.ForeColor.RGB = OleColor.FromHex(request.LineColor);
+            shape.Line.Weight = request.LineWidth;
+        }
+        try { shape.Shadow.Visible = MsoFalse; } catch { }
+
+        dynamic tf = shape.TextFrame2;
+        tf.MarginLeft = request.Padding; tf.MarginRight = request.Padding;
+        tf.MarginTop  = 0f;              tf.MarginBottom = 0f;
+        tf.VerticalAnchor = 3; // msoAnchorMiddle
+        tf.WordWrap = request.AutoWidth ? MsoFalse : MsoTrue;
+
+        dynamic tr = tf.TextRange;
+        tr.Text = request.Text;
+        tr.ParagraphFormat.Alignment = AlignmentOf(request.Align);
+        if (!string.IsNullOrEmpty(request.FontName))
+        {
+            tr.Font.Name = request.FontName;
+            tr.Font.NameFarEast = request.FontName;
+        }
+        tr.Font.Size = request.FontSize;
+        tr.Font.Bold = request.Bold ? MsoTrue : MsoFalse;
+        tr.Font.Fill.ForeColor.RGB = OleColor.FromHex(request.FontColor);
+
+        if (request.AutoWidth)
+        {
+            // 글자 폭에 맞춰 늘린 뒤 높이는 요청값으로 되돌린다(자동 맞춤은 높이도 줄인다).
+            tf.AutoSize = 1; // msoAutoSizeShapeToFitText
+            tf.AutoSize = 0;
+            shape.Height = request.Height;
+        }
+        shape.Top  = request.Top;
+        shape.Left = request.RightEdge is float right ? right - (float)shape.Width : request.Left;
+        return (string)shape.Name;
+    }
+
+    public string AddLine(string presentationPath, int slideIndex, LineRequest request)
         => OnSlide(presentationPath, slideIndex, save: true, slide =>
         {
-            const int msoShapeRectangle = 1, msoShapeRoundedRectangle = 5;
-            int kind = request.Kind == TextShapeKind.RoundedRectangle ? msoShapeRoundedRectangle : msoShapeRectangle;
-            dynamic shape = slide.Shapes.AddShape(kind, request.Left, request.Top, request.Width, request.Height);
-            if (!string.IsNullOrEmpty(request.Name)) shape.Name = request.Name;
-            if (request.Kind == TextShapeKind.RoundedRectangle)
-                try { shape.Adjustments[1] = 0.5f; } catch { }
-
-            if (request.FillColor is null) shape.Fill.Visible = MsoFalse;
-            else shape.Fill.ForeColor.RGB = OleColor.FromHex(request.FillColor);
-            shape.Line.Visible = MsoFalse;
-            try { shape.Shadow.Visible = MsoFalse; } catch { }
-
-            dynamic tf = shape.TextFrame2;
-            tf.MarginLeft = request.Padding; tf.MarginRight = request.Padding;
-            tf.MarginTop  = 0f;              tf.MarginBottom = 0f;
-            tf.VerticalAnchor = 3; // msoAnchorMiddle
-            tf.WordWrap = request.AutoWidth ? MsoFalse : MsoTrue;
-
-            dynamic tr = tf.TextRange;
-            tr.Text = request.Text;
-            tr.ParagraphFormat.Alignment = 1; // msoAlignLeft
-            if (!string.IsNullOrEmpty(request.FontName))
-            {
-                tr.Font.Name = request.FontName;
-                tr.Font.NameFarEast = request.FontName;
-            }
-            tr.Font.Size = request.FontSize;
-            tr.Font.Bold = request.Bold ? MsoTrue : MsoFalse;
-            tr.Font.Fill.ForeColor.RGB = OleColor.FromHex(request.FontColor);
-
-            if (request.AutoWidth)
-            {
-                // 글자 폭에 맞춰 늘린 뒤 높이는 요청값으로 되돌린다(자동 맞춤은 높이도 줄인다).
-                tf.AutoSize = 1; // msoAutoSizeShapeToFitText
-                tf.AutoSize = 0;
-                shape.Height = request.Height;
-            }
-            shape.Top  = request.Top;
-            shape.Left = request.RightEdge is float right ? right - (float)shape.Width : request.Left;
-            return (string)shape.Name;
+            dynamic line = slide.Shapes.AddLine(request.X1, request.Y1, request.X2, request.Y2);
+            if (!string.IsNullOrEmpty(request.Name)) line.Name = request.Name;
+            line.Line.ForeColor.RGB = OleColor.FromHex(request.Color);
+            line.Line.Weight = request.Width;
+            if (request.Dashed) line.Line.DashStyle = 4; // msoLineDash
+            const int triangle = 2; // msoArrowheadTriangle
+            if (request.Arrows is ArrowHeads.End or ArrowHeads.Both) line.Line.EndArrowheadStyle = triangle;
+            if (request.Arrows is ArrowHeads.Start or ArrowHeads.Both) line.Line.BeginArrowheadStyle = triangle;
+            return (string)line.Name;
         });
+
+    /// <summary>
+    /// 표를 만든다. 칸마다 COM 호출이 여러 번 들어 17×23 표를 한 번에 칠하면 45초 제한을 넘었다(2026-10-07).
+    /// 만들기·병합 → 몇 행씩 칠하기 → 높이 맞추고 읽기로 나눠 부른다.
+    /// </summary>
+    public TableLayout AddTable(string presentationPath, int slideIndex, TableRequest request)
+    {
+        int rows = request.Cells.Count, cols = request.Cells.Count == 0 ? 0 : request.Cells.Max(r => r.Count);
+        if (rows == 0 || cols == 0) throw new ArgumentException("표에 칸이 없습니다.");
+
+        // 병합으로 가려진 칸 → 병합 칸(왼쪽 위). 가려진 칸도 병합 칸의 색으로 칠해야 띠 색이 병합 칸을 덮지 않는다.
+        var anchorOf = new Dictionary<(int, int), (int Row, int Column)>();
+        foreach (var m in request.Merges ?? [])
+            for (int r = m.Row; r <= m.Row2; r++)
+                for (int c = m.Column; c <= m.Column2; c++)
+                    if (r != m.Row || c != m.Column) anchorOf[(r, c)] = (m.Row, m.Column);
+
+        string address = OnSlide(presentationPath, slideIndex, save: true, slide =>
+        {
+            float height = request.RowHeights?.Sum() ?? rows * request.RowHeight;
+            dynamic shape = slide.Shapes.AddTable(rows, cols, request.Left, request.Top, request.Width, height);
+            if (!string.IsNullOrEmpty(request.Name)) shape.Name = request.Name;
+            dynamic table = shape.Table;
+            // 테마 표 스타일(띠·머리 행 색)을 끄고 직접 칠한다. "스타일 없음, 눈금 없음".
+            try { table.ApplyStyle("{2D5ABB26-0587-4C30-8999-92F81FD0307C}", false); } catch { }
+            try { table.FirstRow = false; table.HorizBanding = false; } catch { }
+            for (int c = 1; c <= cols; c++)
+                table.Columns(c).Width = request.ColumnWidths is { } widths && c <= widths.Count ? widths[c - 1] : request.Width / cols;
+            foreach (var m in request.Merges ?? [])
+                if (m.Row2 > m.Row || m.Column2 > m.Column)
+                    table.Cell(m.Row, m.Column).Merge(table.Cell(m.Row2, m.Column2));
+            return $"@{(int)shape.Id}";
+        });
+
+        var styles = (request.CellStyles ?? []).GroupBy(s => (s.Row, s.Column)).ToDictionary(g => g.Key, g => g.Last());
+        int border = request.BorderColor is null ? 0 : OleColor.FromHex(request.BorderColor);
+        const int rowsPerCall = 3;
+        for (int from = 1; from <= rows; from += rowsPerCall)
+        {
+            int start = from;
+            OnSlide(presentationPath, slideIndex, save: true, slide =>
+            {
+                dynamic table = RequireShape(slide, slideIndex, address).Table;
+                for (int r = start; r < start + rowsPerCall && r <= rows; r++)
+                {
+                    for (int c = 1; c <= cols; c++)
+                    {
+                        dynamic cell = table.Cell(r, c);
+                        bool isCovered = anchorOf.TryGetValue((r, c), out var anchor);
+                        if (!isCovered) anchor = (r, c);
+                        bool header = anchor.Row <= request.HeaderRows;
+                        styles.TryGetValue(anchor, out var style);
+                        string? fill = style?.Fill ?? (header ? request.HeaderFill
+                            : request.BandFill is not null && (anchor.Row - request.HeaderRows) % 2 == 0 ? request.BandFill : request.BodyFill);
+                        dynamic cs = cell.Shape;
+                        if (fill is not null) { cs.Fill.Visible = MsoTrue; cs.Fill.Solid(); cs.Fill.ForeColor.RGB = OleColor.FromHex(fill); }
+                        // 아래·오른쪽 선만 긋는다(첫 행·첫 열은 위·왼쪽도). 이웃 칸과 겹치는 선을 두 번 긋지 않는다.
+                        if (request.BorderColor is not null)
+                            foreach (int b in r == 1 && c == 1 ? [1, 2, 3, 4] : r == 1 ? [1, 3, 4] : c == 1 ? [2, 3, 4] : new[] { 3, 4 })
+                            {
+                                dynamic line = cell.Borders(b);   // 1 위, 2 왼쪽, 3 아래, 4 오른쪽
+                                line.Visible = MsoTrue; line.ForeColor.RGB = border; line.Weight = request.BorderWidth;
+                            }
+                        if (isCovered) continue;
+
+                        dynamic tf = cs.TextFrame2;
+                        tf.MarginLeft = request.CellPadding; tf.MarginRight = request.CellPadding;
+                        tf.MarginTop = 1f; tf.MarginBottom = 1f;
+                        tf.VerticalAnchor = 3;
+                        string text = c <= request.Cells[r - 1].Count ? request.Cells[r - 1][c - 1] : "";
+                        dynamic tr = tf.TextRange;
+                        if (text.Length > 0) tr.Text = text;
+                        var align = style?.Align ?? (header ? TextAlign.Center
+                            : request.ColumnAligns is { } aligns && c <= aligns.Count ? aligns[c - 1] : TextAlign.Left);
+                        tr.ParagraphFormat.Alignment = AlignmentOf(align);
+                        dynamic font = tr.Font;
+                        if (!string.IsNullOrEmpty(request.FontName)) { font.Name = request.FontName; font.NameFarEast = request.FontName; }
+                        font.Size = style?.FontSize ?? request.FontSize;
+                        if (style?.Bold ?? header) font.Bold = MsoTrue;
+                        font.Fill.ForeColor.RGB = OleColor.FromHex(style?.FontColor ?? (header ? request.HeaderFontColor : request.FontColor));
+                    }
+                }
+                return true;
+            });
+        }
+
+        return OnSlide(presentationPath, slideIndex, save: true, slide =>
+        {
+            dynamic shape = RequireShape(slide, slideIndex, address);
+            dynamic table = shape.Table;
+            for (int r = 1; r <= rows; r++)
+                table.Rows(r).Height = request.RowHeights is { } heights && r <= heights.Count ? heights[r - 1] : request.RowHeight;
+            // 글자에 맞춰 늘어난 실제 높이를 읽어 돌려준다(막대를 표 줄에 맞춰 그릴 때 쓴다).
+            var tops = new List<float>(); var hs = new List<float>();
+            float y = (float)shape.Top;
+            for (int r = 1; r <= rows; r++) { float h = (float)table.Rows(r).Height; tops.Add(y); hs.Add(h); y += h; }
+            var lefts = new List<float>(); var ws = new List<float>();
+            float x = (float)shape.Left;
+            for (int c = 1; c <= cols; c++) { float w = (float)table.Columns(c).Width; lefts.Add(x); ws.Add(w); x += w; }
+            return new TableLayout((string)shape.Name, tops, hs, lefts, ws);
+        });
+    }
+
+    public string GroupShapes(string presentationPath, int slideIndex, IReadOnlyList<string> addresses, string? name)
+        => OnSlide(presentationPath, slideIndex, save: true, slide =>
+        {
+            if (addresses.Count < 2) throw new ArgumentException("묶을 도형이 두 개 이상이어야 합니다.");
+            // 최상위 순번으로 묶는다. 이름은 겹칠 수 있어 Range(이름)으로는 엉뚱한 도형이 잡힌다.
+            var ids = new HashSet<int>();
+            foreach (var address in addresses) ids.Add((int)RequireShape(slide, slideIndex, address).Id);
+            var indices = new List<int>();
+            int count = (int)slide.Shapes.Count;
+            for (int i = 1; i <= count; i++)
+                if (ids.Contains((int)slide.Shapes.Item(i).Id)) indices.Add(i);
+            if (indices.Count != ids.Count)
+                throw new InvalidOperationException("그룹 안에 든 도형은 묶을 수 없습니다. 그룹 이름으로 가리키세요.");
+            dynamic group = slide.Shapes.Range(indices.ToArray()).Group();
+            if (!string.IsNullOrEmpty(name)) group.Name = name;
+            return (string)group.Name;
+        });
+
+    public IReadOnlyList<string> UngroupShape(string presentationPath, int slideIndex, string address)
+        => OnSlide(presentationPath, slideIndex, save: true, slide =>
+        {
+            dynamic shape = RequireShape(slide, slideIndex, address);
+            if ((int)shape.Type != 6) throw new InvalidOperationException($"'{address}'는 그룹이 아닙니다.");
+            dynamic range = shape.Ungroup();
+            var names = new List<string>();
+            foreach (dynamic s in range) names.Add((string)s.Name);
+            return (IReadOnlyList<string>)names;
+        });
+
+    public int ClearSlide(string presentationPath, int slideIndex, IReadOnlyCollection<string> keep)
+        => OnSlide(presentationPath, slideIndex, save: true, slide =>
+        {
+            var keepIds = new HashSet<int>();
+            foreach (var address in keep)
+                if (ResolveShape(slide, ShapeAddress.Parse(address)) is { } kept) keepIds.Add((int)kept.Id);
+            int deleted = 0;
+            for (int i = (int)slide.Shapes.Count; i >= 1; i--)
+            {
+                dynamic shape = slide.Shapes.Item(i);
+                if (keepIds.Contains((int)shape.Id)) continue;
+                // 남길 도형이 그룹 안에 있으면 그 그룹은 둔다.
+                if ((int)shape.Type == 6 && ContainsAny(shape, keepIds)) continue;
+                shape.Delete();
+                deleted++;
+            }
+            return deleted;
+        });
+
+    private static bool ContainsAny(dynamic group, HashSet<int> ids)
+    {
+        foreach (dynamic child in group.GroupItems)
+            if (ids.Contains((int)child.Id)) return true;
+        return false;
+    }
 
     /// <summary>도형 텍스트에서 <paramref name="find"/>가 나오는 곳마다 글자색을 바꾼다. 바꾼 횟수를 돌려준다.</summary>
     public int SetTextColor(string presentationPath, int slideIndex, string address, string find, string color)

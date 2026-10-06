@@ -61,16 +61,62 @@ public static class PptAgentTools
             new("set_geometry", "도형 위치·크기(pt)를 바꾼다. 준 값만 바뀐다",
                 Schema("{" + SlideShape + """, "left": {"type": "number"}, "top": {"type": "number"}, "width": {"type": "number"}, "height": {"type": "number"}}""",
                     "slide", "shape"), true, SetGeometry),
-            new("delete_shape", "도형을 지운다. with_contents=true면 그 도형 영역 안에 든 도형(카드 안의 글 상자 등)도 함께 지운다. 카드 하나를 통째로 지울 때 쓴다",
+            new("delete_shape", "도형을 지운다. 그룹 이름(목록의 '그룹/이름' 중 앞부분)을 주면 그룹을 통째로 지운다. " +
+                "with_contents=true면 그 도형 영역 안에 든 도형(카드 안의 글 상자 등)도 함께 지운다. 카드 하나를 통째로 지울 때 쓴다",
                 Schema("{" + SlideShape + """, "with_contents": {"type": "boolean"}}""", "slide", "shape"), true, DeleteShape),
-            new("add_text_shape", "텍스트 상자(범례·배지)를 추가한다. auto_width면 글자 폭에 맞추고 right_edge가 있으면 오른쪽 끝을 그 위치에 맞춘다",
+            new("add_text_shape", "도형(텍스트는 비워도 됨)을 추가한다. shape로 모양, align으로 정렬, line_color로 테두리. " +
+                "auto_width면 글자 폭에 맞추고 right_edge가 있으면 오른쪽 끝을 그 위치에 맞춘다",
                 Schema("""
                     {"slide": {"type": "integer"}, "text": {"type": "string"},
                      "left": {"type": "number"}, "top": {"type": "number"}, "width": {"type": "number"}, "height": {"type": "number"},
-                     "name": {"type": "string"}, "rounded": {"type": "boolean"}, "fill_color": {"type": "string", "description": "#RRGGBB, 없으면 투명"},
-                     "font_size": {"type": "number"}, "bold": {"type": "boolean"}, "font_color": {"type": "string"},
+                     "name": {"type": "string"},
+                     "shape": {"type": "string", "enum": ["rectangle", "rounded", "diamond", "ellipse", "triangle", "chevron", "pentagon", "right_arrow"]},
+                     "rounded": {"type": "boolean"}, "fill_color": {"type": "string", "description": "#RRGGBB, 없으면 투명"},
+                     "line_color": {"type": "string", "description": "#RRGGBB, 없으면 테두리 없음"}, "line_width": {"type": "number"},
+                     "align": {"type": "string", "enum": ["left", "center", "right"]}, "padding": {"type": "number"},
+                     "font_size": {"type": "number"}, "bold": {"type": "boolean"}, "font_color": {"type": "string"}, "font_name": {"type": "string"},
                      "auto_width": {"type": "boolean"}, "right_edge": {"type": "number"}}
-                    """, "slide", "text", "left", "top", "width", "height"), true, AddTextShape),
+                    """, "slide", "left", "top", "width", "height"), true, AddTextShape),
+            new("add_line", "직선·화살표를 그린다. arrow는 none/end/start/both",
+                Schema("""
+                    {"slide": {"type": "integer"}, "x1": {"type": "number"}, "y1": {"type": "number"}, "x2": {"type": "number"}, "y2": {"type": "number"},
+                     "color": {"type": "string"}, "width": {"type": "number"}, "arrow": {"type": "string", "enum": ["none", "end", "start", "both"]},
+                     "dashed": {"type": "boolean"}, "name": {"type": "string"}}
+                    """, "slide", "x1", "y1", "x2", "y2"), true, AddLine),
+            new("add_table", "PowerPoint 표를 만든다. rows는 행마다 칸 문자열 배열(병합으로 가려지는 칸은 \"\"). header_rows 행은 header_fill로 칠한다. " +
+                "merges로 칸을 합치고 cell_styles로 칸마다 색·굵기·정렬을 바꾼다(행·열 1부터). 실제 행 위치·열 위치를 돌려준다",
+                Schema("""
+                    {"slide": {"type": "integer"}, "left": {"type": "number"}, "top": {"type": "number"}, "width": {"type": "number"},
+                     "rows": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}},
+                     "col_widths": {"type": "array", "items": {"type": "number"}}, "row_height": {"type": "number"},
+                     "font_size": {"type": "number"}, "header_rows": {"type": "integer"}, "header_fill": {"type": "string"},
+                     "header_font_color": {"type": "string"}, "band_fill": {"type": "string"}, "border_color": {"type": "string"},
+                     "col_aligns": {"type": "array", "items": {"type": "string", "enum": ["left", "center", "right"]}},
+                     "merges": {"type": "array", "items": {"type": "object", "properties": {"row": {"type": "integer"}, "col": {"type": "integer"}, "row2": {"type": "integer"}, "col2": {"type": "integer"}}}},
+                     "cell_styles": {"type": "array", "items": {"type": "object", "properties": {"row": {"type": "integer"}, "col": {"type": "integer"},
+                       "fill": {"type": "string"}, "font_color": {"type": "string"}, "bold": {"type": "boolean"}, "align": {"type": "string"}}}},
+                     "name": {"type": "string"}}
+                    """, "slide", "left", "top", "width", "rows"), true, AddTable),
+            new("group_shapes", "도형 여러 개를 그룹 하나로 묶는다(최상위 도형만). 그룹 이름을 돌려준다",
+                Schema("""{"slide": {"type": "integer"}, "shapes": {"type": "array", "items": {"type": "string"}}, "name": {"type": "string"}}""",
+                    "slide", "shapes"), true, GroupShapes),
+            new("ungroup_shape", "그룹을 풀어 안의 도형을 낱개로 만든다",
+                Schema("""{"slide": {"type": "integer"}, "shape": {"type": "string"}}""", "slide", "shape"), true, UngroupShape),
+            new("clear_slide", "슬라이드의 도형을 모두 지운다. keep에 준 도형(제목 등)만 남긴다. 그룹도 통째로 지운다",
+                Schema("""{"slide": {"type": "integer"}, "keep": {"type": "array", "items": {"type": "string"}}}""", "slide"), true, ClearSlide),
+            new("new_blank_slide", "source 슬라이드를 after 뒤에 복제하고 제목·쪽 머리글만 남긴 빈 슬라이드를 만든다. keep을 주면 그 도형만 남긴다. 새 슬라이드 번호를 돌려준다",
+                Schema("""{"source": {"type": "integer"}, "after": {"type": "integer"}, "keep": {"type": "array", "items": {"type": "string"}}, "title": {"type": "string"}}""",
+                    "source", "after"), true, NewBlankSlide),
+            new("draw_schedule",
+                "일정 md(구분 ## 1. …, 하위 ### …, | 항목 | 시작 | 끝 | 표, 마일스톤은 번호 없는 ## 아래 | 이름 | 시점 |)로 일정표를 그린다. " +
+                "style: table(단계·항목·기간 칸+막대) 또는 gantt(막대 옆에 항목 이름). slide를 주면 그 슬라이드에, 아니면 template_slide를 after 뒤에 빈 슬라이드로 복제해 그린다. " +
+                "md에는 내용을, md_path에는 파일 경로를 준다",
+                Schema("""
+                    {"md": {"type": "string"}, "md_path": {"type": "string"}, "style": {"type": "string", "enum": ["table", "gantt"]},
+                     "slide": {"type": "integer"}, "template_slide": {"type": "integer"}, "after": {"type": "integer"}, "title": {"type": "string"},
+                     "left": {"type": "number"}, "top": {"type": "number"}, "width": {"type": "number"}, "height": {"type": "number"},
+                     "palette": {"type": "array", "items": {"type": "string"}}, "accent": {"type": "string"}}
+                    """), true, DrawSchedule),
             new("set_text_color", "도형 텍스트에서 find가 나오는 곳의 글자색을 바꾼다(#RRGGBB)",
                 Schema("{" + SlideShape + """, "find": {"type": "string"}, "color": {"type": "string"}}""",
                     "slide", "shape", "find", "color"), true, SetTextColor),
@@ -464,23 +510,207 @@ public static class PptAgentTools
     private static async Task<string> AddTextShape(AgentToolContext ctx, JsonElement args, CancellationToken ct)
     {
         int slide = ToolArgs.Int(args, "slide");
+        var kind = ToolArgs.OptionalString(args, "shape") is { } shapeName ? ParseKind(shapeName)
+            : ToolArgs.OptionalBool(args, "rounded") == true ? TextShapeKind.RoundedRectangle : TextShapeKind.Rectangle;
         var request = new TextShapeRequest(
-            ToolArgs.String(args, "text"),
+            ToolArgs.OptionalString(args, "text") ?? "",
             ToolArgs.OptionalFloat(args, "left") ?? 0f, ToolArgs.OptionalFloat(args, "top") ?? 0f,
             ToolArgs.OptionalFloat(args, "width") ?? 100f, ToolArgs.OptionalFloat(args, "height") ?? 20f,
             ToolArgs.OptionalString(args, "name"),
-            ToolArgs.OptionalBool(args, "rounded") == true ? TextShapeKind.RoundedRectangle : TextShapeKind.Rectangle,
+            kind,
             ToolArgs.OptionalString(args, "fill_color"),
+            FontName: ToolArgs.OptionalString(args, "font_name") ?? "",
             FontSize: ToolArgs.OptionalFloat(args, "font_size") ?? 10f,
             Bold: ToolArgs.OptionalBool(args, "bold") ?? false,
             FontColor: ToolArgs.OptionalString(args, "font_color") ?? "#000000",
             AutoWidth: ToolArgs.OptionalBool(args, "auto_width") ?? false,
-            RightEdge: ToolArgs.OptionalFloat(args, "right_edge"));
+            RightEdge: ToolArgs.OptionalFloat(args, "right_edge"),
+            Padding: ToolArgs.OptionalFloat(args, "padding") ?? 8f,
+            Align: ParseAlign(ToolArgs.OptionalString(args, "align")),
+            LineColor: ToolArgs.OptionalString(args, "line_color"),
+            LineWidth: ToolArgs.OptionalFloat(args, "line_width") ?? 0.75f);
         string name = await Task.Run(() => ctx.Ppt.AddTextShape(ctx.WorkingPath, slide, request), ct);
         ctx.Origins.MarkTouched(slide);
         ctx.AddedShapes.Add((slide, name));
         ctx.Changes.Add($"{slide}쪽 텍스트 상자 '{name}' 추가");
         return $"'{name}'을 추가했습니다.";
+    }
+
+    private static TextShapeKind ParseKind(string value) => value.Trim().ToLowerInvariant() switch
+    {
+        "rounded" or "rounded_rectangle" => TextShapeKind.RoundedRectangle,
+        "diamond" => TextShapeKind.Diamond,
+        "ellipse" or "oval" or "circle" => TextShapeKind.Ellipse,
+        "triangle" => TextShapeKind.Triangle,
+        "chevron" => TextShapeKind.Chevron,
+        "pentagon" or "homeplate" => TextShapeKind.Pentagon,
+        "right_arrow" or "arrow" => TextShapeKind.RightArrow,
+        _ => TextShapeKind.Rectangle,
+    };
+
+    private static TextAlign ParseAlign(string? value) => value?.Trim().ToLowerInvariant() switch
+    {
+        "center" or "middle" => TextAlign.Center,
+        "right" => TextAlign.Right,
+        _ => TextAlign.Left,
+    };
+
+    private static async Task<string> AddLine(AgentToolContext ctx, JsonElement args, CancellationToken ct)
+    {
+        int slide = ToolArgs.Int(args, "slide");
+        var arrows = ToolArgs.OptionalString(args, "arrow")?.ToLowerInvariant() switch
+        {
+            "end" => ArrowHeads.End, "start" => ArrowHeads.Start, "both" => ArrowHeads.Both, _ => ArrowHeads.None
+        };
+        float F(string n) => ToolArgs.OptionalFloat(args, n) ?? throw new AgentToolException($"인자 '{n}'(숫자)가 필요합니다.");
+        var request = new LineRequest(F("x1"), F("y1"), F("x2"), F("y2"),
+            ToolArgs.OptionalString(args, "color") ?? "#000000", ToolArgs.OptionalFloat(args, "width") ?? 1f,
+            arrows, ToolArgs.OptionalBool(args, "dashed") ?? false, ToolArgs.OptionalString(args, "name"));
+        string name = await Task.Run(() => ctx.Ppt.AddLine(ctx.WorkingPath, slide, request), ct);
+        ctx.Origins.MarkTouched(slide);
+        ctx.Changes.Add($"{slide}쪽 선 '{name}' 추가");
+        return $"선 '{name}'을 그렸습니다.";
+    }
+
+    private static async Task<string> AddTable(AgentToolContext ctx, JsonElement args, CancellationToken ct)
+    {
+        int slide = ToolArgs.Int(args, "slide");
+        if (!args.TryGetProperty("rows", out var rowsArg) || rowsArg.ValueKind != JsonValueKind.Array)
+            throw new AgentToolException("인자 'rows'(행마다 칸 배열)가 필요합니다.");
+        var rows = rowsArg.EnumerateArray().Select(r => (IReadOnlyList<string>)(r.ValueKind == JsonValueKind.Array
+            ? r.EnumerateArray().Select(c => c.ValueKind == JsonValueKind.String ? c.GetString() ?? "" : c.GetRawText()).ToList()
+            : [r.ValueKind == JsonValueKind.String ? r.GetString() ?? "" : r.GetRawText()])).ToList();
+        if (rows.Count == 0) throw new AgentToolException("rows가 비었습니다.");
+
+        IReadOnlyList<float>? Floats(string name) => args.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Array
+            ? v.EnumerateArray().Select(e => e.ValueKind == JsonValueKind.Number ? e.GetSingle() : float.Parse(e.GetString() ?? "0")).ToList() : null;
+        IReadOnlyList<JsonElement> Objects(string name) => args.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Array
+            ? v.EnumerateArray().Where(e => e.ValueKind == JsonValueKind.Object).ToList() : [];
+
+        var merges = Objects("merges").Select(m => new TableMerge(ToolArgs.Int(m, "row"), ToolArgs.Int(m, "col"),
+            ToolArgs.OptionalInt(m, "row2") ?? ToolArgs.Int(m, "row"), ToolArgs.OptionalInt(m, "col2") ?? ToolArgs.Int(m, "col"))).ToList();
+        var styles = Objects("cell_styles").Select(s => new TableCellStyle(ToolArgs.Int(s, "row"), ToolArgs.Int(s, "col"),
+            ToolArgs.OptionalString(s, "fill"), ToolArgs.OptionalString(s, "font_color"), ToolArgs.OptionalBool(s, "bold"),
+            ToolArgs.OptionalString(s, "align") is { } a ? ParseAlign(a) : null, ToolArgs.OptionalFloat(s, "font_size"))).ToList();
+        var aligns = args.TryGetProperty("col_aligns", out var al) && al.ValueKind == JsonValueKind.Array
+            ? al.EnumerateArray().Select(e => ParseAlign(e.GetString())).ToList() : null;
+
+        var request = new TableRequest(
+            ToolArgs.OptionalFloat(args, "left") ?? 0f, ToolArgs.OptionalFloat(args, "top") ?? 0f, ToolArgs.OptionalFloat(args, "width") ?? 600f,
+            rows, Floats("col_widths"), ToolArgs.OptionalFloat(args, "row_height") ?? 20f, ToolArgs.OptionalFloat(args, "font_size") ?? 10f,
+            HeaderRows: ToolArgs.OptionalInt(args, "header_rows") ?? 1,
+            HeaderFill: ToolArgs.OptionalString(args, "header_fill") ?? "#1F3864",
+            HeaderFontColor: ToolArgs.OptionalString(args, "header_font_color") ?? "#FFFFFF",
+            BandFill: ToolArgs.OptionalString(args, "band_fill"),
+            BorderColor: ToolArgs.OptionalString(args, "border_color") ?? "#BFBFBF",
+            ColumnAligns: aligns, Merges: merges, CellStyles: styles, Name: ToolArgs.OptionalString(args, "name"));
+        var layout = await Task.Run(() => ctx.Ppt.AddTable(ctx.WorkingPath, slide, request), ct);
+        ctx.Origins.MarkTouched(slide);
+        ctx.Changes.Add($"{slide}쪽 표 '{layout.Name}' 추가({rows.Count}행)");
+        return $"표 '{layout.Name}'을 만들었습니다. 행 top: {string.Join(", ", layout.RowTops.Select(v => v.ToString("0.#")))} " +
+               $"/ 열 left: {string.Join(", ", layout.ColumnLefts.Select(v => v.ToString("0.#")))}";
+    }
+
+    private static async Task<string> GroupShapes(AgentToolContext ctx, JsonElement args, CancellationToken ct)
+    {
+        int slide = ToolArgs.Int(args, "slide");
+        var shapes = ToolArgs.StringArray(args, "shapes");
+        string name = await Task.Run(() => ctx.Ppt.GroupShapes(ctx.WorkingPath, slide, shapes, ToolArgs.OptionalString(args, "name")), ct);
+        ctx.Origins.MarkTouched(slide);
+        ctx.Changes.Add($"{slide}쪽 도형 {shapes.Count}개를 그룹 '{name}'으로 묶음");
+        return $"도형 {shapes.Count}개를 그룹 '{name}'으로 묶었습니다.";
+    }
+
+    private static async Task<string> UngroupShape(AgentToolContext ctx, JsonElement args, CancellationToken ct)
+    {
+        int slide = ToolArgs.Int(args, "slide");
+        string shape = ToolArgs.String(args, "shape");
+        var names = await Task.Run(() => ctx.Ppt.UngroupShape(ctx.WorkingPath, slide, shape), ct);
+        ctx.Origins.MarkTouched(slide);
+        ctx.Changes.Add($"{slide}쪽 그룹 '{shape}' 풀기");
+        return $"그룹을 풀었습니다: {string.Join(", ", names)}";
+    }
+
+    private static async Task<string> ClearSlide(AgentToolContext ctx, JsonElement args, CancellationToken ct)
+    {
+        int slide = ToolArgs.Int(args, "slide");
+        IReadOnlyList<string> keep = args.TryGetProperty("keep", out _) ? ToolArgs.StringArray(args, "keep") : [];
+        int deleted = await Task.Run(() => ctx.Ppt.ClearSlide(ctx.WorkingPath, slide, keep), ct);
+        ctx.Origins.MarkTouched(slide);
+        ctx.Changes.Add($"{slide}쪽 도형 {deleted}개 삭제(비우기)");
+        return $"{slide}쪽에서 도형 {deleted}개를 지웠습니다." + (keep.Count > 0 ? $" 남긴 도형: {string.Join(", ", keep)}" : "");
+    }
+
+    private static async Task<string> NewBlankSlide(AgentToolContext ctx, JsonElement args, CancellationToken ct)
+    {
+        int source = ToolArgs.Int(args, "source"), after = ToolArgs.Int(args, "after");
+        IReadOnlyList<string>? keep = args.TryGetProperty("keep", out _) ? ToolArgs.StringArray(args, "keep") : null;
+        int slide = await NewBlankSlideAsync(ctx, source, after, keep, ToolArgs.OptionalString(args, "title"), ct);
+        return $"{slide}쪽에 빈 슬라이드를 만들었습니다(← {source}쪽 복제). 뒤 슬라이드 번호가 1씩 밀렸습니다.";
+    }
+
+    /// <summary>
+    /// 복제한 뒤 제목·쪽 머리글만 남기고 비운다. keep이 없으면 위쪽 띠(top 60pt 안)의 글 상자를 남긴다.
+    /// 일정표를 새 쪽에 그릴 때 복제한 뒤 도형 154개를 하나씩 지워야 했다(2026-10-07).
+    /// </summary>
+    public static async Task<int> NewBlankSlideAsync(AgentToolContext ctx, int source, int after,
+        IReadOnlyList<string>? keep, string? title, CancellationToken ct)
+    {
+        int slide = await Task.Run(() => ctx.Ppt.DuplicateSlide(ctx.WorkingPath, source, after), ct);
+        ctx.Origins.RecordDuplicate(source, slide);
+        var shapes = await Task.Run(() => ctx.Ppt.ListShapes(ctx.WorkingPath, slide), ct);
+        var header = shapes.Where(s => s.GroupPath == "" && s.HasText && s.Top < 60).ToList();
+        keep ??= header.Select(s => s.Address).ToList();
+        await Task.Run(() => ctx.Ppt.ClearSlide(ctx.WorkingPath, slide, keep), ct);
+        if (!string.IsNullOrWhiteSpace(title) && header.OrderByDescending(s => s.Width * s.Height).FirstOrDefault() is { } titleShape
+            && keep.Contains(titleShape.Address))
+            await FillAsync(ctx, slide, titleShape.Address, [title], ct);
+        ctx.Origins.MarkTouched(slide);
+        ctx.Changes.Add($"{slide}쪽 빈 슬라이드 추가(← {source}쪽)");
+        return slide;
+    }
+
+    private static async Task<string> DrawSchedule(AgentToolContext ctx, JsonElement args, CancellationToken ct)
+    {
+        string? md = ToolArgs.OptionalString(args, "md");
+        if (string.IsNullOrWhiteSpace(md) && ToolArgs.OptionalString(args, "md_path") is { } path)
+        {
+            path = path.Trim().Trim('"');
+            if (!File.Exists(path)) throw new AgentToolException($"일정 md 파일이 없습니다: {path}");
+            md = await File.ReadAllTextAsync(path, ct);
+        }
+        if (string.IsNullOrWhiteSpace(md)) throw new AgentToolException("md(내용) 또는 md_path(파일 경로)가 필요합니다.");
+        var doc = Schedule.ScheduleMarkdown.Parse(md);
+        if (!doc.AllTasks.Any() && doc.MilestoneGroups.Count == 0)
+            throw new AgentToolException("md에서 일정을 찾지 못했습니다. '## 1. 구분' 아래 '| 항목 | 시작 | 끝 |' 표 형식이어야 합니다.");
+
+        int slide;
+        if (ToolArgs.OptionalInt(args, "slide") is int target) slide = target;
+        else
+        {
+            int template = ToolArgs.OptionalInt(args, "template_slide")
+                ?? throw new AgentToolException("slide(그릴 슬라이드) 또는 template_slide(복제할 슬라이드)가 필요합니다.");
+            slide = await NewBlankSlideAsync(ctx, template, ToolArgs.OptionalInt(args, "after") ?? template, null,
+                ToolArgs.OptionalString(args, "title"), ct);
+        }
+
+        var area = ScheduleAreaFrom(args);
+        var palette = args.TryGetProperty("palette", out _) ? ToolArgs.StringArray(args, "palette") : null;
+        var options = new Schedule.ScheduleOptions(
+            ToolArgs.OptionalString(args, "style")?.ToLowerInvariant() == "gantt" ? Schedule.ScheduleStyle.Gantt : Schedule.ScheduleStyle.Table,
+            area, palette, Accent: ToolArgs.OptionalString(args, "accent") ?? "#E46C0A");
+        var result = await Task.Run(() => new Schedule.ScheduleRenderer(ctx.Ppt, ctx.WorkingPath).Draw(slide, doc, options), ct);
+        ctx.Origins.MarkTouched(slide);
+        ctx.Changes.Add($"{slide}쪽 {result.Summary}");
+        return $"{slide}쪽에 그렸습니다. {result.Summary}";
+    }
+
+    private static Schedule.ScheduleArea? ScheduleAreaFrom(JsonElement args)
+    {
+        var d = Schedule.ScheduleArea.Default;
+        float? l = ToolArgs.OptionalFloat(args, "left"), t = ToolArgs.OptionalFloat(args, "top"),
+               w = ToolArgs.OptionalFloat(args, "width"), h = ToolArgs.OptionalFloat(args, "height");
+        return l is null && t is null && w is null && h is null ? null : new(l ?? d.Left, t ?? d.Top, w ?? d.Width, h ?? d.Height);
     }
 
     private static async Task<string> SetTextColor(AgentToolContext ctx, JsonElement args, CancellationToken ct)

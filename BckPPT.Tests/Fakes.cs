@@ -40,7 +40,7 @@ public sealed class FakeShape(string name, float left, float top, float width, f
     private static int _nextId = 100;
     public int Id { get; private init; } = Interlocked.Increment(ref _nextId);
     public string Name { get; set; } = name;
-    public bool Is(string address) => Name == address || address == $"@{Id}";
+    public bool Is(string address) => Name == address || address == $"@{Id}" || (Group != "" && address == $"{Group}/{Name}");
     public float Left { get; set; } = left;
     public float Top { get; set; } = top;
     public float Width { get; set; } = width;
@@ -48,8 +48,13 @@ public sealed class FakeShape(string name, float left, float top, float width, f
     public int CharsPerLine { get; } = charsPerLine;
     public List<string> Paragraphs { get; } = paragraphs.ToList();
     public TextFormatInfo Format { get; set; } = new("맑은 고딕", 12f, 0f, false, "#000000");
+    /// <summary>속한 그룹 이름(최상위면 빈 값).</summary>
+    public string Group { get; set; } = "";
+    /// <summary>추가할 때 받은 요청(TextShapeRequest·LineRequest·TableRequest).</summary>
+    public object? Spec { get; set; }
 
-    public FakeShape Clone() => new(Name, Left, Top, Width, Height, CharsPerLine, Paragraphs.ToArray()) { Format = Format, Id = Id };
+    public FakeShape Clone() => new(Name, Left, Top, Width, Height, CharsPerLine, Paragraphs.ToArray())
+        { Format = Format, Id = Id, Group = Group, Spec = Spec };
 
     /// <summary>글자 수로 자동 줄바꿈을 흉내 낸다. \v는 Shift+Enter, 문단 끝은 Enter.</summary>
     public IReadOnlyList<TextLineInfo> Lines()
@@ -146,7 +151,7 @@ public sealed class FakePptComService : IPptComService
         Read(presentationPath, slideIndex).FirstOrDefault(s => s.Is(shapeName))?.Lines() ?? [];
 
     public IReadOnlyList<ShapeEntry> ListShapes(string presentationPath, int slideIndex) =>
-        Read(presentationPath, slideIndex).Select(s => new ShapeEntry(s.Name, s.Name, "", 1, s.Left, s.Top, s.Width, s.Height,
+        Read(presentationPath, slideIndex).Select(s => new ShapeEntry(s.Group == "" ? s.Name : $"{s.Group}/{s.Name}", s.Name, s.Group, 1, s.Left, s.Top, s.Width, s.Height,
             s.Paragraphs.Any(p => p.Length > 0), string.Join(" ", s.Paragraphs), s.Id)).ToList();
 
     public TextFormatInfo GetTextFormat(string presentationPath, int slideIndex, string address) =>
@@ -162,7 +167,59 @@ public sealed class FakePptComService : IPptComService
 
     public void RenameShape(string presentationPath, int slideIndex, string address, string newName) => Shape(slideIndex, address).Name = newName;
 
-    public void DeleteShape(string presentationPath, int slideIndex, string address) => Slide(slideIndex).Remove(Shape(slideIndex, address));
+    public void DeleteShape(string presentationPath, int slideIndex, string address)
+    {
+        // 그룹 이름이면 그룹 통째로 지운다.
+        if (!Slide(slideIndex).Any(s => s.Is(address)) && Slide(slideIndex).Any(s => s.Group == address))
+        {
+            Slide(slideIndex).RemoveAll(s => s.Group == address);
+            return;
+        }
+        Slide(slideIndex).Remove(Shape(slideIndex, address));
+    }
+
+    public IReadOnlyList<string> AddTextShapes(string presentationPath, int slideIndex, IReadOnlyList<TextShapeRequest> requests) =>
+        requests.Select(r => AddTextShape(presentationPath, slideIndex, r)).ToList();
+
+    public string AddLine(string presentationPath, int slideIndex, LineRequest request)
+    {
+        var name = request.Name ?? $"Line {Slide(slideIndex).Count + 1}";
+        Slide(slideIndex).Add(new FakeShape(name, Math.Min(request.X1, request.X2), Math.Min(request.Y1, request.Y2),
+            Math.Abs(request.X2 - request.X1), Math.Abs(request.Y2 - request.Y1), 100) { Spec = request });
+        return name;
+    }
+
+    public TableLayout AddTable(string presentationPath, int slideIndex, TableRequest request)
+    {
+        var name = request.Name ?? $"Table {Slide(slideIndex).Count + 1}";
+        int cols = request.Cells.Max(r => r.Count);
+        var heights = Enumerable.Range(0, request.Cells.Count)
+            .Select(r => request.RowHeights is { } h && r < h.Count ? h[r] : request.RowHeight).ToList();
+        var widths = Enumerable.Range(0, cols)
+            .Select(c => request.ColumnWidths is { } w && c < w.Count ? w[c] : request.Width / cols).ToList();
+        Slide(slideIndex).Add(new FakeShape(name, request.Left, request.Top, widths.Sum(), heights.Sum(), 100,
+            request.Cells.Select(r => string.Join("|", r)).ToArray()) { Spec = request });
+        var tops = heights.Select((_, i) => request.Top + heights.Take(i).Sum()).ToList();
+        var lefts = widths.Select((_, i) => request.Left + widths.Take(i).Sum()).ToList();
+        return new TableLayout(name, tops, heights, lefts, widths);
+    }
+
+    public string GroupShapes(string presentationPath, int slideIndex, IReadOnlyList<string> addresses, string? name)
+    {
+        name ??= $"Group {Slide(slideIndex).Count + 1}";
+        foreach (var address in addresses) Shape(slideIndex, address).Group = name;
+        return name;
+    }
+
+    public IReadOnlyList<string> UngroupShape(string presentationPath, int slideIndex, string address)
+    {
+        var members = Slide(slideIndex).Where(s => s.Group == address).ToList();
+        foreach (var s in members) s.Group = "";
+        return members.Select(s => s.Name).ToList();
+    }
+
+    public int ClearSlide(string presentationPath, int slideIndex, IReadOnlyCollection<string> keep) =>
+        Slide(slideIndex).RemoveAll(s => !keep.Any(k => s.Is(k)) && !(s.Group != "" && keep.Contains(s.Group)));
 
     public void SetShapeGeometry(string presentationPath, int slideIndex, string address, ShapeGeometry geometry)
     {
@@ -176,7 +233,7 @@ public sealed class FakePptComService : IPptComService
     public string AddTextShape(string presentationPath, int slideIndex, TextShapeRequest request)
     {
         var name = request.Name ?? $"TextBox {Slide(slideIndex).Count + 1}";
-        Slide(slideIndex).Add(new FakeShape(name, request.Left, request.Top, request.Width, request.Height, 100, request.Text));
+        Slide(slideIndex).Add(new FakeShape(name, request.Left, request.Top, request.Width, request.Height, 100, request.Text) { Spec = request });
         return name;
     }
 
