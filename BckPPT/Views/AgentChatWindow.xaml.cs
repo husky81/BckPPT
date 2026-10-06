@@ -206,6 +206,10 @@ public partial class AgentChatWindow : Window, INotifyPropertyChanged
         {
             _agentResult = await _agentWorkflow.RunAsync(target, instruction, progress, _requestCts.Token);
             var run = _agentResult.Run;
+            if (!continuing && _agentWorkflow.Session?.RemovedFonts is { Count: > 0 } fonts)
+                log.Append("\n(안내) 편집이 제한된 내장 글꼴 ")
+                   .Append(string.Join(", ", fonts.Select(f => f.Typeface).Distinct()))
+                   .Append("을 작업 사본에서 제거했습니다. 이 PC에 없는 글꼴이면 대체 글꼴로 보이고 줄바꿈이 원래와 다를 수 있습니다.\n");
             // 도구 없이 끝난 답은 이미 메시지로 찍혔으므로 다시 쓰지 않는다.
             log.Append(run.Reason == AgentStopReason.AnsweredWithoutTools ? "\n" : $"\n결과\n{run.Summary}\n");
             if (run.RemainingIssues.Count > 0)

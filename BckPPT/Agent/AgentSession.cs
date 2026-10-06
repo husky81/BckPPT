@@ -2,6 +2,7 @@ using System.IO;
 using System.Text.Json;
 using BckPPT.Agent.Tools;
 using BckPPT.Llm;
+using BckPPT.PowerPoint;
 using BckPPT.Services;
 
 namespace BckPPT.Agent;
@@ -32,6 +33,9 @@ public sealed class AgentSession : IDisposable
     public List<LlmMessage> Messages => _messages;
     public string? ResultPath { get; private set; }
 
+    /// <summary>작업 사본에서 뺀 편집 제한 내장 글꼴. 결과 파일에서는 설치된 글꼴로 대체되어 보인다.</summary>
+    public IReadOnlyList<RestrictedFontRemover.RemovedFont> RemovedFonts { get; private init; } = [];
+
     public static string DefaultWorkDirectory => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "BckSoft", "BckPPT", "work");
 
@@ -52,13 +56,19 @@ public sealed class AgentSession : IDisposable
         var workingPath = Path.Combine(workDirectory,
             $"{Path.GetFileNameWithoutExtension(sourcePath)}_작업_{stamp}_{Guid.NewGuid().ToString("N")[..6]}{Path.GetExtension(sourcePath)}");
         File.Copy(sourcePath, workingPath, overwrite: false);
+        // 편집을 막는 내장 글꼴(미리 보기·인쇄 전용)이 있으면 작업 사본에서만 뺀다. 없으면 PowerPoint가 읽기 전용으로 연다.
+        IReadOnlyList<RestrictedFontRemover.RemovedFont> removedFonts = [];
+        try { removedFonts = RestrictedFontRemover.Remove(workingPath); }
+        catch { /* 판정할 수 없는 파일이면 그대로 두고 PowerPoint에 맡긴다. */ }
 
         var context = new AgentToolContext(ppt, workingPath)
         {
             DescribeImage = describeImage, Sources = sources, BaselinePath = sourcePath
         };
         var log = new AgentSessionLog(Path.Combine(logDirectory ?? DefaultLogDirectory, $"{stamp}_{Path.GetFileNameWithoutExtension(workingPath)}.jsonl"));
-        var session = new AgentSession(sourcePath, workingPath, context, log);
+        var session = new AgentSession(sourcePath, workingPath, context, log) { RemovedFonts = removedFonts };
+        if (removedFonts.Count > 0)
+            log.Write("restricted_fonts_removed", removedFonts.Select(f => $"{f.Typeface} ({f.Style}, fsType 0x{f.FsType:X4})"));
         // 세션 동안 작업 사본과 원본(판정 기준)을 열어 둔다. 31MB 착수보고 PPT에서 도구마다 열고 닫으면 너무 느리다.
         try
         {
