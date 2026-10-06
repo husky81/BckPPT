@@ -133,3 +133,39 @@ public class LayoutLintTests
         Assert.Null(LayoutLint.RoleOf("Text 19"));
     }
 }
+
+public class ShapeListFormatTests
+{
+    private static BckPPT.Models.ShapeEntry E(string address, float left, float top, float width, float height, string text = "") =>
+        new(address, address, "Group 171", 1, left, top, width, height, text.Length > 0, text);
+
+    [Fact]
+    public void 카드별로_묶고_위에서_아래로_보여준다()
+    {
+        var shapes = new[]
+        {
+            E("Panel", 32, 93, 896, 422),
+            E("Text 19#2", 492, 348, 204, 99, "본문 B ¶ 둘째"),
+            E("Shape 33#1", 42, 112, 216, 390),
+            E("Shape 20", 262, 112, 216, 390),
+            E("Text 15#1", 50, 184, 101, 14, "개요"),
+            E("Text 16#1", 51, 198, 204, 42, "개요 본문 A"),
+            E("Text 37#1", 51, 117, 27, 27, "3"),
+            E("슬라이드헤더", 29, 11, 835, 46, "4. 지정공모형"),
+        };
+
+        var text = BckPPT.Agent.Tools.PptAgentTools.FormatShapeList(33, shapes);
+        var lines = text.Split('\n');
+
+        int card1 = Array.FindIndex(lines, l => l.StartsWith("[카드 1] Shape 33#1"));
+        Assert.True(card1 > 0);
+        Assert.StartsWith("  Text 37#1", lines[card1 + 1]);           // 위에서 아래 순
+        Assert.Contains("(소제목) 개요", lines[card1 + 2]);
+        Assert.StartsWith("  Text 16#1", lines[card1 + 3]);
+        Assert.DoesNotContain("(소제목)", lines[card1 + 3]);
+        Assert.Contains("[카드 2] Shape 20", text);
+        Assert.Contains("[카드 밖]", text);
+        Assert.DoesNotContain("[카드 3]", text);                       // 전체 패널은 카드가 아니다
+        Assert.True(text.IndexOf("Text 19#2") > text.IndexOf("[카드 2]"));
+    }
+}

@@ -8,7 +8,7 @@ public sealed record AgentLoopOptions
 {
     public string? Model { get; init; }
     public int MaxTurns { get; init; } = 30;
-    public int MaxTokensPerTurn { get; init; } = 4096;
+    public int MaxTokensPerTurn { get; init; } = 2048;
 
     /// <summary>도구 결과 한 건을 모델에 넘기는 최대 글자 수.</summary>
     public int MaxToolResultChars { get; init; } = 8000;
@@ -18,6 +18,12 @@ public sealed record AgentLoopOptions
     /// 응답 여유를 남겨 이 정도로 잡는다. 넘으면 오래된 도구 결과부터 줄인다.
     /// </summary>
     public int ContextCharBudget { get; init; } = 36000;
+
+    /// <summary>모델 문맥 한도(토큰). gitoky agent 라우트는 32,768.</summary>
+    public int ContextWindowTokens { get; init; } = 32768;
+
+    /// <summary>글자당 토큰 추정이 빗나갈 때를 위한 여유.</summary>
+    public int ContextSafetyTokens { get; init; } = 2500;
 
     /// <summary>세션 누적 토큰 상한(입력+출력). 0이면 무제한.</summary>
     public int MaxSessionTokens { get; init; } = 400_000;
@@ -70,16 +76,26 @@ public sealed class AgentLoop(ILlmClient llm, ToolRegistry tools, AgentLoopOptio
         for (int turn = 1; turn <= options.MaxTurns; turn++)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (Compact(session.Messages, options.ContextCharBudget) is > 0 and var elided)
+            int budget = CharBudget(session);
+            if (Compact(session.Messages, budget) is > 0 and var elided)
                 progress?.Report(new(AgentEventKind.Compacted, $"오래된 도구 결과 {elided}건을 줄였습니다."));
 
             progress?.Report(new(AgentEventKind.Thinking, $"{turn}턴"));
-            var completion = await llm.CompleteAsync(
-                new LlmRequest(session.Messages, options.Model, options.MaxTokensPerTurn)
-                {
-                    Tools = definitions,
-                    ToolChoice = "auto"
-                }, cancellationToken);
+            int sentChars = session.Messages.Sum(m => m.Content.Length);
+            LlmCompletion completion;
+            try
+            {
+                completion = await Ask(session, definitions, cancellationToken);
+            }
+            catch (LlmException ex) when (ex.Message.Contains("context window", StringComparison.OrdinalIgnoreCase))
+            {
+                // 추정이 빗나가 문맥을 넘으면 절반으로 줄이고 최근 결과만 남겨 한 번 더 묻는다.
+                Compact(session.Messages, budget / 2, keepRecent: 2);
+                progress?.Report(new(AgentEventKind.Compacted, "문맥 한도를 넘어 이전 결과를 더 줄이고 다시 묻습니다."));
+                sentChars = session.Messages.Sum(m => m.Content.Length);
+                completion = await Ask(session, definitions, cancellationToken);
+            }
+            if (completion.Usage.PromptTokens > 0) session.ObserveContext(sentChars, completion.Usage.PromptTokens);
             runUsage += completion.Usage;
             session.AddUsage(completion.Usage);
             session.Append(LlmMessage.Assistant(completion.Content, completion.ToolCalls));
@@ -138,6 +154,25 @@ public sealed class AgentLoop(ILlmClient llm, ToolRegistry tools, AgentLoopOptio
             session.Log.Write("result", new { reason = reason.ToString(), summary = text, turns, issues = issues.Select(i => i.Message) });
             return new AgentRunResult(reason, text, turns, usage, issues);
         }
+    }
+
+    private Task<LlmCompletion> Ask(AgentSession session, IReadOnlyList<LlmToolDefinition> definitions, CancellationToken ct) =>
+        llm.CompleteAsync(new LlmRequest(session.Messages, options.Model, options.MaxTokensPerTurn)
+        {
+            Tools = definitions,
+            ToolChoice = "auto"
+        }, ct);
+
+    /// <summary>
+    /// 이번 요청에 쓸 대화 글자 예산. 직전 응답의 실제 prompt_tokens로 글자당 토큰을 재서
+    /// (도구 정의 등 고정 비용이 들어가 있어 보수적이다) 문맥 한도 − 응답 몫 − 여유 안에 들게 한다.
+    /// 한글은 글자당 토큰이 1에 가까워 고정 글자 예산만으로는 32k를 넘었다(2026-10-06 실측).
+    /// </summary>
+    private int CharBudget(AgentSession session)
+    {
+        int targetTokens = options.ContextWindowTokens - options.MaxTokensPerTurn - options.ContextSafetyTokens;
+        if (session.EstimateCharBudget(targetTokens) is not int estimate) return options.ContextCharBudget;
+        return Math.Min(options.ContextCharBudget, Math.Max(4000, estimate));
     }
 
     private static async Task<IReadOnlyList<LintIssue>> LintTouchedAsync(AgentToolContext context, CancellationToken ct)

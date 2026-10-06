@@ -5,9 +5,10 @@ using BckPPT.Services;
 namespace BckPPT.Tests;
 
 /// <summary>녹화한 응답을 순서대로 돌려주는 LLM. 받은 요청도 남겨 검증에 쓴다.</summary>
-public sealed class FakeLlmClient(params LlmCompletion[] script) : ILlmClient
+public sealed class FakeLlmClient(params object[] script) : ILlmClient
 {
-    private readonly Queue<LlmCompletion> _script = new(script);
+    // LlmCompletion은 응답으로, Exception은 그 차례에 던진다.
+    private readonly Queue<object> _script = new(script);
     public List<LlmRequest> Requests { get; } = new();
 
     public static LlmCompletion Calls(params (string Name, string Args)[] calls) =>
@@ -21,7 +22,11 @@ public sealed class FakeLlmClient(params LlmCompletion[] script) : ILlmClient
         // 나중에 대화가 바뀌어도 당시 요청을 볼 수 있게 메시지 목록을 복사해 둔다.
         Requests.Add(request with { Messages = request.Messages.ToList() });
         if (_script.Count == 0) throw new InvalidOperationException("대본이 끝났습니다.");
-        return Task.FromResult(_script.Dequeue());
+        return _script.Dequeue() switch
+        {
+            Exception ex => Task.FromException<LlmCompletion>(ex),
+            var c => Task.FromResult((LlmCompletion)c)
+        };
     }
 
     public IAsyncEnumerable<LlmStreamEvent> StreamAsync(LlmRequest request, CancellationToken cancellationToken = default) =>

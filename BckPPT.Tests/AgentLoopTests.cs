@@ -181,6 +181,37 @@ public sealed class AgentLoopTests : IDisposable
     }
 
     [Fact]
+    public async Task 문맥_한도를_넘으면_더_줄이고_다시_묻는다()
+    {
+        var llm = new FakeLlmClient(
+            new LlmException("request exceeds the model's context window of 32768 tokens; this request needs at least 32769."),
+            FakeLlmClient.Text("줄인 뒤 답"));
+        using var session = StartSession();
+        for (int i = 0; i < 6; i++)
+        {
+            session.Append(LlmMessage.Assistant("", [new LlmToolCall($"c{i}", "read_source", "{}")]));
+            session.Append(LlmMessage.Tool($"c{i}", new string('가', 3000)));
+        }
+
+        var result = await Loop(llm).RunAsync(session, "계속");
+
+        Assert.Equal("줄인 뒤 답", result.Summary);
+        Assert.Equal(2, llm.Requests.Count);
+        Assert.True(llm.Requests[1].Messages.Sum(m => m.Content.Length) < llm.Requests[0].Messages.Sum(m => m.Content.Length));
+    }
+
+    [Fact]
+    public void 문맥_예산은_고정_비용과_글자당_토큰으로_추정한다()
+    {
+        using var session = StartSession();
+        Assert.Null(session.EstimateCharBudget(26000));
+        session.ObserveContext(2000, 6000);                 // 도구 정의 약 5,000토큰 + 대화 2,000자
+        Assert.Equal(8666, session.EstimateCharBudget(26000));   // 아직은 보수적 비율(1/3)
+        session.ObserveContext(12000, 16000);               // 1만 자 늘 때 1만 토큰 → 글자당 1토큰, 고정 4,000
+        Assert.Equal(22000, session.EstimateCharBudget(26000));
+    }
+
+    [Fact]
     public async Task 턴_상한에서_멈춘다()
     {
         var calls = Enumerable.Range(0, 3).Select(_ => FakeLlmClient.Calls(("list_shapes", """{"slide": 1}"""))).ToArray();

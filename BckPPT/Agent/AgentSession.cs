@@ -95,6 +95,32 @@ public sealed class AgentSession : IDisposable
 
     public void AddUsage(LlmUsage usage) => Usage += usage;
 
+    private (int Chars, int Tokens)? _firstObservation, _lastObservation;
+
+    /// <summary>보낸 대화 글자 수와 실제 입력 토큰을 기록한다. 문맥 예산 추정에 쓴다.</summary>
+    public void ObserveContext(int sentChars, int promptTokens)
+    {
+        if (promptTokens <= 0) return;
+        _firstObservation ??= (sentChars, promptTokens);
+        _lastObservation = (sentChars, promptTokens);
+    }
+
+    /// <summary>
+    /// 입력 토큰 ≈ 고정 비용(도구 정의 등) + 대화 글자 수 / 글자당 토큰.
+    /// 관측 두 개의 차이로 기울기를 재고, 아직 차이가 작으면 고정 비용까지 글자에 얹은 보수적 비율만 쓴다.
+    /// </summary>
+    public int? EstimateCharBudget(int targetTokens)
+    {
+        if (_lastObservation is not var (chars, tokens)) return null;
+        if (_firstObservation is var (firstChars, firstTokens) && tokens - firstTokens >= 1000 && chars > firstChars)
+        {
+            double charsPerToken = (double)(chars - firstChars) / (tokens - firstTokens);
+            double overhead = Math.Max(0, tokens - chars / charsPerToken);
+            return (int)((targetTokens - overhead) * charsPerToken);
+        }
+        return (int)(targetTokens * ((double)chars / tokens));
+    }
+
     /// <summary>작업 사본을 원본 옆 결과 파일로 확정한다. 원본은 덮어쓰지 않는다.</summary>
     public string Approve()
     {

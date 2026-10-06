@@ -107,17 +107,60 @@ public static class PptAgentTools
     {
         int slide = ToolArgs.Int(args, "slide");
         var shapes = await Task.Run(() => ctx.Ppt.ListShapes(ctx.WorkingPath, slide), ct);
+        return FormatShapeList(slide, shapes);
+    }
+
+    /// <summary>
+    /// 도형을 카드(텍스트 없는 큰 사각형)별로 묶어 위에서 아래 순서로 보여준다. 같은 이름이 63개씩 겹치는
+    /// 템플릿에서 평면 목록만 주면 모델이 소제목("개요")을 본문으로 알고 바꿨다(2026-10-06 실측).
+    /// 짧은 한 줄 텍스트는 (소제목)으로 표시한다.
+    /// </summary>
+    public static string FormatShapeList(int slide, IReadOnlyList<ShapeEntry> shapes)
+    {
+        float widest = shapes.Count == 0 ? 0 : shapes.Max(s => s.Width);
+        // 카드: 텍스트가 없고 세로로 긴 사각형. 슬라이드 전체를 덮는 패널은 카드가 아니라 바깥 틀이다.
+        var cards = shapes
+            .Where(s => !s.HasText && s.Height >= 150 && s.Width >= 80 && s.Width < widest * 0.6)
+            .OrderBy(s => s.Left).ThenBy(s => s.Top)
+            .ToList();
+        ShapeEntry? CardOf(ShapeEntry s)
+        {
+            float cx = s.Left + s.Width / 2, cy = s.Top + s.Height / 2;
+            return cards.Where(c => !ReferenceEquals(c, s) && cx >= c.Left && cx <= c.Left + c.Width &&
+                                    cy >= c.Top && cy <= c.Top + c.Height)
+                        .OrderBy(c => c.Width * c.Height).FirstOrDefault();
+        }
+
         var sb = new StringBuilder(
             $"{slide}쪽 도형 {shapes.Count}개 (주소 | left,top width×height | 텍스트 앞 60자, ¶ 문단 경계, ↵ Shift+Enter)\n" +
-            "미리보기는 원문이 아니다. 문구를 바꾸기 전에 read_text로 원문을 확인한다.\n");
-        foreach (var s in shapes)
+            "미리보기는 원문이 아니다. 문구를 바꾸기 전에 read_text로 원문을 확인한다. (소제목) 상자는 보통 그대로 둔다.\n");
+        void Line(ShapeEntry s)
         {
-            sb.Append($"{s.Address} | {s.Left:0.#},{s.Top:0.#} {s.Width:0.#}×{s.Height:0.#}");
-            if (s.HasText) sb.Append($" | {s.TextPreview}");
+            sb.Append($"  {s.Address} | {s.Left:0.#},{s.Top:0.#} {s.Width:0.#}×{s.Height:0.#}");
+            if (s.HasText)
+            {
+                bool label = s.Height <= 22 && s.TextPreview.Length <= 10 && !s.TextPreview.Contains('¶');
+                sb.Append(label ? " | (소제목) " : " | ").Append(s.TextPreview);
+            }
             sb.Append('\n');
+        }
+
+        var grouped = shapes.Where(s => !cards.Contains(s)).GroupBy(CardOf).ToDictionary(g => g.Key ?? Outside, g => g.ToList());
+        for (int i = 0; i < cards.Count; i++)
+        {
+            var card = cards[i];
+            sb.Append($"[카드 {i + 1}] {card.Address} | {card.Left:0.#},{card.Top:0.#} {card.Width:0.#}×{card.Height:0.#}\n");
+            foreach (var s in grouped.GetValueOrDefault(card, []).OrderBy(s => s.Top).ThenBy(s => s.Left)) Line(s);
+        }
+        if (grouped.GetValueOrDefault(Outside) is { Count: > 0 } rest)
+        {
+            sb.Append(cards.Count > 0 ? "[카드 밖]\n" : "");
+            foreach (var s in rest.OrderBy(s => s.Top).ThenBy(s => s.Left)) Line(s);
         }
         return sb.ToString();
     }
+
+    private static readonly ShapeEntry Outside = new("", "", "", 0, 0, 0, 0, 0, false, "");
 
     private static async Task<string> ReadText(AgentToolContext ctx, JsonElement args, CancellationToken ct)
     {
