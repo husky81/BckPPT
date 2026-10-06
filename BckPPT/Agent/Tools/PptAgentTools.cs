@@ -136,11 +136,14 @@ public static class PptAgentTools
         }
 
         var sb = new StringBuilder(
-            $"{slide}쪽 도형 {shapes.Count}개 (주소 | left,top width×height | 텍스트 앞 60자, ¶ 문단 경계, ↵ Shift+Enter)\n" +
+            $"{slide}쪽 도형 {shapes.Count}개 (주소 (이름) | left,top width×height | 텍스트 앞 60자, ¶ 문단 경계, ↵ Shift+Enter)\n" +
+            "이름이 겹치는 도형은 @숫자 주소로 가리킨다. 이 주소는 다른 도형 이름을 바꿔도 변하지 않는다.\n" +
             "미리보기는 원문이 아니다. 문구를 바꾸기 전에 read_text로 원문을 확인한다. (소제목) 상자는 보통 그대로 둔다.\n");
         void Line(ShapeEntry s)
         {
-            sb.Append($"  {s.Address} | {s.Left:0.#},{s.Top:0.#} {s.Width:0.#}×{s.Height:0.#}");
+            sb.Append($"  {s.Address}");
+            if (s.Address != s.Name) sb.Append($" ({s.Name})");
+            sb.Append($" | {s.Left:0.#},{s.Top:0.#} {s.Width:0.#}×{s.Height:0.#}");
             if (s.HasText)
             {
                 bool label = s.Height <= 22 && s.TextPreview.Length <= 10 && !s.TextPreview.Contains('¶');
@@ -153,7 +156,7 @@ public static class PptAgentTools
         for (int i = 0; i < cards.Count; i++)
         {
             var card = cards[i];
-            sb.Append($"[카드 {i + 1}] {card.Address} | {card.Left:0.#},{card.Top:0.#} {card.Width:0.#}×{card.Height:0.#}\n");
+            sb.Append($"[카드 {i + 1}] {card.Address}{(card.Address != card.Name ? $" ({card.Name})" : "")} | {card.Left:0.#},{card.Top:0.#} {card.Width:0.#}×{card.Height:0.#}\n");
             foreach (var s in grouped.GetValueOrDefault(card, []).OrderBy(s => s.Top).ThenBy(s => s.Left)) Line(s);
         }
         if (grouped.GetValueOrDefault(Outside) is { Count: > 0 } rest)
@@ -215,7 +218,15 @@ public static class PptAgentTools
         if (ctx.BaselinePath is not { } original) return null;
         try
         {
-            var lines = await Task.Run(() => ctx.Ppt.GetTextLineBreaks(original, ctx.Origins.OriginalIndexOf(slide), shape), ct);
+            // 이름을 바꾼 상자는 원본에 그 이름이 없으므로 Id로 찾는다(복제해도 Id는 같다).
+            string baselineAddress = shape;
+            if (!shape.StartsWith('@'))
+            {
+                var entry = (await Task.Run(() => ctx.Ppt.ListShapes(ctx.WorkingPath, slide), ct))
+                    .FirstOrDefault(e => e.Address == shape || e.Name == shape);
+                if (entry is { Id: > 0 }) baselineAddress = $"@{entry.Id}";
+            }
+            var lines = await Task.Run(() => ctx.Ppt.GetTextLineBreaks(original, ctx.Origins.OriginalIndexOf(slide), baselineAddress), ct);
             return lines.Count > 0 ? lines.Count : null;
         }
         catch (OperationCanceledException) { throw; }

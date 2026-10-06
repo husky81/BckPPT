@@ -37,7 +37,10 @@ public sealed class FakeLlmClient(params object[] script) : ILlmClient
 
 public sealed class FakeShape(string name, float left, float top, float width, float height, int charsPerLine, params string[] paragraphs)
 {
+    private static int _nextId = 100;
+    public int Id { get; private init; } = Interlocked.Increment(ref _nextId);
     public string Name { get; set; } = name;
+    public bool Is(string address) => Name == address || address == $"@{Id}";
     public float Left { get; set; } = left;
     public float Top { get; set; } = top;
     public float Width { get; set; } = width;
@@ -46,7 +49,7 @@ public sealed class FakeShape(string name, float left, float top, float width, f
     public List<string> Paragraphs { get; } = paragraphs.ToList();
     public TextFormatInfo Format { get; set; } = new("맑은 고딕", 12f, 0f, false, "#000000");
 
-    public FakeShape Clone() => new(Name, Left, Top, Width, Height, CharsPerLine, Paragraphs.ToArray()) { Format = Format };
+    public FakeShape Clone() => new(Name, Left, Top, Width, Height, CharsPerLine, Paragraphs.ToArray()) { Format = Format, Id = Id };
 
     /// <summary>글자 수로 자동 줄바꿈을 흉내 낸다. \v는 Shift+Enter, 문단 끝은 Enter.</summary>
     public IReadOnlyList<TextLineInfo> Lines()
@@ -94,7 +97,7 @@ public sealed class FakePptComService : IPptComService
     private List<FakeShape> Read(string path, int index) =>
         _original is not null && path == OriginalPath ? _original[index - 1] : Slides[index - 1];
     private FakeShape Shape(int slide, string address) =>
-        Slide(slide).FirstOrDefault(s => s.Name == address)
+        Slide(slide).FirstOrDefault(s => s.Is(address))
         ?? throw new InvalidOperationException($"{slide}쪽에서 도형 '{address}'를 찾지 못했습니다.");
 
     public bool IsPowerPointRunning => true;
@@ -131,7 +134,7 @@ public sealed class FakePptComService : IPptComService
 
     public PptSlideInfo? GetShapeInfo(string presentationPath, int slideIndex, string shapeName)
     {
-        var shape = Read(presentationPath, slideIndex).FirstOrDefault(s => s.Name == shapeName);
+        var shape = Read(presentationPath, slideIndex).FirstOrDefault(s => s.Is(shapeName));
         if (shape is null) return null;
         var lines = shape.Lines();
         float bound = lines.Count * 10f;
@@ -140,14 +143,14 @@ public sealed class FakePptComService : IPptComService
     }
 
     public IReadOnlyList<TextLineInfo> GetTextLineBreaks(string presentationPath, int slideIndex, string shapeName) =>
-        Read(presentationPath, slideIndex).FirstOrDefault(s => s.Name == shapeName)?.Lines() ?? [];
+        Read(presentationPath, slideIndex).FirstOrDefault(s => s.Is(shapeName))?.Lines() ?? [];
 
     public IReadOnlyList<ShapeEntry> ListShapes(string presentationPath, int slideIndex) =>
         Read(presentationPath, slideIndex).Select(s => new ShapeEntry(s.Name, s.Name, "", 1, s.Left, s.Top, s.Width, s.Height,
-            s.Paragraphs.Any(p => p.Length > 0), string.Join(" ", s.Paragraphs))).ToList();
+            s.Paragraphs.Any(p => p.Length > 0), string.Join(" ", s.Paragraphs), s.Id)).ToList();
 
     public TextFormatInfo GetTextFormat(string presentationPath, int slideIndex, string address) =>
-        Read(presentationPath, slideIndex).First(s => s.Name == address).Format;
+        Read(presentationPath, slideIndex).First(s => s.Is(address)).Format;
 
     public int ReplaceTextInShape(string presentationPath, int slideIndex, string address, string find, string replace)
     {

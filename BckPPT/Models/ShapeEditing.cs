@@ -13,7 +13,8 @@ public record ShapeEntry(
     float  Width,
     float  Height,
     bool   HasText,
-    string TextPreview);
+    string TextPreview,
+    int    Id = 0);   // PowerPoint Shape.Id. 슬라이드 안에서 고유하고 복제해도 유지된다.
 
 /// <summary>값이 있는 항목만 바꾼다. 크기를 먼저 바꾼 뒤 위치를 맞추므로 뒤집힌 도형도 제자리에 둔다.</summary>
 public record ShapeGeometry(float? Left = null, float? Top = null, float? Width = null, float? Height = null);

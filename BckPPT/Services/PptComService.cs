@@ -117,6 +117,14 @@ public class PptComService : IPptComService
     private static dynamic? ResolveShape(dynamic slide, ShapeAddress address)
     {
         List<(dynamic Shape, IReadOnlyList<string> Path)> shapes = FlattenShapesWithPath(slide.Shapes);
+        if (address.Id is int id)
+        {
+            foreach (var (shape, _) in shapes)
+            {
+                try { if ((int)shape.Id == id) return shape; } catch { }
+            }
+            return null;
+        }
         var candidates = shapes
             .Select(s => (s.Path, (string)s.Shape.Name))
             .ToList();
@@ -1529,13 +1537,17 @@ public class PptComService : IPptComService
                 }
                 catch { }
 
-                int type = 0;
+                int type = 0, id = 0;
                 try { type = (int)shape.Type; } catch { }
+                try { id = (int)shape.Id; } catch { }
+                // 겹치는 이름은 "#n" 대신 Id 주소를 준다. "#n"은 다른 도형 이름을 바꾸면 밀려
+                // 모델이 엉뚱한 상자를 고쳤다(2026-10-06 실측).
+                int sameName = names.Count(n => n == name);
+                string address = id > 0 ? ShapeAddress.FormatStable(name, sameName, id) : ShapeAddress.Format(name, seen[name], sameName);
                 result.Add(new ShapeEntry(
-                    ShapeAddress.Format(name, seen[name], names.Count(n => n == name)),
-                    name, string.Join("/", shapes[i].Path), type,
+                    address, name, string.Join("/", shapes[i].Path), type,
                     (float)shape.Left, (float)shape.Top, (float)shape.Width, (float)shape.Height,
-                    hasText, preview));
+                    hasText, preview, id));
             }
             return (IReadOnlyList<ShapeEntry>)result;
         });

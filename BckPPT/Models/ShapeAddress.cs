@@ -10,6 +10,7 @@ namespace BckPPT.Models;
 /// <item><c>Text 19#3</c> — 같은 이름 중 세 번째(1부터)</item>
 /// <item><c>Group 171/Text 19</c> — 바로 위 그룹이 "Group 171"인 것만</item>
 /// <item><c>Table 1 [R2C3]</c> — 표 셀. 위 형식과 함께 쓸 수 있다.</item>
+/// <item><c>@1234</c> — PowerPoint 도형 Id. 다른 도형 이름을 바꿔도 밀리지 않고, 슬라이드를 복제해도 그대로다.</item>
 /// </list>
 /// 이름 자체에 '/'나 '#'이 들어간 도형은 전체 문자열이 이름과 정확히 같으면 그 도형을 먼저 고른다.
 /// </summary>
@@ -19,10 +20,12 @@ public sealed record ShapeAddress(
     string                Name,
     int                   Occurrence,
     int?                  Row = null,
-    int?                  Col = null)
+    int?                  Col = null,
+    int?                  Id = null)
 {
     private static readonly Regex CellSuffix  = new(@"^(.+?)\s+\[R(\d+)C(\d+)\]$");
     private static readonly Regex Occurrence_ = new(@"^(.+)#(\d+)$");
+    private static readonly Regex IdForm      = new(@"^@(\d+)$");
 
     public bool IsTableCell => Row is not null && Col is not null;
 
@@ -38,6 +41,9 @@ public sealed record ShapeAddress(
             row  = int.Parse(cell.Groups[2].Value);
             col  = int.Parse(cell.Groups[3].Value);
         }
+
+        if (IdForm.Match(rest.Trim()) is { Success: true } id)
+            return new ShapeAddress(address, [], "", 1, row, col, int.Parse(id.Groups[1].Value));
 
         var segments = rest.Split('/');
         string last  = segments[^1];
@@ -71,6 +77,10 @@ public sealed record ShapeAddress(
         }
         return -1;
     }
+
+    /// <summary>목록에 보여줄 주소. 이름이 하나뿐이면 이름, 겹치면 고정 주소 "@Id".</summary>
+    public static string FormatStable(string name, int sameNameCount, int id)
+        => sameNameCount > 1 && id > 0 ? $"@{id}" : name;
 
     /// <summary>목록에 보여줄 주소. 이름이 하나뿐이면 이름만, 겹치면 "이름#n".</summary>
     public static string Format(string name, int occurrence, int sameNameCount)

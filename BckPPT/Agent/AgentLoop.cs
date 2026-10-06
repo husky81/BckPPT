@@ -32,7 +32,7 @@ public sealed record AgentLoopOptions
     public int LintRejectionsBeforeFinish { get; init; } = 2;
 
     /// <summary>슬라이드를 바꾼 뒤 도구도 finish도 없이 답하면 이어가라고 되돌려 보내는 횟수.</summary>
-    public int NudgesWithoutFinish { get; init; } = 1;
+    public int NudgesWithoutFinish { get; init; } = 2;
 }
 
 public enum AgentStopReason { Finished, AnsweredWithoutTools, TurnLimit, TokenLimit }
@@ -108,7 +108,11 @@ public sealed class AgentLoop(ILlmClient llm, ToolRegistry tools, AgentLoopOptio
                 session.Context.Origins.Touched.Count > 0)
             {
                 nudges++;
-                session.Append(LlmMessage.User(ContinueNudge));
+                // 남은 위반을 함께 보여줘야 무엇을 고칠지 안다. 실측에서 위반 15건을 남긴 채 "다음 단계"만 말하고 멈췄다.
+                var pending = await LintTouchedAsync(session.Context, cancellationToken);
+                session.Append(LlmMessage.User(pending.Count == 0
+                    ? ContinueNudge
+                    : ContinueNudge + "\n" + Truncate(LayoutLint.Describe(pending), 3000)));
                 continue;
             }
             if (completion.ToolCalls.Count == 0)

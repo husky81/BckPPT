@@ -169,3 +169,48 @@ public class ShapeListFormatTests
         Assert.True(text.IndexOf("Text 19#2") > text.IndexOf("[카드 2]"));
     }
 }
+
+public class StableAddressTests
+{
+    [Fact]
+    public void Id_주소를_읽는다()
+    {
+        var a = BckPPT.Models.ShapeAddress.Parse("@1234");
+        Assert.Equal(1234, a.Id);
+        var cell = BckPPT.Models.ShapeAddress.Parse("@77 [R2C3]");
+        Assert.Equal((77, 2, 3), (cell.Id!.Value, cell.Row!.Value, cell.Col!.Value));
+        Assert.Null(BckPPT.Models.ShapeAddress.Parse("Text 19#2").Id);
+    }
+
+    [Fact]
+    public void 겹치는_이름만_Id_주소를_준다()
+    {
+        Assert.Equal("@12", BckPPT.Models.ShapeAddress.FormatStable("Text 19", 3, 12));
+        Assert.Equal("C1_rnd", BckPPT.Models.ShapeAddress.FormatStable("C1_rnd", 1, 12));
+    }
+
+    [Fact]
+    public void 이름을_바꿔도_Id로_기준_상자와_짝을_짓는다()
+    {
+        TextLineInfo L(int n, LineBreakType t) => new(n, "충분히 긴 한 줄", t);
+        var baseline = new LintSlide(33, [new LintShape("@40", "Text 19", 0, 0, 200, 100,
+            [L(1, LineBreakType.Enter), L(2, LineBreakType.None)], Id: 40)]);
+        var renamed = new LintShape("C1_rnd", "C1_rnd", 0, 0, 200, 100,
+            [L(1, LineBreakType.Enter), L(2, LineBreakType.Enter), L(3, LineBreakType.None)], Id: 40);
+
+        var issue = Assert.Single(LayoutLint.Check(new LintSlide(35, [renamed]), baseline, new LintSettings()));
+        Assert.StartsWith("C1_rnd 3줄 > 기준 2줄", issue.Message);
+    }
+
+    [Fact]
+    public void 짧은_한_줄_상자가_넘어가면_폭을_넓히라고_한다()
+    {
+        var tag = new LintShape("C1_tag", "C1_tag", 0, 0, 50, 20,
+        [
+            new TextLineInfo(1, "시공 안전성 ● 유지관리 효율", LineBreakType.AutoWrap),
+            new TextLineInfo(2, "●", LineBreakType.None),
+        ], BoundHeight: 20);
+        var issue = Assert.Single(LayoutLint.Check(new LintSlide(35, [tag]), null, new LintSettings()));
+        Assert.Contains("set_geometry로 폭을 넓히세요(지금 50pt)", issue.Message);
+    }
+}

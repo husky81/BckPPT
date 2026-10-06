@@ -144,7 +144,7 @@ public sealed class AgentLoopTests : IDisposable
         var result = await Loop(llm).RunAsync(session, "채워줘");
 
         Assert.Equal(AgentStopReason.Finished, result.Reason);
-        Assert.Equal(AgentLoop.ContinueNudge, llm.Requests[2].Messages[^1].Content);
+        Assert.StartsWith(AgentLoop.ContinueNudge, llm.Requests[2].Messages[^1].Content);
     }
 
     [Fact]
@@ -153,13 +153,14 @@ public sealed class AgentLoopTests : IDisposable
         var llm = new FakeLlmClient(
             FakeLlmClient.Calls(("set_paragraphs", """{"slide": 1, "shape": "C1_rnd", "paragraphs": ["새 내용"]}""")),
             FakeLlmClient.Text("어느 카드를 바꿀까요?"),
+            FakeLlmClient.Text("어느 카드를 바꿀까요?"),
             FakeLlmClient.Text("어느 카드를 바꿀까요?"));
         using var session = StartSession();
 
         var result = await Loop(llm).RunAsync(session, "채워줘");
 
         Assert.Equal(AgentStopReason.AnsweredWithoutTools, result.Reason);
-        Assert.Equal(3, result.Turns);
+        Assert.Equal(4, result.Turns);   // 이어가라는 안내 2번 뒤 끝낸다
     }
 
     [Fact]

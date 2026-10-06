@@ -19,9 +19,15 @@ public sealed record LintShape(
     IReadOnlyList<TextLineInfo> Lines,
     float                      BoundHeight = 0f,
     TextFormatInfo?            Format      = null,
-    bool                       IsAdded     = false)
+    bool                       IsAdded     = false,
+    int                        Id          = 0)
 {
     public bool HasText => Lines.Count > 0;
+
+    /// <summary>기준 슬라이드의 같은 도형. 복제해도 Id는 유지되므로, 이름을 바꾼 뒤에도 Id로 짝을 짓는다.</summary>
+    public LintShape? Counterpart(LintSlide? baseline) =>
+        baseline?.Shapes.FirstOrDefault(b => Id > 0 && b.Id == Id)
+        ?? baseline?.Shapes.FirstOrDefault(b => b.Address == Address);
 }
 
 public sealed record LintSlide(int SlideIndex, IReadOnlyList<LintShape> Shapes);
@@ -54,7 +60,7 @@ public static class LayoutLint
         var issues = new List<LintIssue>();
         foreach (var shape in slide.Shapes.Where(s => s.HasText && !Unchanged(s, baseline)))
         {
-            if (baseline?.Shapes.FirstOrDefault(b => b.Address == shape.Address) is { HasText: true } basis &&
+            if (shape.Counterpart(baseline) is { HasText: true } basis &&
                 shape.Lines.Count > basis.Lines.Count)
                 issues.Add(new(LintRule.BaselineLines, shape.Address,
                     $"{shape.Address} {shape.Lines.Count}줄 > 기준 {basis.Lines.Count}줄{ExcessHint(shape.Lines, basis.Lines.Count)}"));
@@ -64,7 +70,7 @@ public static class LayoutLint
 
             if (shape.BoundHeight > shape.Height + settings.OverflowTolerance)
                 issues.Add(new(LintRule.Overflow, shape.Address,
-                    $"{shape.Address} 텍스트가 상자보다 {shape.BoundHeight - shape.Height:0.#}pt 넘침"));
+                    $"{shape.Address} 텍스트가 상자보다 {shape.BoundHeight - shape.Height:0.#}pt 넘침{WidenHint(shape)}"));
         }
         CheckFormatDrift(slide, baseline, issues);
         CheckOverlaps(slide, settings, issues);
@@ -76,7 +82,7 @@ public static class LayoutLint
     /// 템플릿에 원래 있던 문제까지 고치라고 하면 모델이 요청 밖의 상자를 건드린다(2026-10-06 실측).
     /// </summary>
     public static bool Unchanged(LintShape shape, LintSlide? baseline) =>
-        baseline?.Shapes.FirstOrDefault(b => b.Address == shape.Address) is { } basis &&
+        shape.Counterpart(baseline) is { } basis &&
         basis.Height == shape.Height && basis.Width == shape.Width &&
         basis.Lines.Select(l => l.Text).SequenceEqual(shape.Lines.Select(l => l.Text));
 
@@ -135,7 +141,7 @@ public static class LayoutLint
             var last = segment[^1];
             if (segment.Count >= 2 && VisibleLength(last.Text) is > 0 and var length && length <= settings.OrphanMaxChars)
                 issues.Add(new(LintRule.OrphanWord, shape.Address,
-                    $"{shape.Address} {paragraph}문단 마지막 줄 '{last.Text.Trim()}'만 남음"));
+                    $"{shape.Address} {paragraph}문단 마지막 줄 '{last.Text.Trim()}'만 남음{WidenHint(shape)}"));
             if (last.BreakType != LineBreakType.ShiftEnter) paragraph++;
         }
     }
@@ -197,6 +203,17 @@ public static class LayoutLint
         }
     }
 
+    /// <summary>
+    /// 태그·배지처럼 짧은 한 문단 상자가 줄바꿈되면 문구가 아니라 폭이 문제다.
+    /// 모델이 "시공 안전성 ● 유지관리 효율 ●"를 50pt 상자에 넣고 문구만 고치며 턴을 썼다(2026-10-06 실측).
+    /// </summary>
+    private static string WidenHint(LintShape shape)
+    {
+        bool shortSingle = Segments(shape.Lines).Count(s => s[^1].BreakType != LineBreakType.ShiftEnter) == 1 &&
+                           shape.Lines.Sum(l => l.Text.Trim().Length) <= 30;
+        return shortSingle ? $" — 짧은 한 줄 상자면 문구 대신 set_geometry로 폭을 넓히세요(지금 {shape.Width:0.#}pt)" : "";
+    }
+
     private static bool Contains(LintShape outer, LintShape inner, float tolerance) =>
         inner.Left >= outer.Left - tolerance && inner.Top >= outer.Top - tolerance &&
         inner.Left + inner.Width <= outer.Left + outer.Width + tolerance &&
@@ -224,7 +241,8 @@ public static class SlideLintCollector
                 try { format = ppt.GetTextFormat(path, slideIndex, entry.Address); } catch { }
             }
             shapes.Add(new LintShape(entry.Address, entry.Name, entry.Left, entry.Top, entry.Width, entry.Height,
-                lines, bound, format, addedAddresses?.Contains(entry.Address) == true));
+                lines, bound, format, addedAddresses?.Contains(entry.Address) == true || addedAddresses?.Contains(entry.Name) == true,
+                entry.Id));
         }
         return new LintSlide(slideIndex, shapes);
     }
