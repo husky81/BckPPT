@@ -70,6 +70,10 @@ public static class PptAgentTools
         };
         if (includeSources)
         {
+            tools.Add(new("brief_source",
+                "원문 한 문서에서 요약문·개요, 문제점·필요성, 연구개발 내용·목표 절을 찾아 읽고 요점만 정리해 돌려준다(쪽 번호 포함). " +
+                "카드를 채울 때 문서마다 이것을 먼저 부른다. document는 D1 같은 별칭. focus로 원하는 항목을 바꿀 수 있다",
+                Schema("""{"document": {"type": "string"}, "focus": {"type": "string"}}""", "document"), false, BriefSource));
             tools.Add(new("source_outline", "첨부한 원문의 목차(절 제목과 시작 쪽). document를 비우면 문서 목록. 원문을 읽기 전에 먼저 본다",
                 Schema("""{"document": {"type": "string"}}"""), false, SourceOutline));
             tools.Add(new("search_source", "첨부한 원문 문서에서 관련 쪽을 찾는다. 결과는 문서명·쪽·〈절 제목〉·발췌",
@@ -398,6 +402,31 @@ public static class PptAgentTools
         var hits = library.Search(ToolArgs.String(args, "query"), Math.Clamp(ToolArgs.OptionalInt(args, "limit") ?? 5, 3, 10));
         if (hits.Count == 0) return Task.FromResult("찾은 쪽이 없습니다. 다른 낱말로 검색하세요.");
         return Task.FromResult(string.Join("\n\n", hits.Select(h => $"[{h.Document} p.{h.Page}] {h.Snippet}")));
+    }
+
+    /// <summary>요점 정리에 넘길 절을 찾는 질의. 국가 R&D 기획보고서의 공통 절 이름이다.</summary>
+    public static readonly IReadOnlyList<string> BriefQueries =
+        ["요약문", "연구개발 개요", "목적 필요성", "현황 문제점 한계", "연구개발 내용", "최종목표", "세부 연구내용"];
+
+    public const string DefaultBriefFocus =
+        "개요 1문장(과제가 무엇을 개발하는지), 문제점 2~3개(현행 한계), 연구개발 내용 5~6개(개발 항목)";
+
+    private static async Task<string> BriefSource(AgentToolContext ctx, JsonElement args, CancellationToken ct)
+    {
+        var library = ctx.Sources ?? throw new AgentToolException("첨부된 원문이 없습니다.");
+        string document = ToolArgs.String(args, "document");
+        string focus = ToolArgs.OptionalString(args, "focus") ?? DefaultBriefFocus;
+        var excerpts = await Task.Run(() => library.Excerpts(document, BriefQueries, pagesPerQuery: 2, maxChars: 14000), ct);
+        if (excerpts.Length == 0) return "관련 절을 찾지 못했습니다. source_outline으로 목차를 보세요.";
+        if (ctx.Summarize is null) return excerpts;
+
+        string instruction =
+            "아래는 국가 R&D 기획보고서의 발췌다. 발표 카드에 넣을 내용을 정리하라.\n" +
+            $"항목: {focus}\n" +
+            "규칙: 발췌에 있는 사실만 쓴다. 각 항목은 개조식 한 줄(30~45자), '~개발', '~구축', '~한계'처럼 명사형으로 끝낸다. " +
+            "항목마다 근거 쪽을 (p.N)으로 붙인다. 머리말·설명 없이 항목만 쓴다.";
+        var summary = await ctx.Summarize(instruction, excerpts, ct);
+        return $"{excerpts.Split('\n')[0]} 요점\n{summary}";
     }
 
     private static Task<string> SourceOutline(AgentToolContext ctx, JsonElement args, CancellationToken ct)

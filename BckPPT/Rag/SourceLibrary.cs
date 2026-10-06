@@ -14,7 +14,11 @@ namespace BckPPT.Rag;
 /// <summary>원문 한 쪽. PDF는 실제 쪽, PPT는 슬라이드, Markdown·텍스트는 제목 기준 구간이다.</summary>
 public sealed record SourcePage(int Page, string Heading, string Text);
 
-public sealed record SourceDocument(string Name, string Path, int PageCount);
+/// <summary>원문 문서. <see cref="Alias"/>(D1, D2 …)는 이름순으로 붙이며, 모델이 긴 파일명을 옮겨 쓰다 틀리지 않게 한다.</summary>
+public sealed record SourceDocument(string Name, string Path, int PageCount, string Alias = "")
+{
+    public string Label => Alias.Length == 0 ? Name : $"{Alias} {Name}";
+}
 
 /// <summary>
 /// 에이전트가 읽을 원문(보고서·RFP 등)을 쪽 단위로 쪼개 SQLite FTS5에 색인한다.
@@ -105,23 +109,44 @@ public sealed class SourceLibrary : ISourceLibrary
     public IReadOnlyList<SourceDocument> Documents()
     {
         using var connection = Open();
+        return ScopedDocuments(connection).Select(d => d.Document).ToList();
+    }
+
+    /// <summary>범위 안 문서를 이름순으로, 별칭 D1… 을 붙여 돌려준다.</summary>
+    private List<(long Id, SourceDocument Document)> ScopedDocuments(SqliteConnection connection)
+    {
         using var command = connection.CreateCommand();
-        command.CommandText = "SELECT name, path, page_count FROM source_docs ORDER BY name";
+        command.CommandText = "SELECT id, name, path, page_count FROM source_docs ORDER BY name";
         using var reader = command.ExecuteReader();
-        var result = new List<SourceDocument>();
-        while (reader.Read()) result.Add(new SourceDocument(reader.GetString(0), reader.GetString(1), reader.GetInt32(2)));
-        return result.Where(d => InScope(d.Path)).ToList();
+        var result = new List<(long, SourceDocument)>();
+        while (reader.Read())
+        {
+            if (!InScope(reader.GetString(2))) continue;
+            result.Add((reader.GetInt64(0),
+                new SourceDocument(reader.GetString(1), reader.GetString(2), reader.GetInt32(3), $"D{result.Count + 1}")));
+        }
+        return result;
     }
 
     // ── 검색·읽기 (ISourceLibrary) ─────────────────────────────
 
-    public IReadOnlyList<SourceHit> Search(string query, int limit)
+    public IReadOnlyList<SourceHit> Search(string query, int limit) => Search(query, limit, document: null);
+
+    /// <summary><paramref name="document"/>를 주면 그 문서 안에서만 찾는다.</summary>
+    public IReadOnlyList<SourceHit> Search(string query, int limit, string? document)
     {
         var terms = Terms(query);
         if (terms.Count == 0) return [];
 
         using var connection = Open();
-        int total = Documents().Sum(d => d.PageCount);
+        var docs = ScopedDocuments(connection);
+        if (document is not null)
+        {
+            var (id, _, _) = ResolveDocument(connection, document);
+            docs = docs.Where(d => d.Id == id).ToList();
+        }
+        var labels = docs.ToDictionary(d => d.Document.Path, d => d.Document.Label, StringComparer.OrdinalIgnoreCase);
+        int total = docs.Sum(d => d.Document.PageCount);
         if (total == 0) return [];
 
         // 후보: 어느 한 낱말이라도 들어 있는 쪽. 긴 낱말은 FTS로, 짧은 낱말은 LIKE로 찾는다.
@@ -153,9 +178,9 @@ public sealed class SourceLibrary : ISourceLibrary
             int found = 0;
             while (reader.Read())
             {
-                if (!InScope(reader.GetString(5))) continue;
+                if (!labels.TryGetValue(reader.GetString(5), out var label)) continue;
                 found++;
-                candidates[reader.GetInt64(0)] = (reader.GetString(1), reader.GetInt32(2), reader.GetString(3),
+                candidates[reader.GetInt64(0)] = (label, reader.GetInt32(2), reader.GetString(3),
                     reader.GetString(4), reader.GetString(6));
             }
             df[term] = found;
@@ -179,7 +204,8 @@ public sealed class SourceLibrary : ISourceLibrary
             var docs = Documents();
             return docs.Count == 0
                 ? "첨부된 원문이 없습니다."
-                : "원문 목록\n" + string.Join("\n", docs.Select(d => $"- {d.Name} ({d.PageCount}쪽)"));
+                : "원문 목록 (document 인자에는 D1 같은 별칭을 쓴다)\n" +
+                  string.Join("\n", docs.Select(d => $"- {d.Alias}: {d.Name} ({d.PageCount}쪽)"));
         }
 
         using var connection = Open();
@@ -212,6 +238,37 @@ public sealed class SourceLibrary : ISourceLibrary
         if (entries > MaxEntries)
             sb.Append($"…(절 {entries - MaxEntries}개 더 있음. search_source로 절 제목을 검색하세요)\n");
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// 한 문서에서 여러 질의의 상위 쪽을 모아 쪽 순서로 붙인다(겹치면 한 번). 요약 LLM에 넘길 발췌다.
+    /// </summary>
+    public string Excerpts(string document, IReadOnlyList<string> queries, int pagesPerQuery, int maxChars)
+    {
+        var pages = new SortedSet<int>();
+        foreach (var query in queries)
+            foreach (var hit in Search(query, pagesPerQuery, document)) pages.Add(hit.Page);
+        if (pages.Count == 0) return "";
+
+        using var connection = Open();
+        var (docId, name, _) = ResolveDocument(connection, document);
+        var sb = new StringBuilder($"{name}\n");
+        int perPage = Math.Max(800, maxChars / pages.Count);
+        foreach (var page in pages)
+        {
+            using var command = connection.CreateCommand();
+            command.CommandText = "SELECT heading, text FROM source_pages WHERE doc_id=$doc AND page=$page";
+            command.Parameters.AddWithValue("$doc", docId);
+            command.Parameters.AddWithValue("$page", page);
+            using var reader = command.ExecuteReader();
+            while (reader.Read() && sb.Length < maxChars)
+            {
+                var text = reader.GetString(1);
+                sb.Append($"\n--- p.{page} {reader.GetString(0)}\n")
+                  .Append(text.Length <= perPage ? text : text[..perPage] + "…").Append('\n');
+            }
+        }
+        return sb.Length <= maxChars ? sb.ToString() : sb.ToString()[..maxChars];
     }
 
     public string Read(string document, int fromPage, int toPage)
@@ -453,26 +510,39 @@ public sealed class SourceLibrary : ISourceLibrary
 
     // ── 저장소 ─────────────────────────────────────────────────
 
+    private static readonly Regex AliasPrefix = new(@"^\s*[Dd](\d+)(?:\b|\s|$)");
+
+    /// <summary>
+    /// 별칭(D1, "D1 파일명"), 정확한 이름, 확장자 없는 이름, 유일한 부분 일치 순으로 찾고, 그래도 없으면
+    /// 글자가 가장 많이 겹치는 문서를 고른다. qwen3가 긴 한글 파일명을 "도로시설物開축"처럼 한자로 틀리게 옮겨 썼다.
+    /// </summary>
     private (long Id, string Name, int Pages) ResolveDocument(SqliteConnection connection, string document)
     {
-        var docs = new List<(long Id, string Name, string Path, int Pages)>();
-        using (var command = connection.CreateCommand())
-        {
-            command.CommandText = "SELECT id, name, path, page_count FROM source_docs";
-            using var reader = command.ExecuteReader();
-            while (reader.Read()) docs.Add((reader.GetInt64(0), reader.GetString(1), reader.GetString(2), reader.GetInt32(3)));
-        }
-        docs.RemoveAll(d => !InScope(d.Path));
+        var scoped = ScopedDocuments(connection);
+        if (AliasPrefix.Match(document) is { Success: true } alias &&
+            scoped.FirstOrDefault(d => d.Document.Alias == $"D{alias.Groups[1].Value}") is { Document: not null } byAlias)
+            return (byAlias.Id, byAlias.Document.Label, byAlias.Document.PageCount);
+
+        var docs = scoped.Select(d => (d.Id, Name: d.Document.Label, d.Document.Path, Pages: d.Document.PageCount)).ToList();
         string Stem(string n) => System.IO.Path.GetFileNameWithoutExtension(n);
-        var match = docs.FirstOrDefault(d => d.Name.Equals(document, StringComparison.OrdinalIgnoreCase));
-        if (match.Name is null) match = docs.FirstOrDefault(d => Stem(d.Name).Equals(Stem(document), StringComparison.OrdinalIgnoreCase));
+        string Bare(string n) => AliasPrefix.Replace(n, "").Trim();
+        var match = docs.FirstOrDefault(d => Bare(d.Name).Equals(document, StringComparison.OrdinalIgnoreCase));
+        if (match.Name is null) match = docs.FirstOrDefault(d => Stem(Bare(d.Name)).Equals(Stem(document), StringComparison.OrdinalIgnoreCase));
         if (match.Name is null)
         {
             var partial = docs.Where(d => d.Name.Contains(document, StringComparison.OrdinalIgnoreCase)).ToList();
             if (partial.Count == 1) match = partial[0];
         }
+        if (match.Name is null && docs.Count > 0 && document.Length >= 6)
+        {
+            // 글자 집합이 70% 이상 겹치는 문서 중 가장 비슷한 것
+            var wanted = document.Where(c => !char.IsWhiteSpace(c)).ToHashSet();
+            var best = docs.Select(d => (Doc: d, Score: (double)wanted.Count(d.Name.Contains) / wanted.Count))
+                           .OrderByDescending(x => x.Score).First();
+            if (best.Score >= 0.7) match = best.Doc;
+        }
         if (match.Name is null)
-            throw new AgentToolException($"원문 '{document}'를 찾지 못했습니다. 있는 문서: {string.Join(", ", docs.Select(d => d.Name))}");
+            throw new AgentToolException($"원문 '{document}'를 찾지 못했습니다. D1 같은 별칭을 쓰세요. 있는 문서: {string.Join(", ", docs.Select(d => d.Name))}");
         return (match.Id, match.Name, match.Pages);
     }
 

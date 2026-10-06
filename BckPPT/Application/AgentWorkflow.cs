@@ -74,10 +74,11 @@ public sealed class AgentWorkflow(
         Session ??= AgentFactory.StartSession(llm, options, ppt, sourcePath);
 
         bool hasSources = _attached.Count > 0;
-        Session.Context.Sources = hasSources ? library.WithScope(_attached) : null;
-        var request = hasSources
-            ? $"{instruction}\n\n(첨부 원문: {string.Join(", ", _attached.Select(Path.GetFileName))})"
-            : instruction;
+        var scoped = hasSources ? library.WithScope(_attached) : null;
+        Session.Context.Sources = scoped;
+        var request = scoped is null
+            ? instruction
+            : $"{instruction}\n\n(첨부 원문: {string.Join(", ", scoped.Documents().Select(d => $"{d.Alias}={d.Name}"))})";
 
         var run = await AgentFactory.CreateLoop(llm, options, hasSources, LoopOptions).RunAsync(Session, request, progress, ct);
 

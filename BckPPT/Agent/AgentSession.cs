@@ -46,6 +46,7 @@ public sealed class AgentSession : IDisposable
         IPptComService ppt, string sourcePath, string systemPrompt,
         string? workDirectory = null, string? logDirectory = null,
         Func<string, string, CancellationToken, Task<string>>? describeImage = null,
+        Func<string, string, CancellationToken, Task<string>>? summarize = null,
         ISourceLibrary? sources = null)
     {
         sourcePath = Path.GetFullPath(sourcePath);
@@ -63,7 +64,7 @@ public sealed class AgentSession : IDisposable
 
         var context = new AgentToolContext(ppt, workingPath)
         {
-            DescribeImage = describeImage, Sources = sources, BaselinePath = sourcePath
+            DescribeImage = describeImage, Summarize = summarize, Sources = sources, BaselinePath = sourcePath
         };
         var log = new AgentSessionLog(Path.Combine(logDirectory ?? DefaultLogDirectory, $"{stamp}_{Path.GetFileNameWithoutExtension(workingPath)}.jsonl"));
         var session = new AgentSession(sourcePath, workingPath, context, log) { RemovedFonts = removedFonts };

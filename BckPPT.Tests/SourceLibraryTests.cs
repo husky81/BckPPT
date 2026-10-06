@@ -50,7 +50,7 @@ public sealed class SourceLibraryTests(ITestOutputHelper output) : IDisposable
         var hits = library.Search("연구개발 내용", 5);
 
         Assert.NotEmpty(hits);
-        Assert.Equal("기획보고서_A.md", hits[0].Document);
+        Assert.Equal("D1 기획보고서_A.md", hits[0].Document);
         Assert.Contains("〈3. 연구개발 내용〉", hits[0].Snippet);
         Assert.Contains("열폭주", hits[0].Snippet);
     }
@@ -136,6 +136,35 @@ public sealed class SourceLibraryTests(ITestOutputHelper output) : IDisposable
     }
 
     [Fact]
+    public void 별칭이나_틀리게_옮겨_쓴_이름으로도_문서를_찾는다()
+    {
+        var library = Library();
+        library.AddFile(Write("04. (초)노후 도로시설물 개축 교체 의사결정 체계.md", "# 하나\n\n노후 본문\n"));
+        library.AddFile(Write("디지털 트윈 도로시설물 성능 예측.md", "# 하나\n\n트윈 본문\n"));
+
+        Assert.Contains("D1: 04. (초)노후", library.Outline(null));
+        Assert.Contains("노후 본문", library.Read("D1", 1, 1));
+        Assert.Contains("트윈 본문", library.Read("D2 디지털 트윈 도로시설물 성능 예측.md", 1, 1));
+        // 2026-10-06 실측: 모델이 "시설물"을 "시설物"로 옮겨 썼다.
+        Assert.Contains("노후 본문", library.Read("04. (초)노후 도로시설物 개축 교체 의사결정 체계.md", 1, 1));
+        Assert.StartsWith("D2 ", Assert.Single(library.Search("트윈", 5)).Document);
+    }
+
+    [Fact]
+    public void 발췌는_한_문서의_관련_쪽만_쪽_순서로_모은다()
+    {
+        var library = Library();
+        library.AddFile(Write("a.md", "## 1쪽\n\n요약문\n가 과제 요약\n\n## 2쪽\n\n부록\n\n## 3쪽\n\n3. 연구개발 내용\n센서 개발\n"));
+        library.AddFile(Write("b.md", "## 1쪽\n\n요약문\n다른 문서\n\n## 2쪽\n\n잡음\n\n## 3쪽\n\n잡음\n"));
+
+        var text = library.Excerpts("D1", ["연구개발 내용", "요약문"], pagesPerQuery: 2, maxChars: 5000);
+
+        Assert.True(text.IndexOf("--- p.1") < text.IndexOf("--- p.3"));
+        Assert.DoesNotContain("--- p.2", text);
+        Assert.DoesNotContain("다른 문서", text);
+    }
+
+    [Fact]
     public void 범위를_정하면_첨부한_문서만_찾는다()
     {
         var library = Library();
@@ -146,7 +175,7 @@ public sealed class SourceLibraryTests(ITestOutputHelper output) : IDisposable
 
         var scoped = library.WithScope([b]);
 
-        Assert.Equal("b.md", Assert.Single(scoped.Search("열폭주", 5)).Document);
+        Assert.Equal("D1 b.md", Assert.Single(scoped.Search("열폭주", 5)).Document);   // 범위 안에서 다시 매긴 별칭
         Assert.Single(scoped.Documents());
         Assert.Throws<AgentToolException>(() => scoped.Read("a.md", 1, 1));
         Assert.Equal(2, library.Search("열폭주", 5).Count);

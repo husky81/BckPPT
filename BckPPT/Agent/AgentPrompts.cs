@@ -34,8 +34,9 @@ public static class AgentPrompts
         - 개조식으로 간결하게 쓰고 원문에 없는 사실은 만들지 않는다.
 
         ## 원문 찾기
-        - 원문마다 source_outline으로 목차를 먼저 보고, "요약문", "최종목표", "현황 및 문제점", "연구개발 내용", "구성기술", "RFP" 같은 절의 쪽을 read_source로 읽는다.
-        - 목차로 못 찾으면 search_source로 그 절 제목을 검색한다. 앞쪽 몇 쪽만 읽고 추측해서 쓰지 않는다.
+        - 원문은 D1, D2 같은 별칭으로 가리킨다. 긴 파일명을 옮겨 쓰지 않는다.
+        - 원문마다 brief_source(document="D1")를 한 번 불러 개요·문제점·연구개발 내용 요점을 받는다. 대부분 이것으로 충분하다.
+        - 요점이 부족할 때만 source_outline으로 목차를 보고 필요한 쪽을 read_source로 읽는다. 한 쪽씩 훑지 않는다.
         - 긴 원문을 통째로 읽지 말고 필요한 쪽만 읽는다. 원문에서 읽은 사실만 쓴다.
         - 카드 제목에는 과제명만 쓴다("기획보고서" 같은 문서 종류는 빼고).
 
@@ -58,7 +59,20 @@ public static class AgentFactory
         ILlmClient llm, GitokyLlmOptions? options, IPptComService ppt, string sourcePath, ISourceLibrary? sources = null) =>
         AgentSession.Start(ppt, sourcePath, AgentPrompts.System,
             describeImage: options is null ? null : (png, question, ct) => DescribeImageAsync(llm, options.VisionModel, png, question, ct),
+            summarize: (instruction, content, ct) => SummarizeAsync(llm, options?.AgentModel, instruction, content, ct),
             sources: sources);
+
+    /// <summary>
+    /// 원문 발췌를 주 대화와 따로 요약한다(Claude Code가 하위 에이전트로 원문을 읽던 방식).
+    /// 발췌 수만 자가 주 대화의 32k 문맥을 채우지 않아, 문서 5개를 읽어도 루프가 버틴다.
+    /// </summary>
+    public static async Task<string> SummarizeAsync(
+        ILlmClient llm, string? model, string instruction, string content, CancellationToken ct)
+    {
+        var completion = await llm.CompleteAsync(new LlmRequest(
+            [LlmMessage.System(instruction), LlmMessage.User(content)], model, 1200), ct);
+        return completion.Content.Trim();
+    }
 
     /// <summary>agent 라우트는 이미지를 받지 않으므로 렌더 확인은 vision 라우트에 따로 묻고 글로 돌려받는다.</summary>
     public static async Task<string> DescribeImageAsync(

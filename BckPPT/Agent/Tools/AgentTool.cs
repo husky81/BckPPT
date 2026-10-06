@@ -51,6 +51,12 @@ public sealed class AgentToolContext(IPptComService ppt, string workingPath)
     /// <summary>이미지 경로와 질문을 받아 비전 모델의 설명을 돌려준다. 없으면 렌더 결과는 경로만 알린다.</summary>
     public Func<string, string, CancellationToken, Task<string>>? DescribeImage { get; init; }
 
+    /// <summary>
+    /// (지시, 원문 발췌)를 받아 별도 LLM 호출로 요약을 돌려준다. 긴 원문이 주 대화의 32k 문맥을 채우지 않게 한다.
+    /// 없으면 brief_source는 발췌를 그대로 돌려준다.
+    /// </summary>
+    public Func<string, string, CancellationToken, Task<string>>? Summarize { get; init; }
+
     /// <summary>원문 라이브러리. Phase D 전까지는 비어 있을 수 있다.</summary>
     public ISourceLibrary? Sources { get; set; }
 
@@ -64,6 +70,9 @@ public interface ISourceLibrary
 
     /// <summary>문서 목록(document가 null) 또는 한 문서의 절 제목과 쪽 범위.</summary>
     string Outline(string? document);
+
+    /// <summary>한 문서에서 여러 질의의 상위 쪽 발췌(쪽 순서, 최대 글자 수).</summary>
+    string Excerpts(string document, IReadOnlyList<string> queries, int pagesPerQuery, int maxChars);
     string Read(string document, int fromPage, int toPage);
 }
 
