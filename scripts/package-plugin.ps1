@@ -13,7 +13,8 @@
 
 param(
     [string]$Configuration = "Release",
-    [string]$BaseUrl = "https://releases.cellbox.ai/plugins/bckppt",
+    # 릴리스 버킷 공개 주소. releases.cellbox.ai는 DNS에 없는 이름이었다(2026-10-07 확인).
+    [string]$BaseUrl = "https://cellbox-release.s3.ap-northeast-2.amazonaws.com/plugins/bckppt",
     [string]$ReleaseNotes = "",
     [switch]$InstallLocal,
     [switch]$SkipBuild
