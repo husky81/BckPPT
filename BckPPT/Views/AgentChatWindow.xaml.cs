@@ -149,6 +149,7 @@ public partial class AgentChatWindow : Window, INotifyPropertyChanged
             var health = EnvironmentHealthService.Check();
             if (!health.IsPowerPointInstalled) AddNote(health.Message, warning: true);
             RefreshTarget();
+            FocusInput();
             _followTimer.Start();
             await FollowPowerPointAsync();
             await TestLlmConnectionAsync();
@@ -278,6 +279,7 @@ public partial class AgentChatWindow : Window, INotifyPropertyChanged
             turn.Finish(result?.AfterSlides.Count ?? result?.AfterThumbnails.Count ?? 0);
             _runningTurn = null;
             IsRequesting = false;
+            FocusInput();
             NotifySession();
             if (_followConversation) ScrollToEndNow();
         }
@@ -312,6 +314,9 @@ public partial class AgentChatWindow : Window, INotifyPropertyChanged
         _currentSlide = null;
         RefreshTarget();
         try { await Task.Run(() => _pptService.ActivatePresentation(path)); } catch { }
+        // PowerPoint는 그 문서로 바뀐 채 뒤에 두고, 바로 이어서 입력할 수 있게 BckPPT를 앞으로 가져온다.
+        Activate();
+        FocusInput();
         if (hadSession) AddNote($"대상을 {name}(으)로 바꿨습니다. 다음 요청은 이 문서에서 새로 시작합니다.");
         await FollowPowerPointAsync();
     }
@@ -551,7 +556,12 @@ public partial class AgentChatWindow : Window, INotifyPropertyChanged
         MenuPopup.IsOpen = !MenuPopup.IsOpen;
     }
 
-    private void CloseMenu() => MenuPopup.IsOpen = false;
+    private void CloseMenu() { MenuPopup.IsOpen = false; FocusInput(); }
+
+    /// <summary>입력창에 커서를 둔다(시작·문서 고르기·요청 끝·메뉴 닫기).</summary>
+    private void FocusInput() =>
+        Dispatcher.BeginInvoke(() => { InstructionBox.Focus(); Keyboard.Focus(InstructionBox); InstructionBox.CaretIndex = InstructionBox.Text.Length; },
+            DispatcherPriority.Input);
 
     private void OpenFile_Click(object sender, RoutedEventArgs e)
     {
@@ -737,6 +747,8 @@ public partial class AgentChatWindow : Window, INotifyPropertyChanged
         {
             _pptService.OpenPptxInPowerPoint(path);
             _session.Presentation = new PptPresentation(Path.GetFileName(path), Path.GetFullPath(path), 0);
+            Activate();
+            FocusInput();
         }
         catch (Exception ex) { AddNote($"파일 열기 실패: {ex.Message}", warning: true); }
     }
