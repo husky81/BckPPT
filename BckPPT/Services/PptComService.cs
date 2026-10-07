@@ -263,6 +263,42 @@ public class PptComService : IPptComService
             try { if ((int)prs.Windows.Count > 0) { prs.Windows[1].Activate(); prs.Windows[1].View.GotoSlide(slideIndex); } } catch { }
         });
 
+    public IReadOnlyList<OpenPresentationInfo> ListOpenWindows()
+        => RunOnSta(() =>
+        {
+            var list = new List<OpenPresentationInfo>();
+            if (TryGetActiveInstance() is not { } app) return (IReadOnlyList<OpenPresentationInfo>)list;
+            string active = "";
+            try { if ((int)app.Windows.Count > 0) active = (string)app.ActiveWindow.Presentation.FullName; } catch { }
+            foreach (dynamic prs in app.Presentations)
+            {
+                try
+                {
+                    if ((int)prs.Windows.Count == 0) continue;   // 숨은 창(기준본·작업 사본)은 목록에 두지 않는다
+                    string full = (string)prs.FullName;
+                    bool saved = ((string)prs.Path).Length > 0;
+                    list.Add(new OpenPresentationInfo((string)prs.Name, full, (int)prs.Slides.Count,
+                        string.Equals(full, active, StringComparison.OrdinalIgnoreCase), saved));
+                }
+                catch { }
+            }
+            return (IReadOnlyList<OpenPresentationInfo>)list;
+        });
+
+    [DllImport("user32.dll")]
+    private static extern bool AllowSetForegroundWindow(int processId);
+
+    public void ActivatePresentation(string presentationPath)
+    {
+        // 앞에 있는 BckPPT가 포커스를 넘겨준다. 안 그러면 Windows가 막아 작업표시줄만 깜빡인다.
+        AllowSetForegroundWindow(-1);   // ASFW_ANY
+        RunOnSta(() =>
+        {
+            if (TryGetActiveInstance() is not { } app || FindOpenPresentation(app, presentationPath) is not { } prs) return;
+            try { if ((int)prs.Windows.Count > 0) prs.Windows[1].Activate(); } catch { }
+        });
+    }
+
     public IReadOnlyList<PptPresentation> GetOpenPresentations()
         => RunOnSta(() =>
         {

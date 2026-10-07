@@ -273,6 +273,9 @@ public sealed class FakePptComService : IPptComService
     public ActivePresentationInfo? Active { get; set; }
     public ActivePresentationInfo? GetActivePresentation() => Active;
     public void GoToSlide(string presentationPath, int slideIndex) => Calls.Add($"goto {slideIndex}");
+    public List<OpenPresentationInfo> OpenWindows { get; } = new();
+    public IReadOnlyList<OpenPresentationInfo> ListOpenWindows() => OpenWindows;
+    public void ActivatePresentation(string presentationPath) => Calls.Add($"activate {Path.GetFileName(presentationPath)}");
     public IReadOnlyList<(int Index, string Title)> ListSlides(string presentationPath) =>
         Slides.Select((s, i) => (i + 1, s.FirstOrDefault()?.Paragraphs.FirstOrDefault() ?? "")).ToList();
     public int ReplaceText(string presentationPath, string find, string replace, IReadOnlyList<(int slideIndex, string shapeName)>? targets = null) => throw new NotSupportedException();

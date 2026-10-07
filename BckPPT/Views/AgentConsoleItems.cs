@@ -170,3 +170,9 @@ public sealed partial class ConsoleTurn : ObservableObject
     partial void OnChangesExpandedChanged(bool value) => OnPropertyChanged(nameof(ChangesHeader));
     partial void OnSummaryChanged(string value) => OnPropertyChanged(nameof(SummaryHeader));
 }
+
+/// <summary>상태줄 목록의 열린 문서 한 줄.</summary>
+public sealed record OpenFileItem(string Name, string Path, string Folder, int SlideCount, bool IsCurrent, bool IsSaved)
+{
+    public string SlideText => IsSaved ? $"{SlideCount}쪽" : "저장 안 됨";
+}

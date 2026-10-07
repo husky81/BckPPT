@@ -228,12 +228,60 @@
                     <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
                 <Ellipse Width="9" Height="9" Fill="{Binding LightBrush}" VerticalAlignment="Center" ToolTip="{Binding LightTooltip}"/>
-                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="9,0,8,0" ToolTip="{Binding TargetTooltip}">
-                    <TextBlock x:Name="FileNameText" Text="{Binding FileNameDisplay}" FontFamily="{StaticResource BodyFont}" FontSize="12.5"
-                               Foreground="{StaticResource TextBr}"/>
-                    <TextBlock x:Name="FolderText" Text="{Binding FolderDisplay}" FontFamily="{StaticResource BodyFont}" FontSize="11"
-                               Foreground="{StaticResource SubTextBr}" Margin="8,0,0,0" VerticalAlignment="Center"/>
-                </StackPanel>
+                <Button x:Name="FileButton" Grid.Column="1" Style="{StaticResource FlatBtn}" Click="FileName_Click" Margin="5,0,8,0" Padding="4,3"
+                        ToolTip="{Binding TargetTooltip}" IsEnabled="{Binding CanSend}" HorizontalAlignment="Left">
+                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                        <TextBlock Text="📌" FontSize="10.5" Margin="0,0,5,0" VerticalAlignment="Center"
+                                   Visibility="{Binding IsPinned, Converter={StaticResource Vis}}"/>
+                        <TextBlock x:Name="FileNameText" Text="{Binding FileNameDisplay}" FontFamily="{StaticResource BodyFont}" FontSize="12.5"
+                                   Foreground="{StaticResource TextBr}"/>
+                        <TextBlock x:Name="FolderText" Text="{Binding FolderDisplay}" FontFamily="{StaticResource BodyFont}" FontSize="11"
+                                   Foreground="{StaticResource SubTextBr}" Margin="8,0,0,0" VerticalAlignment="Center"/>
+                        <TextBlock Text="▾" FontSize="10" Foreground="{StaticResource SubTextBr}" Margin="6,1,0,0" VerticalAlignment="Center"/>
+                    </StackPanel>
+                </Button>
+                <Popup x:Name="FilePopup" Grid.Column="1" PlacementTarget="{Binding ElementName=FileButton}" Placement="Bottom"
+                       StaysOpen="False" AllowsTransparency="True" VerticalOffset="4">
+                    <Border Background="{StaticResource PanelBg}" BorderBrush="{StaticResource BorderBr}" BorderThickness="1"
+                            CornerRadius="6" Padding="0,6" MinWidth="300" MaxWidth="440">
+                        <StackPanel>
+                            <TextBlock Text="열린 PowerPoint 문서가 없습니다" Foreground="{StaticResource SubTextBr}" FontSize="12" Margin="12,6"
+                                       Visibility="{Binding NoOpenFiles, Converter={StaticResource Vis}}"/>
+                            <ItemsControl ItemsSource="{Binding OpenFiles}">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Button Style="{StaticResource MenuBtn}" Click="OpenFileItem_Click" ToolTip="{Binding Path}">
+                                            <Grid x:Name="Row">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="18"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/>
+                                                </Grid.ColumnDefinitions>
+                                                <TextBlock Text="✓" Foreground="{StaticResource SuccessBr}"
+                                                           Visibility="{Binding IsCurrent, Converter={StaticResource Vis}}"/>
+                                                <StackPanel Grid.Column="1">
+                                                    <TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis" FontSize="12.5"/>
+                                                    <TextBlock Text="{Binding Folder}" FontSize="11" Foreground="{StaticResource SubTextBr}"
+                                                               TextTrimming="CharacterEllipsis"/>
+                                                </StackPanel>
+                                                <TextBlock Grid.Column="2" Text="{Binding SlideText}" FontSize="11" Foreground="{StaticResource SubTextBr}"
+                                                           Margin="12,1,0,0"/>
+                                            </Grid>
+                                        </Button>
+                                        <DataTemplate.Triggers>
+                                            <DataTrigger Binding="{Binding IsSaved}" Value="False">
+                                                <Setter TargetName="Row" Property="Opacity" Value="0.45"/>
+                                            </DataTrigger>
+                                        </DataTemplate.Triggers>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                            <Separator Background="{StaticResource BorderBr}" Margin="0,4"/>
+                            <Button Style="{StaticResource MenuBtn}" Content="{Binding PinLabel}" Click="Pin_Click"
+                                    IsEnabled="{Binding HasTarget}"
+                                    ToolTip="고정하면 PowerPoint에서 다른 문서를 봐도 이 문서에서 작업합니다"/>
+                            <Button Style="{StaticResource MenuBtn}" Content="PPT 파일 열기…" Click="OpenFile_Click"/>
+                        </StackPanel>
+                    </Border>
+                </Popup>
                 <TextBlock Grid.Column="2" Text="{Binding SlideDisplay}" FontFamily="{StaticResource MonoFont}" FontSize="11.5"
                            Foreground="{StaticResource SubTextBr}" VerticalAlignment="Center" Margin="0,0,6,0"/>
                 <Button x:Name="MoreButton" Grid.Column="3" Style="{StaticResource FlatBtn}" Click="More_Click" Width="30" Height="26"

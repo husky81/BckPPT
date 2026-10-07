@@ -62,6 +62,13 @@ public partial class AgentChatWindow : Window, INotifyPropertyChanged
     public string TargetTooltip => _session.Presentation?.Path ?? "대상 문서 없음";
     public string FileNameDisplay { get; private set; } = "PowerPoint 문서 없음";
     public string FolderDisplay { get; private set; } = "";
+    public ObservableCollection<OpenFileItem> OpenFiles { get; } = new();
+    public bool NoOpenFiles => OpenFiles.Count == 0;
+    private bool _pinned;
+    /// <summary>고정하면 PowerPoint에서 보고 있는 문서를 따라가지 않는다.</summary>
+    public bool IsPinned { get => _pinned; private set { _pinned = value; Notify(); Notify(nameof(PinLabel)); UpdateStatusLayout(); } }
+    public string PinLabel => IsPinned ? "📌 고정 풀기 (보고 있는 문서 따라가기)" : "📌 이 문서로 고정";
+    public bool HasTarget => _session.Presentation is not null;
     public string SlideDisplay => _session.Presentation is null ? ""
         : _currentSlide is int s ? $"{s} / {_slideCount}" : _slideCount > 0 ? $"{_slideCount}쪽" : "";
 
@@ -213,6 +220,7 @@ public partial class AgentChatWindow : Window, INotifyPropertyChanged
         // 요청에 PPT 경로가 있으면 그것을 대상으로 연다.
         if (AgentWorkflow.MentionedPresentationPath(instruction) is { } mentionedPptx && _session.Presentation?.Path is null)
             OpenPresentation(mentionedPptx);
+        string? switchNote = await SwitchToMentionedFileAsync(instruction);
         if (_session.Presentation?.Path is not { Length: > 0 } target)
         {
             AddNote("작업할 PowerPoint 문서가 없습니다. PowerPoint에서 문서를 열거나 ⋯ > PPT 파일 열기로 고른 뒤 다시 보내 주세요. 요청 문구는 남겨 두었습니다.", warning: true);
@@ -230,6 +238,7 @@ public partial class AgentChatWindow : Window, INotifyPropertyChanged
             catch { }
         });
         var turn = new ConsoleTurn(instruction);
+        if (switchNote is not null) turn.Add(new NoteEntry(switchNote));
         Turns.Add(turn);
         _runningTurn = turn;
         IsRequesting = true;
@@ -267,6 +276,74 @@ public partial class AgentChatWindow : Window, INotifyPropertyChanged
             if (_followConversation) ScrollToEndNow();
         }
         return result;
+    }
+
+    /// <summary>
+    /// 요청에 열린 문서의 이름 조각("추진일정 파일")이 있으면 그 문서로 바꾼다. 여러 개가 맞으면 바꾸지 않고 알린다.
+    /// 경로를 적은 경우는 앞에서 이미 처리했다. 돌려준 문장은 이번 요청의 작업 흐름 맨 앞에 붙는다.
+    /// </summary>
+    private async Task<string?> SwitchToMentionedFileAsync(string instruction)
+    {
+        IReadOnlyList<OpenPresentationInfo> open;
+        try { open = await Task.Run(_pptService.ListOpenWindows); } catch { return null; }
+        var match = OpenFileMatcher.Match(instruction, open);
+        if (match.Kind == FileMatchKind.Ambiguous)
+            return $"'{match.Token}'에 맞는 문서가 {match.Candidates.Count}개라 대상을 바꾸지 않았습니다({string.Join(", ", match.Candidates.Select(c => c.Name))}). " +
+                   "상태줄에서 고르거나 이름을 더 적어 주세요.";
+        if (match is not { Kind: FileMatchKind.One, File: { } file }) return null;
+        if (string.Equals(file.Path, _session.Presentation?.Path, StringComparison.OrdinalIgnoreCase)) return null;
+        await SelectFileAsync(file.Name, file.Path, file.SlideCount);
+        return $"요청에 적힌 '{match.Token}' → {file.Name}에서 작업합니다.";
+    }
+
+    /// <summary>대상을 바꾸고 PowerPoint에서도 그 문서를 앞으로 가져온다(대상 = 보고 있는 문서).</summary>
+    private async Task SelectFileAsync(string name, string path, int slideCount)
+    {
+        bool hadSession = _agentWorkflow.Session is not null &&
+                          !string.Equals(_agentWorkflow.Session.SourcePath, path, StringComparison.OrdinalIgnoreCase);
+        _session.Presentation = new PptPresentation(name, path, slideCount);
+        _slideCount = slideCount;
+        _currentSlide = null;
+        RefreshTarget();
+        try { await Task.Run(() => _pptService.ActivatePresentation(path)); } catch { }
+        if (hadSession) AddNote($"대상을 {name}(으)로 바꿨습니다. 다음 요청은 이 문서에서 새로 시작합니다.");
+        await FollowPowerPointAsync();
+    }
+
+    // ── 상태줄 문서 목록 ──
+
+    private async void FileName_Click(object sender, RoutedEventArgs e)
+    {
+        if (IsRequesting) return;
+        IReadOnlyList<OpenPresentationInfo> open = [];
+        try { open = await Task.Run(_pptService.ListOpenWindows); } catch { }
+        OpenFiles.Clear();
+        foreach (var o in open.OrderByDescending(o => o.IsSaved).ThenBy(o => o.Name, StringComparer.CurrentCulture))
+            OpenFiles.Add(new OpenFileItem(o.Name, o.Path, o.IsSaved ? ConsoleFormatting.ShortenFolder(System.IO.Path.GetDirectoryName(o.Path)) : "",
+                o.SlideCount, string.Equals(o.Path, _session.Presentation?.Path, StringComparison.OrdinalIgnoreCase), o.IsSaved));
+        Notify(nameof(NoOpenFiles)); Notify(nameof(HasTarget)); Notify(nameof(PinLabel));
+        FilePopup.IsOpen = true;
+    }
+
+    private async void OpenFileItem_Click(object sender, RoutedEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.DataContext is not OpenFileItem item) return;
+        FilePopup.IsOpen = false;
+        if (!item.IsSaved)
+        {
+            AddNote($"{item.Name}은(는) 저장되지 않은 새 문서라 작업할 수 없습니다. PowerPoint에서 먼저 저장해 주세요.", warning: true);
+            return;
+        }
+        await SelectFileAsync(item.Name, item.Path, item.SlideCount);
+    }
+
+    private void Pin_Click(object sender, RoutedEventArgs e)
+    {
+        FilePopup.IsOpen = false;
+        IsPinned = !IsPinned;
+        _statusDetail = IsPinned ? "고정한 문서에서 작업" : "보고 있는 문서를 따라감";
+        RefreshLight();
+        if (!IsPinned) _ = FollowPowerPointAsync();
     }
 
     /// <summary>진행 이벤트를 작업 흐름 항목으로 바꾼다.</summary>
@@ -383,7 +460,14 @@ public partial class AgentChatWindow : Window, INotifyPropertyChanged
         {
             var active = await Task.Run(() => { try { return _pptService.GetActivePresentation(); } catch { return null; } });
             if (IsRequesting) return;
-            if (active is not null)
+            if (active is not null && IsPinned && _session.Presentation is not null)
+            {
+                // 고정 중: 대상은 그대로. 보고 있는 문서가 대상이면 쪽만 따라간다.
+                bool same = string.Equals(active.Path, _session.Presentation.Path, StringComparison.OrdinalIgnoreCase);
+                _currentSlide = same ? active.CurrentSlide : null;
+                _statusDetail = "고정한 문서에서 작업" + (same ? "" : " · PowerPoint에서는 다른 문서를 보고 있음");
+            }
+            else if (active is not null)
             {
                 bool changed = !string.Equals(active.Path, _session.Presentation?.Path, StringComparison.OrdinalIgnoreCase);
                 _currentSlide = active.CurrentSlide;
@@ -413,6 +497,7 @@ public partial class AgentChatWindow : Window, INotifyPropertyChanged
         UpdateStatusLayout();
         Notify(nameof(SlideDisplay));
         Notify(nameof(TargetTooltip));
+        Notify(nameof(HasTarget));
         RefreshLight();
     }
 
@@ -430,7 +515,8 @@ public partial class AgentChatWindow : Window, INotifyPropertyChanged
         string name = path is null ? "PowerPoint 문서 없음" : Path.GetFileName(path);
         string folder = path is null ? "" : ConsoleFormatting.ShortenFolder(Path.GetDirectoryName(path));
         // 신호등·여백·쪽 표시·⋯ 단추를 뺀 폭
-        double available = StatusBar.ActualWidth - 9 - 9 - 8 - 30 - Measure(SlideDisplay, FileNameText) - 16;
+        // 단추 여백·▾·(고정이면) 📌 몫도 뺀다.
+        double available = StatusBar.ActualWidth - 9 - 9 - 8 - 30 - Measure(SlideDisplay, FileNameText) - 16 - 30 - (IsPinned ? 18 : 0);
         double nameWidth = Measure(name, FileNameText);
         double folderWidth = folder.Length == 0 ? 0 : Measure(folder, FolderText) + 8;
         if (nameWidth + folderWidth <= available) { FileNameDisplay = name; FolderDisplay = folder; }

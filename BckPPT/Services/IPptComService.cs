@@ -11,6 +11,10 @@ public interface IPptComService
     ActivePresentationInfo? GetActivePresentation();
     /// <summary>문서 창을 그 쪽으로 옮긴다(창이 있을 때만).</summary>
     void GoToSlide(string presentationPath, int slideIndex);
+    /// <summary>창이 있는 문서 목록(BckPPT가 숨은 창으로 연 기준본 등은 빠진다). PowerPoint가 없으면 빈 목록.</summary>
+    IReadOnlyList<OpenPresentationInfo> ListOpenWindows();
+    /// <summary>그 문서의 창을 PowerPoint 앞으로 가져온다.</summary>
+    void ActivatePresentation(string presentationPath);
     PresentationAnalysis AnalyzePresentation(
         string presentationPath,
         IProgress<SlideAnalysisProgress>? slideProgress = null,
