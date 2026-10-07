@@ -3,6 +3,7 @@
 #   scripts\package-plugin.ps1                 # publish → plugin.json → zip → sha256 → latest.json
 #   scripts\package-plugin.ps1 -InstallLocal   # 위 + %LOCALAPPDATA%\CellBox\Plugins\BckPPT 에 전개
 #   scripts\package-plugin.ps1 -SkipBuild      # 기존 publish 결과 재사용 (빠른 재패키징)
+#   scripts\package-plugin.ps1 -Upload         # 위 + 릴리스 버킷 releases/plugins/bckppt/ 에 게시
 #
 # 산출물 (artifacts/):
 #   bckppt-<version>.zip          플러그인 폴더 통째 (plugin.json + self-contained 런타임)
@@ -13,8 +14,12 @@
 
 param(
     [string]$Configuration = "Release",
-    # 릴리스 버킷 공개 주소. releases.cellbox.ai는 DNS에 없는 이름이었다(2026-10-07 확인).
-    [string]$BaseUrl = "https://cellbox-release.s3.ap-northeast-2.amazonaws.com/plugins/bckppt",
+    # 릴리스 버킷 공개 주소. releases.cellbox.ai는 DNS에 없는 이름이었고(2026-10-07 확인),
+    # 버킷은 releases/* 만 공개 읽기라 그 아래에 둔다.
+    [string]$BaseUrl = "https://cellbox-release.s3.ap-northeast-2.amazonaws.com/releases/plugins/bckppt",
+    [string]$S3Prefix = "s3://cellbox-release/releases/plugins/bckppt",
+    [string]$AwsProfile = "cellbox-release",
+    [switch]$Upload,
     [string]$ReleaseNotes = "",
     [switch]$InstallLocal,
     [switch]$SkipBuild
@@ -31,6 +36,7 @@ $artifactsPath = Join-Path $projectRoot "artifacts"
 # 미커밋 변경이 있는 빌드는 게시하지 않는다(-InstallLocal 로컬 설치만 허용).
 $commitVersion = & (Join-Path $projectRoot "tools\Get-CommitVersion.ps1") -ConfigPath (Join-Path $projectRoot "version.json")
 $version       = $commitVersion.Version
+if ($commitVersion.Dirty -and $Upload) { throw "미커밋 빌드는 게시할 수 없습니다." }
 if ($commitVersion.Dirty -and -not $InstallLocal) {
     throw "미커밋 변경이 있습니다(v$($commitVersion.Label)). 커밋한 뒤 패키징하세요. 로컬 설치만이면 -InstallLocal."
 }
@@ -156,6 +162,20 @@ if ($InstallLocal) {
     Write-Host "  설치: $target" -ForegroundColor Green
 } else {
     Write-Host "[5/5] 로컬 설치 생략 (-InstallLocal 로 활성화)" -ForegroundColor DarkGray
+}
+
+if ($Upload) {
+    Write-Host "[게시] 릴리스 버킷에 올리기..." -ForegroundColor Cyan
+    # zip을 먼저 올리고 latest.json을 마지막에 바꾼다 — 매니페스트가 없는 zip을 가리키는 순간이 없게.
+    aws s3 cp $zipPath "$S3Prefix/$zipName" --profile $AwsProfile --content-type application/zip
+    if ($LASTEXITCODE -ne 0) { throw "zip 업로드 실패" }
+    aws s3 cp $latestPath "$S3Prefix/latest.json" --profile $AwsProfile `
+        --content-type application/json --cache-control "no-cache"
+    if ($LASTEXITCODE -ne 0) { throw "latest.json 업로드 실패" }
+
+    $published = Invoke-RestMethod -Uri "$($BaseUrl.TrimEnd('/'))/latest.json" -TimeoutSec 15
+    if ($published.sha256 -ne $hash) { throw "게시된 latest.json이 방금 만든 패키지와 다릅니다." }
+    Write-Host "  게시: $($latest.packageUrl)" -ForegroundColor Green
 }
 
 $sizeMb = [math]::Round((Get-Item -LiteralPath $zipPath).Length / 1MB, 1)
