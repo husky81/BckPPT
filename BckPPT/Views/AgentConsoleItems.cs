@@ -117,6 +117,41 @@ public sealed partial class ConsoleTurn : ObservableObject
     public ObservableCollection<ThumbnailItem> Thumbnails { get; } = new();
 
     [ObservableProperty] private bool _isRunning = true;
+
+    // ── 기다리는 줄: LLM 응답을 기다리는 동안 "✻ 여백을 재는 중… (12초)" ──
+    private static readonly string[] Stars = ["·", "✢", "✳", "✶", "✻", "✽", "✻", "✶", "✳", "✢"];
+    private static readonly string[] Words =
+    [
+        "도형을 만지작거리는 중", "여백을 재는 중", "줄간격을 고민하는 중", "글머리를 다듬는 중", "슬라이드를 넘겨보는 중",
+        "색을 고르는 중", "정렬을 맞추는 중", "문단을 접었다 펴는 중", "표를 그려 보는 중", "카드를 섞는 중",
+        "쪽 번호를 세는 중", "고아 단어를 달래는 중", "글자 폭을 재는 중", "원문을 뒤적이는 중", "줄바꿈을 저울질하는 중",
+        "도형을 줄 세우는 중", "제목을 다듬는 중", "말을 고르는 중",
+    ];
+    private int _starFrame;
+    private int _wordIndex = Random.Shared.Next(Words.Length);
+    private DateTime _wordSince = DateTime.Now;
+
+    [ObservableProperty] private bool _isWaiting;
+    [ObservableProperty] private string _waitStar = Stars[0];
+    [ObservableProperty] private string _waitText = "";
+
+    /// <summary>모델 응답을 기다리기 시작한다(요청 시작·도구가 끝난 뒤).</summary>
+    public void StartWaiting() { IsWaiting = IsRunning; Tick(); }
+    /// <summary>도구가 돌기 시작하면 도구 줄의 스피너가 대신한다.</summary>
+    public void StopWaiting() => IsWaiting = false;
+
+    /// <summary>0.25초마다. 별이 돌고 말은 3초마다 바뀐다.</summary>
+    public void Tick()
+    {
+        if (!IsWaiting) return;
+        WaitStar = Stars[++_starFrame % Stars.Length];
+        if ((DateTime.Now - _wordSince).TotalSeconds >= 3)
+        {
+            _wordIndex = (_wordIndex + 1 + Random.Shared.Next(Words.Length - 1)) % Words.Length;
+            _wordSince = DateTime.Now;
+        }
+        WaitText = $"{Words[_wordIndex]}… ({_watch.Elapsed.TotalSeconds:0}초)";
+    }
     [ObservableProperty] private bool _activityExpanded = true;
     [ObservableProperty] private bool _changesExpanded;
     [ObservableProperty] private string _summary = "";
@@ -156,6 +191,7 @@ public sealed partial class ConsoleTurn : ObservableObject
         if (modifiedSlides > 0) parts.Add($"{modifiedSlides}쪽 수정");
         parts.Add($"{_watch.Elapsed.TotalSeconds:0.0}초");
         Summary = string.Join(" · ", parts);
+        IsWaiting = false;
         IsRunning = false;
         ActivityExpanded = false;
         OnPropertyChanged(nameof(HasChanges));

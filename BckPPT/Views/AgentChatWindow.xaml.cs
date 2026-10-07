@@ -142,7 +142,7 @@ public partial class AgentChatWindow : Window, INotifyPropertyChanged
         RestoreBounds();
 
         _followTimer.Tick += async (_, _) => await FollowPowerPointAsync();
-        _spinTimer.Tick += (_, _) => _runningTurn?.RunningStep?.Tick();
+        _spinTimer.Tick += (_, _) => { _runningTurn?.RunningStep?.Tick(); _runningTurn?.Tick(); };
         SourceInitialized += (_, _) => UseDarkTitleBar();
         Loaded += async (_, _) =>
         {
@@ -217,13 +217,26 @@ public partial class AgentChatWindow : Window, INotifyPropertyChanged
     {
         var instruction = InstructionBox.Text.Trim();
         if (instruction.Length == 0 || IsRequesting) return null;
-        // 요청에 PPT 경로가 있으면 그것을 대상으로 연다.
+        // 보내자마자 요청 줄과 기다리는 표시를 띄운다. 대상 찾기·문서 열기에도 몇 초 걸린다.
+        var turn = new ConsoleTurn(instruction);
+        Turns.Add(turn);
+        _runningTurn = turn;
+        IsRequesting = true;
+        InstructionBox.Clear();
+        turn.StartWaiting();
+        ScrollToEndNow();
+
+        // 요청에 PPT 경로가 있으면 그것을 대상으로 연다. 열린 문서의 이름 조각이면 그 문서로 바꾼다.
         if (AgentWorkflow.MentionedPresentationPath(instruction) is { } mentionedPptx && _session.Presentation?.Path is null)
             OpenPresentation(mentionedPptx);
-        string? switchNote = await SwitchToMentionedFileAsync(instruction);
+        if (await SwitchToMentionedFileAsync(instruction) is { } switchNote) turn.Add(new NoteEntry(switchNote));
         if (_session.Presentation?.Path is not { Length: > 0 } target)
         {
-            AddNote("작업할 PowerPoint 문서가 없습니다. PowerPoint에서 문서를 열거나 ⋯ > PPT 파일 열기로 고른 뒤 다시 보내 주세요. 요청 문구는 남겨 두었습니다.", warning: true);
+            turn.AddOutcome(new NoteEntry("작업할 PowerPoint 문서가 없습니다. PowerPoint에서 문서를 열거나 ⋯ > PPT 파일 열기로 고른 뒤 다시 보내 주세요.", true));
+            turn.Finish(0);
+            _runningTurn = null;
+            IsRequesting = false;
+            InstructionBox.Text = instruction;   // 요청 문구는 되살려 둔다
             return null;
         }
 
@@ -237,13 +250,6 @@ public partial class AgentChatWindow : Window, INotifyPropertyChanged
             try { File.AppendAllText(Path.Combine(AgentSession.DefaultLogDirectory, "cancel_trace.txt"), $"{DateTime.Now:HH:mm:ss}\n{Environment.StackTrace}\n\n"); }
             catch { }
         });
-        var turn = new ConsoleTurn(instruction);
-        if (switchNote is not null) turn.Add(new NoteEntry(switchNote));
-        Turns.Add(turn);
-        _runningTurn = turn;
-        IsRequesting = true;
-        InstructionBox.Clear();
-        ScrollToEndNow();
         bool continuing = _agentWorkflow.Session is not null;
         var progress = new Progress<AgentEvent>(ev => OnAgentEvent(turn, ev));
 
@@ -353,6 +359,7 @@ public partial class AgentChatWindow : Window, INotifyPropertyChanged
         {
             case AgentEventKind.ToolStarted:
             {
+                turn.StopWaiting();
                 var line = ConsoleFormatting.Describe(ev.ToolName ?? "", ev.Text);
                 if (!line.Hidden) turn.Add(new ToolStepEntry(line.Label, line.Detail, ev.ToolName ?? ""));
                 break;
@@ -363,6 +370,8 @@ public partial class AgentChatWindow : Window, INotifyPropertyChanged
                     step.Complete(ConsoleFormatting.ResultLine(ev.Text, ev.IsError), ev.IsError);
                 else if (ev.ToolName == "finish" && ev.IsError)
                     turn.Add(new NarrationEntry("레이아웃 검사에서 위반이 남아 다시 고칩니다."));
+                // 도구가 끝나면 다시 모델을 기다린다.
+                if (turn.RunningStep is null) turn.StartWaiting();
                 break;
             }
             case AgentEventKind.Message:
