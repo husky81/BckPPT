@@ -34,7 +34,10 @@ if (-not (Test-Path $ExePath)) {
 
 # ── 빌드 ─────────────────────────────────────────────────────────
 if ($NeedsBuild) {
-    dotnet build "$ProjectDir\BckPPT.csproj" -c Debug -p:Platform=x64 --nologo -v:minimal
+    # 버전: 커밋 기반 (version.json + tools\Get-CommitVersion.ps1)
+    $CommitVersion = & "$ProjectDir\tools\Get-CommitVersion.ps1" -ConfigPath "$ProjectDir\version.json"
+    dotnet build "$ProjectDir\BckPPT.csproj" -c Debug -p:Platform=x64 --nologo -v:minimal `
+        -p:Version=$($CommitVersion.Version) -p:InformationalVersion=$($CommitVersion.Informational)
     if ($LASTEXITCODE -ne 0) {
         Write-Host "빌드 실패. 실행 중인 이전 개발 빌드가 파일을 점유했다면 창을 닫고 다시 시도하세요." -ForegroundColor Red
         exit 1

@@ -8,7 +8,9 @@ $projectRoot = Split-Path -Parent $PSScriptRoot
 $projectPath = Join-Path $projectRoot "BckPPT.csproj"
 $publishPath = Join-Path $projectRoot "bin\publish\win-x64"
 $artifactsPath = Join-Path $projectRoot "artifacts"
-$version = ([xml](Get-Content -Raw -LiteralPath $projectPath)).Project.PropertyGroup.Version
+# 버전: 커밋 기반 (version.json + tools\Get-CommitVersion.ps1). 미커밋 변경이 있으면 -dev.
+$commitVersion = & (Join-Path $projectRoot "tools\Get-CommitVersion.ps1") -ConfigPath (Join-Path $projectRoot "version.json")
+$version = $commitVersion.Label
 
 # publish는 증분 복사라 이전 버전 DLL이 남는다(stale 어셈블리 → 실행 즉시 로드 실패).
 # ReadyToRun 중간 산출물(obj\...\R2R)도 캐시되므로 함께 지운다.
@@ -17,7 +19,8 @@ Get-ChildItem -LiteralPath (Join-Path $projectRoot "obj") -Recurse -Directory -F
     ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force }
 
 dotnet publish $projectPath -c $Configuration -r win-x64 --self-contained true `
-    -p:PublishProfile=win-x64 --nologo
+    -p:PublishProfile=win-x64 --nologo `
+    -p:Version=$($commitVersion.Version) -p:InformationalVersion=$($commitVersion.Informational)
 if ($LASTEXITCODE -ne 0) { throw "dotnet publish 실패" }
 
 $exePath = Join-Path $publishPath "BckPPT.exe"

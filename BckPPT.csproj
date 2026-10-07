@@ -9,7 +9,10 @@
     <RootNamespace>BckPPT</RootNamespace>
     <AssemblyName>BckPPT</AssemblyName>
     <NoWarn>MVVMTK0045</NoWarn>
-    <Version>2.1.0</Version>
+    <!-- 실제 버전은 커밋 기반: run.ps1·scripts\package*.ps1이 tools\Get-CommitVersion.ps1로 계산해 넘긴다.
+         이 값은 그 스크립트를 거치지 않은 빌드에만 남는다. -->
+    <Version>0.0.0</Version>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <ApplicationIcon>Assets\icon.ico</ApplicationIcon>
     <!-- 루트 아래 작업 폴더의 obj(AssemblyInfo 등)가 섞이면 특성 중복으로 빌드가 깨진다. -->
     <DefaultItemExcludes>$(DefaultItemExcludes);tmp\**;artifacts\**;BckPPT.Tests\**</DefaultItemExcludes>

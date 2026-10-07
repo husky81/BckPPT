@@ -25,8 +25,14 @@ $projectRoot   = Split-Path -Parent $PSScriptRoot
 $projectPath   = Join-Path $projectRoot "BckPPT.csproj"
 $publishPath   = Join-Path $projectRoot "bin\publish\win-x64"
 $artifactsPath = Join-Path $projectRoot "artifacts"
-$version       = ([xml](Get-Content -Raw -LiteralPath $projectPath)).Project.PropertyGroup.Version
-if (-not $version) { throw "BckPPT.csproj에서 <Version>을 읽지 못했습니다." }
+# 버전: 커밋 기반 (version.json + tools\Get-CommitVersion.ps1). 같은 커밋 = 같은 번호.
+# 매니페스트 version은 트레이 PluginInstaller가 Version.TryParse로 비교하므로 숫자만 쓴다.
+# 미커밋 변경이 있는 빌드는 게시하지 않는다(-InstallLocal 로컬 설치만 허용).
+$commitVersion = & (Join-Path $projectRoot "tools\Get-CommitVersion.ps1") -ConfigPath (Join-Path $projectRoot "version.json")
+$version       = $commitVersion.Version
+if ($commitVersion.Dirty -and -not $InstallLocal) {
+    throw "미커밋 변경이 있습니다(v$($commitVersion.Label)). 커밋한 뒤 패키징하세요. 로컬 설치만이면 -InstallLocal."
+}
 
 function Clear-StaleOutputs {
     if (Test-Path -LiteralPath $publishPath) { Remove-Item -LiteralPath $publishPath -Recurse -Force }
@@ -50,7 +56,8 @@ if (-not $SkipBuild) {
     # ReadyToRun 중간 산출물(obj\...\R2R)도 같은 함정이라 함께 지운다.
     Clear-StaleOutputs
     dotnet publish $projectPath -c $Configuration -r win-x64 --self-contained true `
-        -p:PublishProfile=win-x64 --nologo
+        -p:PublishProfile=win-x64 --nologo `
+        -p:Version=$version -p:InformationalVersion=$($commitVersion.Informational)
     if ($LASTEXITCODE -ne 0) { throw "dotnet publish 실패" }
 } else {
     Write-Host "[1/5] publish 생략 (-SkipBuild)" -ForegroundColor DarkGray
@@ -58,6 +65,11 @@ if (-not $SkipBuild) {
 
 $exePath = Join-Path $publishPath "BckPPT.exe"
 if (-not (Test-Path -LiteralPath $exePath)) { throw "게시 결과에서 BckPPT.exe를 찾을 수 없습니다: $publishPath" }
+# -SkipBuild로 재사용하는 publish 결과가 지금 커밋의 빌드인지 확인한다.
+$publishedStamp = (Get-Item -LiteralPath $exePath).VersionInfo.ProductVersion
+if ($publishedStamp -ne $commitVersion.Informational) {
+    throw "publish 결과($publishedStamp)가 현재 커밋 버전($($commitVersion.Informational))과 다릅니다. -SkipBuild 없이 다시 실행하세요."
+}
 
 # ── 2. 아이콘 + plugin.json ──────────────────────────────────────────────────
 Write-Host "[2/5] plugin.json 생성..." -ForegroundColor Cyan
