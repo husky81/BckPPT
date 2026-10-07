@@ -238,6 +238,31 @@ public class PptComService : IPptComService
         }
     }
 
+    public ActivePresentationInfo? GetActivePresentation()
+        => RunOnSta(() =>
+        {
+            if (TryGetActiveInstance() is not { } app) return null;
+            try
+            {
+                if ((int)app.Windows.Count == 0) return null;
+                dynamic window = app.ActiveWindow;
+                dynamic prs = window.Presentation;
+                int? current = null;
+                try { if (window.View.Slide is { } shown) current = (int)shown.SlideIndex; } catch { }   // 축소판 창이 활성이면 없다
+                // 축소판 창에 포커스가 있으면 View.Slide가 없다. 선택된 쪽에서 읽는다.
+                if (current is null) try { current = (int)window.Selection.SlideRange[1].SlideIndex; } catch { }
+                return new ActivePresentationInfo((string)prs.Name, (string)prs.FullName, (int)prs.Slides.Count, current);
+            }
+            catch { return null; }
+        });
+
+    public void GoToSlide(string presentationPath, int slideIndex)
+        => RunOnSta(() =>
+        {
+            if (TryGetActiveInstance() is not { } app || FindOpenPresentation(app, presentationPath) is not { } prs) return;
+            try { if ((int)prs.Windows.Count > 0) { prs.Windows[1].Activate(); prs.Windows[1].View.GotoSlide(slideIndex); } } catch { }
+        });
+
     public IReadOnlyList<PptPresentation> GetOpenPresentations()
         => RunOnSta(() =>
         {
@@ -964,8 +989,14 @@ public class PptComService : IPptComService
     public void ClearSelection(string presentationPath)
         => RunOnSta(() =>
         {
+            // 도형·글 선택만 푼다. 쪽 선택(축소판)까지 풀면 지금 보고 있는 쪽을 읽을 수 없게 된다.
             if (TryGetActiveInstance() is { } app && FindOpenPresentation(app, presentationPath) is { } prs && (int)prs.Windows.Count > 0)
-                try { prs.Windows[1].Selection.Unselect(); } catch { }
+                try
+                {
+                    dynamic selection = prs.Windows[1].Selection;
+                    if ((int)selection.Type is 2 or 3) selection.Unselect();
+                }
+                catch { }
         });
 
     private sealed class WatchHandle(string path) : IDisposable

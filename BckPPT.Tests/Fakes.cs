@@ -270,6 +270,9 @@ public sealed class FakePptComService : IPptComService
     }
     private void ThrowIfEditing() { if (UserIsEditing) throw new PptUserInterventionException(); }
     public void ClearSelection(string presentationPath) { Calls.Add("clear_selection"); UserIsEditing = false; }
+    public ActivePresentationInfo? Active { get; set; }
+    public ActivePresentationInfo? GetActivePresentation() => Active;
+    public void GoToSlide(string presentationPath, int slideIndex) => Calls.Add($"goto {slideIndex}");
     public IReadOnlyList<(int Index, string Title)> ListSlides(string presentationPath) =>
         Slides.Select((s, i) => (i + 1, s.FirstOrDefault()?.Paragraphs.FirstOrDefault() ?? "")).ToList();
     public int ReplaceText(string presentationPath, string find, string replace, IReadOnlyList<(int slideIndex, string shapeName)>? targets = null) => throw new NotSupportedException();

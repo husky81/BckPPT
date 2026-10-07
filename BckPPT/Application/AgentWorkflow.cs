@@ -14,7 +14,11 @@ public sealed record AgentTurnResult(
     IReadOnlyList<string> BeforeThumbnails,
     IReadOnlyList<string> AfterThumbnails,
     IReadOnlyList<string> Changes,   // 이번 요청에서 도구가 실제로 바꾼 것(코드가 기록). 모델 요약과 따로 보여 준다.
-    IReadOnlyDictionary<string, (int Calls, LlmUsage Usage)>? UsageByModel = null);
+    IReadOnlyDictionary<string, (int Calls, LlmUsage Usage)>? UsageByModel = null)
+{
+    /// <summary><see cref="AfterThumbnails"/>와 같은 순서의 쪽 번호. 개수가 다르면(렌더 실패) 비어 있다.</summary>
+    public IReadOnlyList<int> AfterSlides { get; init; } = [];
+}
 
 /// <summary>
 /// 채팅창과 도구 루프 사이. 대상 PPT마다 세션(작업 사본 + 대화)을 하나 두고, 같은 대상에 대한 후속 요청은
@@ -115,18 +119,19 @@ public sealed class AgentWorkflow(
         var usage = UsageMeter.Delta(meterBefore, _meter.Snapshot());
         var run = new AgentRunResult(AgentStopReason.Finished, report, 0,
             usage.Values.Aggregate(LlmUsage.Zero, (a, v) => a + v.Usage), issues);
-        var (before, after) = await RenderAsync(session, ct);
-        return new AgentTurnResult(run, before, after, session.Context.Changes.Skip(changesBefore).ToList(), usage);
+        var (before, after, slides) = await RenderAsync(session, ct);
+        return new AgentTurnResult(run, before, after, session.Context.Changes.Skip(changesBefore).ToList(), usage) { AfterSlides = slides };
     }
 
-    private async Task<(IReadOnlyList<string> Before, IReadOnlyList<string> After)> RenderAsync(AgentSession session, CancellationToken ct)
+    private async Task<(IReadOnlyList<string> Before, IReadOnlyList<string> After, IReadOnlyList<int> Slides)> RenderAsync(AgentSession session, CancellationToken ct)
     {
         var touched = session.Context.Origins.Touched.ToHashSet();
         var after = touched.Count == 0 ? [] : await renderer.RenderSlidesAsync(session.WorkingPath, touched, ct);
         var originals = touched.Select(session.Context.Origins.OriginalIndexOf).ToHashSet();
         // 바로 작업이면 원본이 이미 바뀌었으므로 시작할 때 복사해 둔 기준본에서 그린다.
         var before = originals.Count == 0 ? [] : await renderer.RenderSlidesAsync(session.Context.BaselinePath ?? session.SourcePath, originals, ct);
-        return (before, after);
+        var slides = touched.Order().ToList();
+        return (before, after, after.Count == slides.Count ? slides : []);
     }
 
     /// <summary>
@@ -244,9 +249,9 @@ public sealed class AgentWorkflow(
         int changesBefore = Session.Context.Changes.Count;
         var run = await AgentFactory.CreateLoop(_metered!, options, hasSources, LoopOptions).RunAsync(Session, request, progress, ct);
 
-        var (before, after) = await RenderAsync(Session, ct);
+        var (before, after, slides) = await RenderAsync(Session, ct);
         return new AgentTurnResult(run, before, after, Session.Context.Changes.Skip(changesBefore).ToList(),
-            UsageMeter.Delta(meterBefore, _meter.Snapshot()));
+            UsageMeter.Delta(meterBefore, _meter.Snapshot())) { AfterSlides = slides };
     }
 
     /// <summary>작업 사본을 원본 옆 결과 파일로 남기고 세션을 끝낸다. 결과 파일 경로를 돌려준다.</summary>

@@ -7,6 +7,10 @@ public interface IPptComService
     bool IsPowerPointRunning { get; }
 
     IReadOnlyList<PptPresentation> GetOpenPresentations();
+    /// <summary>PowerPoint 활성 창의 문서와 보고 있는 쪽. PowerPoint가 없거나 창이 없으면 null(새로 띄우지 않는다).</summary>
+    ActivePresentationInfo? GetActivePresentation();
+    /// <summary>문서 창을 그 쪽으로 옮긴다(창이 있을 때만).</summary>
+    void GoToSlide(string presentationPath, int slideIndex);
     PresentationAnalysis AnalyzePresentation(
         string presentationPath,
         IProgress<SlideAnalysisProgress>? slideProgress = null,

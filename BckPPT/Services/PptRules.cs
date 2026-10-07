@@ -51,6 +51,12 @@ public class PptRules
     /// <summary>대상 PPT가 PowerPoint 창에 열려 있으면 그 창에서 바로 작업한다(작업 사본 없음, 저장은 사용자가).</summary>
     public bool WorkInOpenWindow { get; set; } = true;
 
+    /// <summary>에이전트 콘솔 창 위치·크기("left,top,width,height"). 다음에 같은 자리에 연다.</summary>
+    public string? ChatWindowBounds { get; set; }
+
+    /// <summary>에이전트 콘솔을 항상 위에 둔다.</summary>
+    public bool ChatTopmost { get; set; }
+
     // ── 글꼴 규칙 ────────────────────────────────────────────────
 
     public List<string> AllowedFonts { get; set; } =

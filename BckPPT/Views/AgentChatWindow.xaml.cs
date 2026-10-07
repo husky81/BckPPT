@@ -1,9 +1,15 @@
-using System.IO;
+using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.Globalization;
+using System.IO;
 using System.Runtime.CompilerServices;
-using System.Text;
+using System.Runtime.InteropServices;
 using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Interop;
+using System.Windows.Media;
+using System.Windows.Threading;
 using Microsoft.Win32;
 using BckPPT.Agent;
 using BckPPT.Application;
@@ -15,89 +21,95 @@ using BckPPT.Infrastructure;
 
 namespace BckPPT.Views;
 
+/// <summary>
+/// PowerPoint 옆에 붙어 쓰는 에이전트 콘솔. 메인 창에는 대상 PPT 한 줄(상태줄), 작업 흐름, 입력란만 둔다.
+/// 나머지(파일 열기·원문 첨부·인덱싱·전문 편집창·설정)는 ⋯ 메뉴에 있다.
+/// 대상은 PowerPoint에서 보고 있는 문서를 2초마다 확인해 따라간다(작업 중에는 확인하지 않는다).
+/// </summary>
 public partial class AgentChatWindow : Window, INotifyPropertyChanged
 {
     private readonly DocumentSession _session;
     private readonly IPptComService _pptService;
     private readonly ILlmClient _llmClient;
-    private readonly ApprovalWorkflow _approvalWorkflow;
     private readonly AgentWorkflow _agentWorkflow;
     private readonly PptIndexer _pptIndexer;
     private readonly ExternalJobRegistry _externalJobs;
     private readonly UpdateService _updateService;
     private readonly Action _openEditor;
     private readonly string? _initialDirectory;
+    private readonly DispatcherTimer _followTimer = new() { Interval = TimeSpan.FromSeconds(2) };
+    private readonly DispatcherTimer _spinTimer = new() { Interval = TimeSpan.FromMilliseconds(250) };
     private CancellationTokenSource? _requestCts;
-    private string _conversationText = "파일을 이 창에 놓거나 위 버튼으로 문서를 연결한 뒤 작업을 요청하세요.";
-    private string _streamingText = "";
     private bool _isRequesting;
-    private PptJob? _currentJob;
-    private AgentTurnResult? _agentResult;
-
-    public string TargetText => _session.TargetText;
-    public string StatusText { get; private set; } = "준비됨";
-    public string ConversationText
-    {
-        get => _conversationText;
-        private set
-        {
-            _conversationText = value;
-            Notify();
-            // 진행 로그가 길어져도 최신 줄이 보이게 따라 내려간다(사용자가 위로 올려 읽는 중이면 두지 않는다).
-            if (_followConversation)
-                Dispatcher.BeginInvoke(() => ConversationScroll?.ScrollToEnd(), System.Windows.Threading.DispatcherPriority.Background);
-        }
-    }
-
+    private bool _polling;
     private bool _followConversation = true;
+    private bool _inPlaceNoticeShown;
+    private string _statusDetail = "준비됨";
+    private int? _currentSlide;
+    private int _slideCount;
+    private ConsoleTurn? _runningTurn;
 
-    private void ConversationScroll_ScrollChanged(object sender, System.Windows.Controls.ScrollChangedEventArgs e)
-    {
-        // 내용이 늘어서 생긴 변화가 아니라 사용자가 스크롤한 경우에만 따라가기 여부를 바꾼다.
-        if (e.ExtentHeightChange == 0)
-            _followConversation = ConversationScroll.VerticalOffset >= ConversationScroll.ScrollableHeight - 24;
-    }
-    public string StreamingText { get => _streamingText; private set { _streamingText = value; Notify(); } }
-    public bool IsRequesting { get => _isRequesting; private set { _isRequesting = value; Notify(); Notify(nameof(CanSend)); Notify(nameof(CanApply)); } }
-    public bool CanSend => !IsRequesting;
-    public bool CanPreview => _currentJob?.State == PptJobState.Planned;
-    public bool CanApply => _currentJob?.State == PptJobState.PreviewReady && !IsRequesting;
-    public Visibility JobControlsVisibility => _currentJob is null || _currentJob.State is PptJobState.Cancelled
-        ? Visibility.Collapsed : Visibility.Visible;
-    public IReadOnlyList<string> PreviewImages => _agentResult?.BeforeThumbnails ?? _currentJob?.BeforeThumbnails ?? [];
-    public IReadOnlyList<string> ResultImages => _agentResult?.AfterThumbnails ?? _currentJob?.AfterThumbnails ?? [];
-    public Visibility PendingVisibility => _agentWorkflow.PendingCards is null ? Visibility.Collapsed : Visibility.Visible;
+    public ObservableCollection<ConsoleTurn> Turns { get; } = new();
 
-    public bool ExternalWriting
-    {
-        get => _agentWorkflow.ExternalWriting;
-        set { _agentWorkflow.ExternalWriting = value; PptRules.Current.ExternalCardWriting = value; PptRules.Current.Save(); Notify(); }
-    }
+    // ── 상태줄 ──
+    public Brush LightBrush => (Brush)FindResource(
+        _session.Presentation is null ? "ErrorBr" : IsRequesting || !StaDispatcher.Instance.IsHealthy ? "WarnBr" : "SuccessBr");
+    public string LightTooltip => _session.Presentation is null
+        ? "작업할 PowerPoint 문서가 없습니다 · PowerPoint에서 문서를 열거나 ⋯ > PPT 파일 열기"
+        : IsRequesting ? "작업 중"
+        : !StaDispatcher.Instance.IsHealthy ? "PowerPoint 응답을 기다리는 중"
+        : $"작업할 수 있습니다 · {_statusDetail}";
+    public string TargetTooltip => _session.Presentation?.Path ?? "대상 문서 없음";
+    public string FileNameDisplay { get; private set; } = "PowerPoint 문서 없음";
+    public string FolderDisplay { get; private set; } = "";
+    public string SlideDisplay => _session.Presentation is null ? ""
+        : _currentSlide is int s ? $"{s} / {_slideCount}" : _slideCount > 0 ? $"{_slideCount}쪽" : "";
 
+    // ── 메뉴 ──
+    public bool HasSources => _agentWorkflow.AttachedSources.Count > 0;
+    public string AttachMenuText => HasSources ? $"원문 첨부 ({_agentWorkflow.AttachedSources.Count})…" : "원문 첨부…";
     public bool WorkInOpenWindow
     {
         get => _agentWorkflow.PreferInPlace;
         set { _agentWorkflow.PreferInPlace = value; PptRules.Current.WorkInOpenWindow = value; PptRules.Current.Save(); Notify(); }
     }
-
-    private bool InPlaceSession => _agentWorkflow.Session?.InPlace == true;
-    public string ApproveLabel => InPlaceSession ? "작업 마침" : "결과 저장";
-    public string DiscardLabel => InPlaceSession ? "대화 끝내기" : "작업 버리기";
-    public Visibility OpenWorkingCopyVisibility => InPlaceSession ? Visibility.Collapsed : Visibility.Visible;
-
     public bool LlmFit
     {
         get => _agentWorkflow.LlmFit;
         set { _agentWorkflow.LlmFit = value; PptRules.Current.LlmLengthFit = value; PptRules.Current.Save(); Notify(); }
     }
+    public bool StayOnTop
+    {
+        get => Topmost;
+        set { Topmost = value; PptRules.Current.ChatTopmost = value; PptRules.Current.Save(); Notify(); }
+    }
+    private bool InPlaceSession => _agentWorkflow.Session?.InPlace == true;
+    public bool HasSession => _agentWorkflow.Session is not null;
+    public string ApproveLabel => InPlaceSession ? "작업 마침" : "결과 저장";
+    public string DiscardLabel => InPlaceSession ? "대화 끝내기" : "작업 버리기";
+    public bool ShowOpenWorkingCopy => HasSession && !InPlaceSession;
 
-    public Visibility AgentControlsVisibility => _agentWorkflow.Session is null ? Visibility.Collapsed : Visibility.Visible;
-    public string SourcesText => _agentWorkflow.AttachedSources.Count == 0
-        ? "첨부 원문 없음"
-        : $"첨부 원문 {_agentWorkflow.AttachedSources.Count}개: " +
-          string.Join(", ", _agentWorkflow.AttachedSources.Select(Path.GetFileName));
-    public Visibility PreviewImagesVisibility => PreviewImages.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
-    public Visibility ResultImagesVisibility => ResultImages.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+    // ── 입력 ──
+    public bool IsRequesting
+    {
+        get => _isRequesting;
+        private set
+        {
+            _isRequesting = value;
+            Notify(); Notify(nameof(CanSend)); Notify(nameof(SendGlyph)); Notify(nameof(SendTooltip));
+            RefreshLight();
+            if (value) _spinTimer.Start(); else _spinTimer.Stop();
+        }
+    }
+    public bool CanSend => !IsRequesting;
+    public string SendGlyph => IsRequesting ? "■" : "↑";
+    public string SendTooltip => IsRequesting ? "멈추기 (Esc)" : "보내기 (Enter)";
+    public string EmptyHint => "PowerPoint에서 작업할 문서를 열어 두고 요청을 입력하세요.\n\n" +
+                               "예) 35쪽 카드 템플릿으로 첨부한 보고서마다 카드를 하나씩 만들어 37쪽 뒤에 넣어줘\n" +
+                               "예) 38~41쪽 공백줄 삭제해줘\n예) 이 md로 43쪽 뒤에 간트형 일정표 그려줘";
+    public bool ShowEmptyHint => Turns.Count == 0;
+    private bool _showJumpToEnd;
+    public bool ShowJumpToEnd { get => _showJumpToEnd; private set { _showJumpToEnd = value; Notify(); } }
 
     public AgentChatWindow(DocumentSession session, IPptComService pptService, ILlmClient llmClient,
         ApprovalWorkflow approvalWorkflow, AgentWorkflow agentWorkflow, PptIndexer pptIndexer, ExternalJobRegistry externalJobs,
@@ -107,9 +119,9 @@ public partial class AgentChatWindow : Window, INotifyPropertyChanged
         _session = session;
         _pptService = pptService;
         _llmClient = llmClient;
-        _approvalWorkflow = approvalWorkflow;
         _agentWorkflow = agentWorkflow;
-        _agentWorkflow.ExternalWriting = PptRules.Current.ExternalCardWriting;
+        // 사용자 고급 모델로 카드 문안 받기는 화면에서 뺐다. 기능 코드는 남기되 꺼 둔다.
+        _agentWorkflow.ExternalWriting = false;
         _agentWorkflow.LlmFit = PptRules.Current.LlmLengthFit;
         _agentWorkflow.PreferInPlace = PptRules.Current.WorkInOpenWindow;
         _pptIndexer = pptIndexer;
@@ -117,65 +129,226 @@ public partial class AgentChatWindow : Window, INotifyPropertyChanged
         _updateService = updateService;
         _openEditor = openEditor;
         DataContext = this;
-        session.PropertyChanged += (_, _) => Dispatcher.Invoke(() => RefreshBindings());
+        session.PropertyChanged += (_, _) => Dispatcher.Invoke(RefreshTarget);
+        Turns.CollectionChanged += (_, _) => Notify(nameof(ShowEmptyHint));
         InitializeComponent();
-        Loaded += async (_, _) => await TestLlmConnectionAsync();
-        Loaded += async (_, _) => await CheckForUpdatesAsync();
-        Loaded += (_, _) =>
+        RestoreBounds();
+
+        _followTimer.Tick += async (_, _) => await FollowPowerPointAsync();
+        _spinTimer.Tick += (_, _) => _runningTurn?.RunningStep?.Tick();
+        SourceInitialized += (_, _) => UseDarkTitleBar();
+        Loaded += async (_, _) =>
         {
             var health = EnvironmentHealthService.Check();
-            if (!health.IsPowerPointInstalled) SetStatus(health.Message);
+            if (!health.IsPowerPointInstalled) AddNote(health.Message, warning: true);
+            RefreshTarget();
+            _followTimer.Start();
+            await FollowPowerPointAsync();
+            await TestLlmConnectionAsync();
+            await CheckForUpdatesAsync();
         };
+        Closing += (_, _) => SaveBounds();
         Closed += (_, _) =>
         {
+            _followTimer.Stop();
             _requestCts?.Cancel();
-            // 승인하지 않은 작업 사본은 남기지 않는다.
+            // 작업 사본이면 지우고, 바로 작업이면 아무것도 지우지 않는다.
             _agentWorkflow.Discard();
         };
     }
 
-    private void OpenFile_Click(object sender, RoutedEventArgs e)
+    // ══ 요청 ══════════════════════════════════════════════════
+
+    private async void SendOrStop_Click(object sender, RoutedEventArgs e)
     {
-        var dialog = new OpenFileDialog { Filter = "PowerPoint 파일|*.pptx;*.pptm;*.ppt|모든 파일|*.*" };
-        if (_initialDirectory is not null) dialog.InitialDirectory = _initialDirectory;
-        if (dialog.ShowDialog(this) == true) OpenPresentation(dialog.FileName);
+        if (IsRequesting) { StopRequest(); return; }
+        await SendAgentAsync();
     }
 
-    private void Connect_Click(object sender, RoutedEventArgs e)
+    /// <summary>
+    /// Enter·Ctrl+Enter는 보내기, Shift+Enter·Alt+Enter는 줄바꿈. 여러 줄 붙여넣기는 그대로 들어간다.
+    /// </summary>
+    private async void InstructionBox_KeyDown(object sender, KeyEventArgs e)
     {
-        try
+        var key = e.Key == Key.System ? e.SystemKey : e.Key;
+        if (key != Key.Enter) return;
+        var mods = Keyboard.Modifiers;
+        if (mods.HasFlag(ModifierKeys.Shift) || mods.HasFlag(ModifierKeys.Alt))
         {
-            var open = _pptService.GetOpenPresentations();
-            if (open.Count == 0) { SetStatus("실행 중인 PowerPoint 문서가 없습니다."); return; }
-            _session.Presentation = open[0];
-            SetStatus(open.Count == 1 ? "현재 문서에 연결했습니다." : $"열린 문서 {open.Count}개 중 첫 문서에 연결했습니다.");
+            // Shift+Enter는 TextBox가 줄을 바꾼다. Alt+Enter는 시스템 키라 직접 넣는다.
+            if (!mods.HasFlag(ModifierKeys.Alt)) return;
+            int caret = InstructionBox.CaretIndex;
+            InstructionBox.Text = InstructionBox.Text.Insert(caret, Environment.NewLine);
+            InstructionBox.CaretIndex = caret + Environment.NewLine.Length;
+            e.Handled = true;
+            return;
         }
-        catch (Exception ex) { SetStatus($"연결 실패: {ex.Message}"); }
+        e.Handled = true;
+        await SendAgentAsync();
     }
 
-    private void OpenEditor_Click(object sender, RoutedEventArgs e) => _openEditor();
+    private bool _userCancelled;
 
-    private async void IndexFolder_Click(object sender, RoutedEventArgs e)
+    private void StopRequest()
     {
-        var dialog = new OpenFolderDialog { Title = "PPT 템플릿 라이브러리 폴더 선택", Multiselect = false };
-        if (dialog.ShowDialog(this) != true) return;
+        _userCancelled = true;
+        _requestCts?.Cancel();
+    }
+
+    private void InstructionBox_TextChanged(object sender, TextChangedEventArgs e) =>
+        Placeholder.Visibility = InstructionBox.Text.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
+
+    private void Window_PreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.Escape) return;
+        if (MenuPopup.IsOpen) { MenuPopup.IsOpen = false; e.Handled = true; }
+        else if (IsRequesting) { StopRequest(); e.Handled = true; }
+    }
+
+    /// <summary>도구 루프로 작업한다. 같은 대상에 대한 후속 요청은 같은 세션에서 이어진다.</summary>
+    private async Task<AgentTurnResult?> SendAgentAsync()
+    {
+        var instruction = InstructionBox.Text.Trim();
+        if (instruction.Length == 0 || IsRequesting) return null;
+        // 요청에 PPT 경로가 있으면 그것을 대상으로 연다.
+        if (AgentWorkflow.MentionedPresentationPath(instruction) is { } mentionedPptx && _session.Presentation?.Path is null)
+            OpenPresentation(mentionedPptx);
+        if (_session.Presentation?.Path is not { Length: > 0 } target)
+        {
+            AddNote("작업할 PowerPoint 문서가 없습니다. PowerPoint에서 문서를 열거나 ⋯ > PPT 파일 열기로 고른 뒤 다시 보내 주세요. 요청 문구는 남겨 두었습니다.", warning: true);
+            return null;
+        }
+
         _requestCts?.Dispose();
         _requestCts = new CancellationTokenSource();
+        _userCancelled = false;
+        // 사용자가 누르지 않았는데 취소된 일이 두 번 있었다(2026-10-07, 재현 안 됨). 그때 호출 경로를 남긴다.
+        _requestCts.Token.Register(() =>
+        {
+            if (_userCancelled) return;
+            try { File.AppendAllText(Path.Combine(AgentSession.DefaultLogDirectory, "cancel_trace.txt"), $"{DateTime.Now:HH:mm:ss}\n{Environment.StackTrace}\n\n"); }
+            catch { }
+        });
+        var turn = new ConsoleTurn(instruction);
+        Turns.Add(turn);
+        _runningTurn = turn;
         IsRequesting = true;
+        InstructionBox.Clear();
+        ScrollToEndNow();
+        bool continuing = _agentWorkflow.Session is not null;
+        var progress = new Progress<AgentEvent>(ev => OnAgentEvent(turn, ev));
+
+        AgentTurnResult? result = null;
         try
         {
-            var progress = new Progress<string>(SetStatus);
-            var result = await _pptIndexer.IndexFolderAsync(dialog.FolderName, progress, _requestCts.Token);
-            SetStatus($"인덱싱 완료 · 파일 {result.Files}개/슬라이드 {result.Slides}장 갱신 · {result.Skipped}개 변경 없음");
+            result = await _agentWorkflow.RunAsync(target, instruction, progress, _requestCts.Token);
+            ShowResult(turn, result, continuing);
         }
-        catch (OperationCanceledException) { SetStatus("인덱싱을 취소했습니다."); }
-        catch (Exception ex) { SetStatus($"인덱싱 실패: {ex.Message}"); }
-        finally { IsRequesting = false; }
+        catch (OperationCanceledException) when (_requestCts.IsCancellationRequested)
+        {
+            AbortSteps(turn, "멈춤");
+            turn.AddOutcome(new NoteEntry("작업을 멈췄습니다. 지금까지 바뀐 것은 그대로 있습니다.", true));
+        }
+        catch (OperationCanceledException ex)
+        {
+            // 사용자가 멈춘 것이 아니면 응답 대기 시간 초과다(HttpClient는 시간 초과도 취소 예외로 낸다).
+            AbortSteps(turn, "시간 초과");
+            turn.AddOutcome(new NoteEntry($"LLM 응답을 기다리다 시간이 초과되었습니다. 다시 요청하면 이어서 합니다. ({ex.GetBaseException().Message})", true));
+        }
+        catch (LlmException ex) { AbortSteps(turn, "중단"); turn.AddOutcome(new NoteEntry(ToUserMessage(ex), true)); }
+        catch (PptUserInterventionException ex) { AbortSteps(turn, "멈춤"); turn.AddOutcome(new NoteEntry(ex.Message, true)); }
+        catch (Exception ex) { AbortSteps(turn, "실패"); turn.AddOutcome(new NoteEntry($"작업 실패: {ex.Message}", true)); }
+        finally
+        {
+            turn.Finish(result?.AfterSlides.Count ?? result?.AfterThumbnails.Count ?? 0);
+            _runningTurn = null;
+            IsRequesting = false;
+            NotifySession();
+            if (_followConversation) ScrollToEndNow();
+        }
+        return result;
     }
 
-    private async void Send_Click(object sender, RoutedEventArgs e) => await SendAsync();
+    /// <summary>진행 이벤트를 작업 흐름 항목으로 바꾼다.</summary>
+    private void OnAgentEvent(ConsoleTurn turn, AgentEvent ev)
+    {
+        switch (ev.Kind)
+        {
+            case AgentEventKind.ToolStarted:
+            {
+                var line = ConsoleFormatting.Describe(ev.ToolName ?? "", ev.Text);
+                if (!line.Hidden) turn.Add(new ToolStepEntry(line.Label, line.Detail, ev.ToolName ?? ""));
+                break;
+            }
+            case AgentEventKind.ToolFinished:
+            {
+                if (turn.RunningStep is { } step && step.ToolName == ev.ToolName)
+                    step.Complete(ConsoleFormatting.ResultLine(ev.Text, ev.IsError), ev.IsError);
+                else if (ev.ToolName == "finish" && ev.IsError)
+                    turn.Add(new NarrationEntry("레이아웃 검사에서 위반이 남아 다시 고칩니다."));
+                break;
+            }
+            case AgentEventKind.Message:
+                // 도구 실행 중의 메시지는 그 도구의 안쪽 진행(카드 문안 작성 2/4 등), 아니면 모델의 설명이다.
+                if (turn.RunningStep is { } running) running.Progress(ev.Text);
+                else turn.Add(new NarrationEntry(ev.Text));
+                break;
+            case AgentEventKind.Compacted:
+                turn.Add(new NoteEntry(ev.Text));
+                break;
+        }
+        if (_followConversation) ScrollToEndSoon();
+    }
 
-    public void AcceptExternalRequest(ExternalCommandRequest request)
+    private void ShowResult(ConsoleTurn turn, AgentTurnResult result, bool continuing)
+    {
+        var run = result.Run;
+        // 도구 없이 끝난 답은 이미 설명으로 찍혔다. 마지막 설명을 답으로 옮긴다.
+        if (run.Reason == AgentStopReason.AnsweredWithoutTools && turn.Activity.LastOrDefault() is NarrationEntry last && last.Text == run.Summary.Trim())
+            turn.Activity.Remove(last);
+        if (run.Reason == AgentStopReason.UserIntervened) turn.AddOutcome(new NoteEntry(run.Summary, true));
+        else if (!string.IsNullOrWhiteSpace(run.Summary)) turn.AddOutcome(new AnswerEntry(run.Summary.Trim()));
+        if (run.Reason == AgentStopReason.TurnLimit) turn.AddOutcome(new NoteEntry("턴 상한에 도달해 멈췄습니다. 이어서 요청하면 계속합니다.", true));
+        if (run.Reason == AgentStopReason.TokenLimit) turn.AddOutcome(new NoteEntry("토큰 상한에 도달해 멈췄습니다.", true));
+
+        if (InPlaceSession && !_inPlaceNoticeShown && result.Changes.Count > 0)
+        {
+            _inPlaceNoticeShown = true;
+            turn.AddOutcome(new NoteEntry("열린 PowerPoint에서 바로 작업했습니다. 새로 만든 쪽만 고쳤고 저장은 하지 않았습니다. 저장은 PowerPoint에서 해 주세요."));
+        }
+        if (!continuing && _agentWorkflow.Session?.RemovedFonts is { Count: > 0 } fonts)
+            turn.AddOutcome(new NoteEntry($"편집이 제한된 내장 글꼴({string.Join(", ", fonts.Select(f => f.Typeface).Distinct())})을 작업 사본에서 뺐습니다. 대체 글꼴로 보일 수 있습니다."));
+        if (run.RemainingIssues.Count > 0)
+            turn.AddOutcome(new NoteEntry($"남은 레이아웃 위반 {run.RemainingIssues.Count}건 · " +
+                string.Join(" · ", run.RemainingIssues.Take(3).Select(i => i.Message)) + (run.RemainingIssues.Count > 3 ? " …" : ""), true));
+        if (result.UsageByModel is { Count: > 0 } usage && usage.Values.Sum(v => v.Usage.TotalTokens) >= 50_000)
+            turn.AddOutcome(new NoteEntry("LLM 사용 " + UsageMeter.Describe(usage)));
+
+        foreach (var change in result.Changes) turn.Changes.Add(change);
+        var slides = result.AfterSlides;
+        for (int i = 0; i < result.AfterThumbnails.Count; i++)
+            turn.Thumbnails.Add(new ThumbnailItem(result.AfterThumbnails[i], i < slides.Count ? slides[i] : null));
+    }
+
+    private static void AbortSteps(ConsoleTurn turn, string text)
+    {
+        foreach (var step in turn.Activity.OfType<ToolStepEntry>().Where(s => s.IsRunning)) step.Complete(text, failed: true);
+    }
+
+    private void ToggleActivity_Click(object sender, RoutedEventArgs e) => ((sender as FrameworkElement)?.DataContext as ConsoleTurn)?.ToggleActivity();
+    private void ToggleChanges_Click(object sender, RoutedEventArgs e) => ((sender as FrameworkElement)?.DataContext as ConsoleTurn)?.ToggleChanges();
+
+    private async void Thumbnail_Click(object sender, RoutedEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.DataContext is not ThumbnailItem { Slide: int slide }) return;
+        if ((_agentWorkflow.Session?.WorkingPath ?? _session.Presentation?.Path) is not { } path) return;
+        try { await Task.Run(() => _pptService.GoToSlide(path, slide)); } catch { }
+    }
+
+    /// <summary>외부 요청(create_job)은 에이전트 흐름으로 처리한다.</summary>
+    public void AcceptExternalRequest(ExternalCommandRequest request) => _ = RunExternalAsync(request);
+
+    private async Task RunExternalAsync(ExternalCommandRequest request)
     {
         try
         {
@@ -184,240 +357,138 @@ public partial class AgentChatWindow : Window, INotifyPropertyChanged
             Activate();
             OpenPresentation(request.FilePath!);
             InstructionBox.Text = request.Instruction!;
-            _externalJobs.Set(new ExternalCommandResponse(true, request.RequestId, "planning", "작업계획을 생성하는 중입니다."));
-            _ = SendPlanAsync(request.RequestId);
+            _externalJobs.Set(new ExternalCommandResponse(true, request.RequestId, "running", "작업 중입니다."));
+            var result = await SendAgentAsync();
+            _externalJobs.Set(result is null
+                ? new ExternalCommandResponse(false, request.RequestId, "failed", "작업을 시작하지 못했습니다.")
+                : new ExternalCommandResponse(true, request.RequestId, "completed", result.Run.Summary));
         }
         catch (Exception ex)
         {
             _externalJobs.Set(new ExternalCommandResponse(false, request.RequestId, "failed", ex.Message));
-            SetStatus($"외부 요청 거부: {ex.Message}");
+            AddNote($"외부 요청 거부: {ex.Message}", warning: true);
         }
     }
 
-    private async void InstructionBox_KeyDown(object sender, KeyEventArgs e)
-    {
-        // Enter는 줄바꿈(여러 줄 요청·붙여넣기), Ctrl+Enter만 보낸다.
-        if (e.Key != Key.Enter || !Keyboard.Modifiers.HasFlag(ModifierKeys.Control)) return;
-        e.Handled = true;
-        await SendAsync();
-    }
-
-    private Task SendAsync() => SendAgentAsync();
-
-    private void Cancel_Click(object sender, RoutedEventArgs e) => _requestCts?.Cancel();
+    // ══ 상태줄: PowerPoint 따라가기 ═════════════════════════════
 
     /// <summary>
-    /// 도구 루프로 작업한다. 같은 대상에 대한 후속 요청은 같은 작업 사본과 대화에서 이어진다.
-    /// 결과는 "결과 저장"으로 승인해야 원본 옆 파일로 남는다.
+    /// PowerPoint에서 보고 있는 문서와 쪽을 따라간다. 작업 중에는 묻지 않는다(대상이 바뀌면 안 되고 COM 호출이 겹친다).
     /// </summary>
-    private async Task SendAgentAsync()
+    private async Task FollowPowerPointAsync()
     {
-        var instruction = InstructionBox.Text.Trim();
-        if (instruction.Length == 0 || IsRequesting) return;
-        // 요청에 PPT 경로가 있으면 그것을 대상으로 연다.
-        if (_session.Presentation is null && AgentWorkflow.MentionedPresentationPath(instruction) is { } mentionedPptx)
-            OpenPresentation(mentionedPptx);
-        if (_session.Presentation?.Path is not { Length: > 0 } target)
+        if (_polling || IsRequesting || !StaDispatcher.Instance.IsHealthy) { RefreshLight(); return; }
+        _polling = true;
+        try
         {
-            // 상태 줄만으로는 눈에 띄지 않아 "보내기가 안 눌린다"고 느꼈다. 대화창에도 적는다.
-            const string notice = "먼저 대상 PPT를 열어 주세요. [PPT 열기]로 파일을 고르거나, PowerPoint에 열어 둔 문서라면 [현재 PowerPoint 연결]을 누릅니다. 요청 문구는 그대로 남겨 두었습니다.";
-            ConversationText = (ConversationText.Length == 0 ? "" : ConversationText + "\n\n") + "⚠ " + notice;
-            SetStatus(notice);
-            return;
-        }
-
-        _requestCts?.Dispose();
-        _requestCts = new CancellationTokenSource();
-        IsRequesting = true;
-        _currentJob = null;
-        bool continuing = _agentWorkflow.Session is not null;
-        var log = new StringBuilder(continuing ? ConversationText + "\n\n" : "");
-        log.Append($"요청\n{instruction}\n");
-        ConversationText = log.ToString();
-        StreamingText = "";
-        SetStatus(continuing ? "같은 작업 사본에서 이어서 작업합니다..." : "작업 사본을 만들고 시작합니다 · 원본은 저장된 내용 기준이며 바뀌지 않습니다.");
-        InstructionBox.Clear();
-
-        var progress = new Progress<AgentEvent>(e =>
-        {
-            switch (e.Kind)
+            var active = await Task.Run(() => { try { return _pptService.GetActivePresentation(); } catch { return null; } });
+            if (IsRequesting) return;
+            if (active is not null)
             {
-                case AgentEventKind.Thinking: SetStatus($"생각하는 중 · {e.Text}"); break;
-                case AgentEventKind.ToolStarted:
-                    SetStatus($"도구 실행 · {e.ToolName}");
-                    log.Append($"· {e.ToolName} {Clip(e.Text, 120)}\n");
-                    break;
-                case AgentEventKind.ToolFinished:
-                    log.Append(e.IsError ? "   ⚠ " : "   → ")
-                       .Append(Clip(FirstLines(e.Text, e.ToolName is "lint_slide" or "finish" ? 6 : 2), 300)).Append('\n');
-                    break;
-                case AgentEventKind.Message: log.Append($"{e.Text}\n"); break;
-                case AgentEventKind.Compacted: log.Append($"   ({e.Text})\n"); break;
-            }
-            ConversationText = log.ToString();
-        });
-
-        try
-        {
-            _agentResult = await _agentWorkflow.RunAsync(target, instruction, progress, _requestCts.Token);
-            var run = _agentResult.Run;
-            if (!continuing && InPlaceSession)
-                log.Append("\n(안내) 열린 PowerPoint 창에서 바로 작업했습니다. 새로 만든 쪽만 고쳤고 저장은 하지 않았습니다. " +
-                           "결과가 마음에 들면 PowerPoint에서 저장하고, 필요 없는 쪽은 직접 지워 주세요.\n");
-            if (!continuing && _agentWorkflow.Session?.RemovedFonts is { Count: > 0 } fonts)
-                log.Append("\n(안내) 편집이 제한된 내장 글꼴 ")
-                   .Append(string.Join(", ", fonts.Select(f => f.Typeface).Distinct()))
-                   .Append("을 작업 사본에서 제거했습니다. 이 PC에 없는 글꼴이면 대체 글꼴로 보이고 줄바꿈이 원래와 다를 수 있습니다.\n");
-            // 도구 없이 끝난 답은 이미 메시지로 찍혔으므로 다시 쓰지 않는다.
-            log.Append(run.Reason == AgentStopReason.AnsweredWithoutTools ? "\n" : $"\n결과\n{run.Summary}\n");
-            AppendChanges(log, _agentResult.Changes);
-            if (run.RemainingIssues.Count > 0)
-                log.Append($"남은 레이아웃 위반 {run.RemainingIssues.Count}건\n")
-                   .Append(string.Join("\n", run.RemainingIssues.Select(i => "- " + i.Message))).Append('\n');
-            ConversationText = log.ToString();
-            SetStatus(run.Reason switch
-            {
-                AgentStopReason.Finished or AgentStopReason.AnsweredWithoutTools =>
-                    "완료 · 미리보기를 확인하고 '결과 저장' 또는 후속 요청을 해 주세요.",
-                AgentStopReason.TurnLimit => "턴 상한에 도달해 멈췄습니다 · 이어서 요청하거나 결과를 확인해 주세요.",
-                AgentStopReason.UserIntervened => "PowerPoint 조작을 감지해 멈췄습니다 · 조작을 마친 뒤 이어서 요청해 주세요.",
-                _ => "토큰 상한에 도달해 멈췄습니다."
-            } + $" · {run.Turns}턴");
-            if (_agentResult.UsageByModel is { Count: > 0 } byModel)
-                log.Append("LLM 사용: ").Append(UsageMeter.Describe(byModel)).Append('\n');
-            ConversationText = log.ToString();
-            if (_agentWorkflow.PendingCards is { } pending)
-                SetStatus($"요청문({pending.Prompt.Length:N0}자)을 준비했습니다 · [요청문 복사] 후 사용하는 모델에 붙여넣고, 답을 붙여넣어 [적용]해 주세요.");
-        }
-        catch (OperationCanceledException) { SetStatus("작업을 중단했습니다. 지금까지의 변경은 작업 사본에 남아 있습니다."); }
-        catch (LlmException ex) { SetStatus(ToUserMessage(ex) + " · 작업 사본은 유지됩니다. 다시 요청하면 이어갑니다."); }
-        catch (Exception ex) { SetStatus($"작업 실패: {ex.Message}"); }
-        finally
-        {
-            IsRequesting = false;
-            NotifyJobState();
-        }
-    }
-
-    private void CopyPrompt_Click(object sender, RoutedEventArgs e)
-    {
-        if (_agentWorkflow.PendingCards is not { } pending) return;
-        try
-        {
-            Clipboard.SetText(pending.Prompt);
-            SetStatus($"요청문 {pending.Prompt.Length:N0}자를 복사했습니다 · 사용하는 고급 모델에 붙여넣으세요.");
-        }
-        catch (Exception ex) { SetStatus($"복사 실패: {ex.Message}"); }
-    }
-
-    private async void ApplyAnswer_Click(object sender, RoutedEventArgs e)
-    {
-        var answer = AnswerBox.Text.Trim();
-        if (answer.Length == 0) { SetStatus("모델에게 받은 답을 붙여넣어 주세요."); return; }
-        await ContinueCardsAsync("붙여넣은 답으로 카드 작성",
-            (progress, ct) => _agentWorkflow.ApplyPendingCardsAsync(answer, progress, ct));
-    }
-
-    private async void WriteDefault_Click(object sender, RoutedEventArgs e) =>
-        await ContinueCardsAsync("기본 모델로 카드 작성",
-            (progress, ct) => _agentWorkflow.WritePendingWithDefaultAsync(progress, ct));
-
-    private async Task ContinueCardsAsync(
-        string title, Func<IProgress<AgentEvent>, CancellationToken, Task<AgentTurnResult>> step)
-    {
-        if (IsRequesting) return;
-        _requestCts?.Dispose();
-        _requestCts = new CancellationTokenSource();
-        IsRequesting = true;
-        var log = new StringBuilder(ConversationText + $"\n\n{title}\n");
-        ConversationText = log.ToString();
-        var progress = new Progress<AgentEvent>(ev =>
-        {
-            if (ev.Kind != AgentEventKind.Message) return;
-            SetStatus(ev.Text);
-            log.Append($"{ev.Text}\n");
-            ConversationText = log.ToString();
-        });
-        try
-        {
-            _agentResult = await step(progress, _requestCts.Token);
-            var run = _agentResult.Run;
-            log.Append($"\n결과\n{run.Summary}\n");
-            AppendChanges(log, _agentResult.Changes);
-            if (run.RemainingIssues.Count > 0)
-                log.Append($"남은 레이아웃 위반 {run.RemainingIssues.Count}건\n")
-                   .Append(string.Join("\n", run.RemainingIssues.Select(i => "- " + i.Message))).Append('\n');
-            if (_agentResult.UsageByModel is { Count: > 0 } byModel)
-                log.Append("LLM 사용: ").Append(UsageMeter.Describe(byModel)).Append('\n');
-            ConversationText = log.ToString();
-            AnswerBox.Clear();
-            SetStatus("완료 · 미리보기를 확인하고 '결과 저장' 또는 후속 요청을 해 주세요.");
-        }
-        catch (OperationCanceledException) { SetStatus("작업을 중단했습니다."); }
-        catch (BckPPT.Agent.Tools.AgentToolException ex) { SetStatus(ex.Message); }
-        catch (LlmException ex) { SetStatus(ToUserMessage(ex)); }
-        catch (Exception ex) { SetStatus($"작업 실패: {ex.Message}"); }
-        finally
-        {
-            IsRequesting = false;
-            NotifyJobState();
-        }
-    }
-
-    private void ApproveAgent_Click(object sender, RoutedEventArgs e)
-    {
-        try
-        {
-            bool inPlace = InPlaceSession;
-            var result = _agentWorkflow.Approve();
-            if (inPlace)
-            {
-                ConversationText += "\n\n작업을 마쳤습니다. 저장은 PowerPoint에서 해 주세요.";
-                SetStatus("작업을 마쳤습니다 · 바로 작업한 내용은 PowerPoint에서 저장해야 남습니다.");
+                bool changed = !string.Equals(active.Path, _session.Presentation?.Path, StringComparison.OrdinalIgnoreCase);
+                _currentSlide = active.CurrentSlide;
+                _slideCount = active.SlideCount;
+                if (changed)
+                {
+                    bool hadSession = _agentWorkflow.Session is not null;
+                    _session.Presentation = new PptPresentation(active.Name, active.Path, active.SlideCount);
+                    if (hadSession) AddNote($"대상이 {active.Name}(으)로 바뀌었습니다. 다음 요청은 이 문서에서 새로 시작합니다.");
+                }
+                _statusDetail = InPlaceSession || (WorkInOpenWindow && _agentWorkflow.Session is null)
+                    ? "열린 창에서 바로 작업" : "작업 사본에서 작업";
             }
             else
             {
-                ConversationText += $"\n\n저장함: {result}";
-                SetStatus("결과 사본을 저장했습니다 · 원본은 바뀌지 않았습니다. 다음 요청은 원본에서 새로 시작합니다.");
+                _currentSlide = null;
+                _statusDetail = _session.Presentation is null ? "PowerPoint 문서 없음" : "PowerPoint 창에 열려 있지 않음 · 작업 사본에서 작업";
             }
-            _agentResult = null;
+            RefreshTarget();
         }
-        catch (Exception ex) { SetStatus($"저장 실패: {ex.Message} · PowerPoint에서 작업 사본을 닫고 다시 시도해 주세요."); }
-        NotifyJobState();
+        finally { _polling = false; }
     }
 
-    private void OpenWorkingCopy_Click(object sender, RoutedEventArgs e)
+    private void RefreshTarget()
     {
-        if (_agentWorkflow.Session?.WorkingPath is not { } path) return;
-        try
-        {
-            _pptService.OpenPptxInPowerPoint(path);
-            SetStatus("작업 사본을 PowerPoint에서 열었습니다 · 저장 전 결과입니다.");
-        }
-        catch (Exception ex) { SetStatus($"열기 실패: {ex.Message}"); }
+        _slideCount = _slideCount == 0 ? _session.Presentation?.SlideCount ?? 0 : _slideCount;
+        UpdateStatusLayout();
+        Notify(nameof(SlideDisplay));
+        Notify(nameof(TargetTooltip));
+        RefreshLight();
     }
 
-    private void DiscardAgent_Click(object sender, RoutedEventArgs e)
+    private void RefreshLight() { Notify(nameof(LightBrush)); Notify(nameof(LightTooltip)); }
+
+    private void StatusBar_SizeChanged(object sender, SizeChangedEventArgs e) => UpdateStatusLayout();
+
+    /// <summary>
+    /// 파일명은 선명하게, 경로는 작은 회색으로. 좁아지면 경로부터 숨기고 파일명 가운데를 줄인다.
+    /// </summary>
+    private void UpdateStatusLayout()
     {
-        bool inPlace = InPlaceSession;
-        _agentWorkflow.Discard();
-        _agentResult = null;
-        if (inPlace)
-        {
-            // 바로 작업은 아무것도 지우지 않는다. 추가된 쪽은 사용자가 PowerPoint에서 지운다.
-            ConversationText += "\n\n대화를 끝냈습니다. 추가된 쪽은 PowerPoint에 그대로 있습니다(필요 없으면 직접 지워 주세요).";
-            SetStatus("대화를 끝냈습니다 · BckPPT는 쪽을 지우지 않습니다.");
-        }
+        if (FileNameText is null) return;
+        var path = _session.Presentation?.Path;
+        string name = path is null ? "PowerPoint 문서 없음" : Path.GetFileName(path);
+        string folder = path is null ? "" : ConsoleFormatting.ShortenFolder(Path.GetDirectoryName(path));
+        // 신호등·여백·쪽 표시·⋯ 단추를 뺀 폭
+        double available = StatusBar.ActualWidth - 9 - 9 - 8 - 30 - Measure(SlideDisplay, FileNameText) - 16;
+        double nameWidth = Measure(name, FileNameText);
+        double folderWidth = folder.Length == 0 ? 0 : Measure(folder, FolderText) + 8;
+        if (nameWidth + folderWidth <= available) { FileNameDisplay = name; FolderDisplay = folder; }
         else
         {
-            ConversationText += "\n\n작업 사본을 버렸습니다.";
-            SetStatus("작업을 버렸습니다 · 원본은 그대로입니다.");
+            FolderDisplay = "";
+            FileNameDisplay = ConsoleFormatting.MiddleEllipsis(name, available, s => Measure(s, FileNameText));
         }
-        NotifyJobState();
+        Notify(nameof(FileNameDisplay));
+        Notify(nameof(FolderDisplay));
+    }
+
+    private double Measure(string text, TextBlock style) =>
+        new FormattedText(text, CultureInfo.CurrentUICulture, FlowDirection.LeftToRight,
+            new Typeface(style.FontFamily, style.FontStyle, style.FontWeight, style.FontStretch), style.FontSize, Brushes.White,
+            VisualTreeHelper.GetDpi(this).PixelsPerDip).WidthIncludingTrailingWhitespace;
+
+    // ══ ⋯ 메뉴 ═══════════════════════════════════════════════
+
+    private void More_Click(object sender, RoutedEventArgs e)
+    {
+        Notify(nameof(AttachMenuText)); Notify(nameof(HasSources)); NotifySession();
+        MenuPopup.IsOpen = !MenuPopup.IsOpen;
+    }
+
+    private void CloseMenu() => MenuPopup.IsOpen = false;
+
+    private void OpenFile_Click(object sender, RoutedEventArgs e)
+    {
+        CloseMenu();
+        var dialog = new OpenFileDialog { Filter = "PowerPoint 파일|*.pptx;*.pptm;*.ppt|모든 파일|*.*" };
+        if (_initialDirectory is not null) dialog.InitialDirectory = _initialDirectory;
+        if (dialog.ShowDialog(this) == true) OpenPresentation(dialog.FileName);
+    }
+
+    private void OpenEditor_Click(object sender, RoutedEventArgs e) { CloseMenu(); _openEditor(); }
+
+    private async void IndexFolder_Click(object sender, RoutedEventArgs e)
+    {
+        CloseMenu();
+        var dialog = new OpenFolderDialog { Title = "PPT 템플릿 라이브러리 폴더 선택", Multiselect = false };
+        if (dialog.ShowDialog(this) != true || IsRequesting) return;
+        _requestCts?.Dispose();
+        _requestCts = new CancellationTokenSource();
+        IsRequesting = true;
+        try
+        {
+            var result = await _pptIndexer.IndexFolderAsync(dialog.FolderName, new Progress<string>(SetStatus), _requestCts.Token);
+            AddNote($"템플릿 인덱싱 완료 · 파일 {result.Files}개/슬라이드 {result.Slides}장 갱신 · {result.Skipped}개 변경 없음");
+        }
+        catch (OperationCanceledException) { AddNote("인덱싱을 멈췄습니다."); }
+        catch (Exception ex) { AddNote($"인덱싱 실패: {ex.Message}", warning: true); }
+        finally { IsRequesting = false; }
     }
 
     private async void AttachSources_Click(object sender, RoutedEventArgs e)
     {
+        CloseMenu();
         var dialog = new OpenFileDialog
         {
             Title = "원문 첨부 (기획보고서·RFP 등)",
@@ -428,6 +499,15 @@ public partial class AgentChatWindow : Window, INotifyPropertyChanged
         if (dialog.ShowDialog(this) == true) await AttachSourcesAsync(dialog.FileNames);
     }
 
+    private void DetachSources_Click(object sender, RoutedEventArgs e)
+    {
+        CloseMenu();
+        int count = _agentWorkflow.AttachedSources.Count;
+        _agentWorkflow.DetachAll();
+        AddNote($"첨부 원문 {count}개를 뺐습니다.");
+        Notify(nameof(HasSources)); Notify(nameof(AttachMenuText));
+    }
+
     private async Task AttachSourcesAsync(IReadOnlyList<string> paths)
     {
         if (IsRequesting) return;
@@ -436,203 +516,108 @@ public partial class AgentChatWindow : Window, INotifyPropertyChanged
         IsRequesting = true;
         try
         {
-            SetStatus($"원문 {paths.Count}개를 색인하는 중...");
             var (files, pages) = await _agentWorkflow.AttachAsync(paths, _requestCts.Token);
-            SetStatus($"원문 {files}개 · {pages}쪽 색인 완료 · 다음 요청부터 에이전트가 검색합니다.");
+            AddNote($"원문 {files}개 · {pages}쪽을 첨부했습니다. 다음 요청부터 에이전트가 찾아 씁니다.");
         }
-        catch (OperationCanceledException) { SetStatus("원문 색인을 취소했습니다."); }
-        catch (Exception ex) { SetStatus($"원문 첨부 실패: {ex.Message}"); }
+        catch (OperationCanceledException) { AddNote("원문 첨부를 멈췄습니다."); }
+        catch (Exception ex) { AddNote($"원문 첨부 실패: {ex.Message}", warning: true); }
         finally
         {
             IsRequesting = false;
-            Notify(nameof(SourcesText));
+            Notify(nameof(HasSources)); Notify(nameof(AttachMenuText));
         }
     }
 
-    private static string FirstLines(string text, int count) =>
-        string.Join(" / ", text.Split('\n').Select(l => l.Trim()).Where(l => l.Length > 0).Take(count));
-
-    private static string Clip(string text, int max) => text.Length <= max ? text : text[..max] + "…";
-
-    /// <summary>
-    /// 도구가 실제로 바꾼 것을 코드 기록 그대로 붙인다. 모델이 "삭제한 줄 수는 다음과 같습니다:"까지만 쓰고
-    /// 쪽별 숫자를 빼먹은 일이 있었다(2026-10-07). 숫자는 모델 요약이 아니라 이 목록을 믿는다.
-    /// </summary>
-    private static void AppendChanges(StringBuilder log, IReadOnlyList<string> changes)
+    private void Usage_Click(object sender, RoutedEventArgs e)
     {
-        if (changes.Count == 0) return;
-        log.Append("\n실행 내역\n");
-        foreach (var change in changes.Take(40)) log.Append("- ").Append(change).Append('\n');
-        if (changes.Count > 40) log.Append($"- … 외 {changes.Count - 40}건\n");
+        CloseMenu();
+        var meter = _agentWorkflow.Session?.Context.Meter;
+        AddNote(meter is null ? "이번 작업에서 아직 LLM을 쓰지 않았습니다." : "이번 작업의 LLM 사용 · " + UsageMeter.Describe(meter.Snapshot()));
     }
 
-    /// <summary>외부 요청(create_job)용 단발 계획 흐름. ApprovalWorkflow의 미리보기·적용 단계를 그대로 쓴다.</summary>
-    private async Task SendPlanAsync(string? externalRequestId = null)
+    private void OpenLogs_Click(object sender, RoutedEventArgs e)
     {
-        var instruction = InstructionBox.Text.Trim();
-        if (instruction.Length == 0 || IsRequesting) return;
-
-        _requestCts?.Dispose();
-        _requestCts = new CancellationTokenSource();
-        IsRequesting = true;
-        StreamingText = "";
-        ConversationText = $"요청\n{instruction}\n\n작업 계획";
-        SetStatus("작업계획을 생성하는 중...");
-        var output = new StringBuilder();
-
+        CloseMenu();
         try
         {
-            string? documentContext = null;
-            if (_session.Presentation is { } target)
-            {
-                SetStatus("PPT 구조를 분석해 최소 문맥을 구성하는 중...");
-                var analysis = await Task.Run(() => _pptService.AnalyzePresentation(
-                    target.Path, cancellationToken: _requestCts.Token), _requestCts.Token);
-                documentContext = PptContextAssembler.Assemble(_session, analysis);
-            }
-            await foreach (var evt in _llmClient.StreamAsync(
-                PptPromptBuilder.BuildPlanRequest(instruction, _session, documentContext), _requestCts.Token))
-            {
-                if (evt.Kind == LlmStreamEventKind.Started)
-                    SetStatus($"LLM 연결됨 · {evt.Route ?? "경로 미상"} · 요청 {evt.RequestId ?? "ID 없음"}");
-                if (evt.Kind == LlmStreamEventKind.ContentDelta && !string.IsNullOrEmpty(evt.Content))
-                {
-                    output.Append(evt.Content);
-                    StreamingText = output.ToString();
-                }
-            }
-            var plan = PptTaskPlanDecoder.Decode(output.ToString());
-            StreamingText = PptTaskPlanDecoder.ToDisplayJson(plan);
-            _currentJob = _approvalWorkflow.Create(instruction, plan, _session);
-            _currentJob.ExternalRequestId = externalRequestId;
-            NotifyJobState();
-            SetStatus("구조화 작업계획을 받았습니다. 변경 미리보기를 확인해 주세요.");
-            if (externalRequestId is not null)
-                _externalJobs.Set(new ExternalCommandResponse(true, externalRequestId, "awaiting_preview", "사용자 미리보기 승인을 기다립니다."));
-            InstructionBox.Clear();
+            Directory.CreateDirectory(AgentSession.DefaultLogDirectory);
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("explorer.exe", AgentSession.DefaultLogDirectory) { UseShellExecute = true });
         }
-        catch (OperationCanceledException) { SetStatus("요청을 취소했습니다."); SetExternalFailure(externalRequestId, "cancelled", "요청이 취소되었습니다."); }
-        catch (LlmException ex) { SetStatus(ToUserMessage(ex)); SetExternalFailure(externalRequestId, "failed", ex.Message); }
-        catch (FormatException ex) { SetStatus($"작업계획 검증 실패: {ex.Message} · 다시 만들어 주세요."); SetExternalFailure(externalRequestId, "failed", ex.Message); }
-        catch (Exception ex) { SetStatus($"LLM 요청 실패: {ex.Message}"); SetExternalFailure(externalRequestId, "failed", ex.Message); }
-        finally { IsRequesting = false; }
+        catch (Exception ex) { AddNote($"폴더를 열지 못했습니다: {ex.Message}", warning: true); }
     }
 
-    private async Task TestLlmConnectionAsync()
+    private void ApproveAgent_Click(object sender, RoutedEventArgs e)
     {
+        CloseMenu();
         try
         {
-            await _llmClient.TestConnectionAsync();
-            SetStatus("GitOky LLM 연결됨");
+            bool inPlace = InPlaceSession;
+            var result = _agentWorkflow.Approve();
+            AddNote(inPlace ? "작업을 마쳤습니다. 저장은 PowerPoint에서 해 주세요." : $"결과를 저장했습니다: {result}");
         }
-        catch (Exception ex) { SetStatus($"LLM 연결 안 됨: {ex.Message} · 전문 편집 기능은 사용할 수 있습니다."); }
+        catch (Exception ex) { AddNote($"저장 실패: {ex.Message} · PowerPoint에서 작업 사본을 닫고 다시 시도해 주세요.", warning: true); }
+        NotifySession();
     }
 
-    private async Task CheckForUpdatesAsync()
+    private void OpenWorkingCopy_Click(object sender, RoutedEventArgs e)
     {
-        try
-        {
-            var current = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version ?? new Version(0, 0);
-            var result = await _updateService.CheckAsync(current);
-            if (result.IsUpdateAvailable) SetStatus(result.Message);
-        }
-        catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"업데이트 확인 실패: {ex.Message}"); }
+        CloseMenu();
+        if (_agentWorkflow.Session?.WorkingPath is not { } path) return;
+        try { _pptService.OpenPptxInPowerPoint(path); }
+        catch (Exception ex) { AddNote($"열기 실패: {ex.Message}", warning: true); }
     }
 
-    private async void Preview_Click(object sender, RoutedEventArgs e)
+    private void DiscardAgent_Click(object sender, RoutedEventArgs e)
     {
-        if (_currentJob is null) return;
-        _requestCts?.Dispose();
-        _requestCts = new CancellationTokenSource();
-        IsRequesting = true;
-        try
-        {
-            SetStatus("PowerPoint에서 적용 전 미리보기를 렌더링하는 중...");
-            StreamingText = await _approvalWorkflow.PreparePreviewAsync(_currentJob, _requestCts.Token);
-            SetStatus("미리보기 준비됨 · 적용 전까지 원본은 변경되지 않습니다.");
-            if (_currentJob.ExternalRequestId is { } requestId)
-                _externalJobs.Set(new ExternalCommandResponse(true, requestId, "awaiting_approval", "적용 승인을 기다립니다."));
-        }
-        catch (OperationCanceledException) { SetStatus("미리보기 생성을 취소했습니다."); SetExternalFailure(_currentJob.ExternalRequestId, "cancelled", "미리보기가 취소되었습니다."); }
-        catch (Exception ex) { SetStatus($"미리보기 실패: {ex.Message}"); SetExternalFailure(_currentJob.ExternalRequestId, "failed", ex.Message); }
-        finally { IsRequesting = false; NotifyJobState(); }
+        CloseMenu();
+        bool inPlace = InPlaceSession;
+        _agentWorkflow.Discard();
+        // 바로 작업은 아무것도 지우지 않는다. 추가된 쪽은 사용자가 PowerPoint에서 지운다.
+        AddNote(inPlace ? "대화를 끝냈습니다. 추가된 쪽은 PowerPoint에 그대로 있습니다." : "작업 사본을 버렸습니다. 원본은 그대로입니다.");
+        NotifySession();
     }
 
-    private async void Apply_Click(object sender, RoutedEventArgs e)
+    private void NotifySession()
     {
-        if (_currentJob is null) return;
-        _requestCts?.Dispose();
-        _requestCts = new CancellationTokenSource();
-        IsRequesting = true;
-        try
-        {
-            SetStatus("승인된 작업을 사본에 적용하는 중...");
-            var result = await _approvalWorkflow.ApplyAsync(_currentJob, _requestCts.Token);
-            var validation = _currentJob.Validation;
-            StreamingText += $"\n\n완료: {result}\n" + FormatValidation(validation);
-            SetStatus(validation?.IsValid == true
-                ? "사본 적용 및 레이아웃 검증 완료 · 원본은 변경되지 않았습니다."
-                : "사본 적용 완료 · 해결되지 않은 레이아웃 경고를 확인해 주세요.");
-            if (_currentJob.ExternalRequestId is { } requestId)
-                _externalJobs.Set(new ExternalCommandResponse(true, requestId, "completed", "작업이 완료되었습니다.", result));
-        }
-        catch (OperationCanceledException) { SetStatus("적용을 취소했습니다. 불완전한 사본은 삭제했습니다."); SetExternalFailure(_currentJob.ExternalRequestId, "cancelled", "적용이 취소되었습니다."); }
-        catch (Exception ex) { SetStatus($"적용 실패: {ex.Message}"); SetExternalFailure(_currentJob.ExternalRequestId, "failed", ex.Message); }
-        finally { IsRequesting = false; NotifyJobState(); }
+        Notify(nameof(HasSession)); Notify(nameof(ApproveLabel)); Notify(nameof(DiscardLabel)); Notify(nameof(ShowOpenWorkingCopy));
     }
 
-    private void CancelJob_Click(object sender, RoutedEventArgs e)
+    // ══ 대화 영역 ═════════════════════════════════════════════
+
+    /// <summary>사용자 요청이 아닌 알림 한 줄(원문 첨부 완료 등).</summary>
+    private void AddNote(string text, bool warning = false)
     {
-        if (_currentJob is null) return;
-        if (_currentJob.State == PptJobState.Applying) _requestCts?.Cancel();
-        _approvalWorkflow.Cancel(_currentJob);
-        if (_currentJob.ExternalRequestId is { } requestId)
-            _externalJobs.Set(new ExternalCommandResponse(false, requestId, "cancelled", "사용자가 작업을 취소했습니다."));
-        SetStatus("작업을 취소했습니다.");
-        NotifyJobState();
+        var turn = new ConsoleTurn("", system: true);
+        turn.AddOutcome(new NoteEntry(text, warning));
+        turn.Finish(0);
+        Turns.Add(turn);
+        if (_followConversation) ScrollToEndSoon();
     }
 
-    private void NotifyJobState()
+    private void SetStatus(string value) { _statusDetail = value; RefreshLight(); }
+
+    private void ConversationScroll_ScrollChanged(object sender, ScrollChangedEventArgs e)
     {
-        Notify(nameof(CanPreview));
-        Notify(nameof(CanApply));
-        Notify(nameof(JobControlsVisibility));
-        Notify(nameof(PreviewImages));
-        Notify(nameof(ResultImages));
-        Notify(nameof(PreviewImagesVisibility));
-        Notify(nameof(ResultImagesVisibility));
-        Notify(nameof(AgentControlsVisibility));
-        Notify(nameof(PendingVisibility));
-        Notify(nameof(ApproveLabel));
-        Notify(nameof(DiscardLabel));
-        Notify(nameof(OpenWorkingCopyVisibility));
+        bool atEnd = ConversationScroll.VerticalOffset >= ConversationScroll.ScrollableHeight - 24;
+        // 내용이 늘어서 생긴 변화가 아니라 사용자가 스크롤한 경우에만 따라가기 여부를 바꾼다.
+        if (e.ExtentHeightChange == 0) _followConversation = atEnd;
+        else if (_followConversation) ConversationScroll.ScrollToEnd();
+        ShowJumpToEnd = !_followConversation && !atEnd;
     }
 
-    private static string FormatValidation(BckPPT.PowerPoint.LayoutValidationResult? result)
+    private void JumpToEnd_Click(object sender, RoutedEventArgs e) => ScrollToEndNow();
+
+    private void ScrollToEndNow()
     {
-        if (result is null) return "레이아웃 검증 결과 없음";
-        if (result.IsValid) return result.CorrectedCount == 0
-            ? "레이아웃 검증: overflow 없음"
-            : $"레이아웃 검증: {result.CorrectedCount}개 자동 보정, overflow 없음";
-        var issues = string.Join(", ", result.RemainingIssues.Select(issue => $"{issue.SlideIndex}쪽/{issue.ShapeName}"));
-        return $"레이아웃 검증: {result.CorrectedCount}개 자동 보정, {result.RemainingIssues.Count}개 경고 ({issues})";
+        _followConversation = true;
+        ShowJumpToEnd = false;
+        ScrollToEndSoon();
     }
 
-    private void SetExternalFailure(string? requestId, string status, string message)
-    {
-        if (requestId is not null)
-            _externalJobs.Set(new ExternalCommandResponse(false, requestId, status, message));
-    }
+    private void ScrollToEndSoon() =>
+        Dispatcher.BeginInvoke(() => ConversationScroll?.ScrollToEnd(), DispatcherPriority.Background);
 
-    private static string ToUserMessage(LlmException ex) => ex.ErrorCode switch
-    {
-        "quota_exceeded" => "GitOky LLM 사용 한도를 초과했습니다.",
-        _ when ex.Message.Contains("quota", StringComparison.OrdinalIgnoreCase) =>
-            $"GitOky LLM 일일 토큰 한도를 다 썼습니다. 한도가 초기화된 뒤 다시 요청해 주세요. ({ex.Message})",
-        "timeout" => "LLM 응답 시간이 초과되었습니다. 다시 시도해 주세요.",
-        _ when ex.StatusCode == 401 || ex.StatusCode == 403 => "GitOky LLM 키 또는 권한을 확인해 주세요.",
-        _ => $"LLM 요청 실패: {ex.Message}"
-    };
+    // ══ 파일 ═════════════════════════════════════════════════
 
     private void Window_DragOver(object sender, DragEventArgs e) =>
         e.Effects = HasPresentationFile(e.Data) || DroppedSources(e.Data).Count > 0 ? DragDropEffects.Copy : DragDropEffects.None;
@@ -657,9 +642,8 @@ public partial class AgentChatWindow : Window, INotifyPropertyChanged
         {
             _pptService.OpenPptxInPowerPoint(path);
             _session.Presentation = new PptPresentation(Path.GetFileName(path), Path.GetFullPath(path), 0);
-            SetStatus("PowerPoint에서 문서를 열었습니다.");
         }
-        catch (Exception ex) { SetStatus($"파일 열기 실패: {ex.Message}"); }
+        catch (Exception ex) { AddNote($"파일 열기 실패: {ex.Message}", warning: true); }
     }
 
     private static bool HasPresentationFile(IDataObject data) =>
@@ -668,8 +652,72 @@ public partial class AgentChatWindow : Window, INotifyPropertyChanged
     private static bool IsPresentationFile(string path) =>
         new[] { ".pptx", ".pptm", ".ppt" }.Contains(Path.GetExtension(path), StringComparer.OrdinalIgnoreCase);
 
-    private void SetStatus(string value) { StatusText = value; Notify(nameof(StatusText)); }
-    private void RefreshBindings() { Notify(nameof(TargetText)); Notify(nameof(StatusText)); }
+    // ══ 시작 확인 ═════════════════════════════════════════════
+
+    private async Task TestLlmConnectionAsync()
+    {
+        try { await _llmClient.TestConnectionAsync(); SetStatus("LLM 연결됨"); }
+        catch (Exception ex) { AddNote($"LLM에 연결하지 못했습니다: {ex.Message}", warning: true); }
+    }
+
+    private async Task CheckForUpdatesAsync()
+    {
+        try
+        {
+            var current = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version ?? new Version(0, 0);
+            var result = await _updateService.CheckAsync(current);
+            if (result.IsUpdateAvailable) AddNote(result.Message);
+        }
+        catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"업데이트 확인 실패: {ex.Message}"); }
+    }
+
+    private static string ToUserMessage(LlmException ex) => ex.ErrorCode switch
+    {
+        "quota_exceeded" => "GitOky LLM 사용 한도를 초과했습니다.",
+        _ when ex.Message.Contains("quota", StringComparison.OrdinalIgnoreCase) =>
+            $"GitOky LLM 일일 토큰 한도를 다 썼습니다. 한도가 초기화된 뒤 다시 요청해 주세요. ({ex.Message})",
+        "timeout" => "LLM 응답 시간이 초과되었습니다. 다시 시도해 주세요.",
+        _ when ex.StatusCode == 401 || ex.StatusCode == 403 => "GitOky LLM 키 또는 권한을 확인해 주세요.",
+        _ => $"LLM 요청 실패: {ex.Message}"
+    };
+
+    // ══ 창 ════════════════════════════════════════════════════
+
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);
+
+    /// <summary>제목줄을 앱 배경(#1E1E1E)에 맞춘 어두운 색으로. Windows 10은 어두운 모드만, 11은 색까지 맞춘다.</summary>
+    private void UseDarkTitleBar()
+    {
+        var hwnd = new WindowInteropHelper(this).Handle;
+        int dark = 1;
+        DwmSetWindowAttribute(hwnd, 20, ref dark, sizeof(int));          // DWMWA_USE_IMMERSIVE_DARK_MODE
+        int caption = 0x001E1E1E;                                          // COLORREF(0x00BBGGRR)
+        DwmSetWindowAttribute(hwnd, 35, ref caption, sizeof(int));       // DWMWA_CAPTION_COLOR (Windows 11)
+        int text = 0x00D4D4D4;
+        DwmSetWindowAttribute(hwnd, 36, ref text, sizeof(int));          // DWMWA_TEXT_COLOR
+    }
+
+    private void RestoreBounds()
+    {
+        Topmost = PptRules.Current.ChatTopmost;
+        if (PptRules.Current.ChatWindowBounds?.Split(',') is not { Length: 4 } parts) return;
+        var v = parts.Select(p => double.TryParse(p, NumberStyles.Float, CultureInfo.InvariantCulture, out var d) ? d : double.NaN).ToArray();
+        if (v.Any(double.IsNaN) || v[2] < MinWidth || v[3] < MinHeight) return;
+        // 화면 밖이면(모니터 구성이 바뀜) 기본 위치를 쓴다.
+        var area = new Rect(SystemParameters.VirtualScreenLeft, SystemParameters.VirtualScreenTop,
+            SystemParameters.VirtualScreenWidth, SystemParameters.VirtualScreenHeight);
+        if (!area.IntersectsWith(new Rect(v[0], v[1], v[2], v[3]))) return;
+        WindowStartupLocation = WindowStartupLocation.Manual;
+        (Left, Top, Width, Height) = (v[0], v[1], v[2], v[3]);
+    }
+
+    private void SaveBounds()
+    {
+        if (WindowState != WindowState.Normal) return;
+        PptRules.Current.ChatWindowBounds = string.Join(",", new[] { Left, Top, Width, Height }.Select(d => d.ToString("0", CultureInfo.InvariantCulture)));
+        try { PptRules.Current.Save(); } catch { }
+    }
 
     public event PropertyChangedEventHandler? PropertyChanged;
     private void Notify([CallerMemberName] string? propertyName = null) =>
