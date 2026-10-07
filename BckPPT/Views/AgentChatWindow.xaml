@@ -341,26 +341,78 @@
             </Button>
         </Grid>
 
-        <!-- ── 입력 ── -->
-        <Border Grid.Row="2" BorderBrush="{StaticResource BorderBr}" BorderThickness="0,1,0,0" Padding="12,10,12,12">
+        <!-- ── 입력: 둥근 상자 하나(› 입력 ↑) + 아래 작은 안내 줄 ── -->
+        <StackPanel Grid.Row="2" Margin="12,6,12,10">
             <Grid>
-                <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                <Grid>
-                    <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                    <TextBlock Text="&gt;" FontFamily="{StaticResource MonoFont}" FontSize="13" Foreground="{StaticResource SubTextBr}"
-                               Margin="2,9,8,0" VerticalAlignment="Top"/>
-                    <TextBox Grid.Column="1" x:Name="InstructionBox" Style="{StaticResource DarkInput}" Padding="8,7"
-                             AcceptsReturn="True" AcceptsTab="False" TextWrapping="Wrap" FontFamily="{StaticResource BodyFont}" FontSize="13"
-                             MinHeight="40" MaxHeight="200" VerticalScrollBarVisibility="Auto" VerticalContentAlignment="Top"
-                             PreviewKeyDown="InstructionBox_KeyDown" TextChanged="InstructionBox_TextChanged"/>
-                    <TextBlock Grid.Column="1" x:Name="Placeholder" Text="다음 작업을 입력하세요 · Enter 보내기 · Shift+Enter 줄바꿈" IsHitTestVisible="False"
-                               Foreground="{StaticResource SubTextBr}" FontSize="12.5" Margin="11,9,0,0"/>
-                </Grid>
-                <Button Grid.Column="1" Style="{StaticResource AccentBtn}" Margin="8,0,0,0" VerticalAlignment="Bottom" Height="34" MinWidth="44"
-                        Click="SendOrStop_Click" ToolTip="{Binding SendTooltip}">
-                    <TextBlock Text="{Binding SendGlyph}" FontSize="14"/>
-                </Button>
+                <!-- 그림자는 뒤의 빈 상자에만 준다(입력 상자에 주면 글자가 흐려진다). -->
+                <Border CornerRadius="9" Background="#252527" Margin="1">
+                    <Border.Effect><DropShadowEffect BlurRadius="14" ShadowDepth="0" Opacity="0.45" Color="Black"/></Border.Effect>
+                </Border>
+                <Border x:Name="InputFrame" CornerRadius="9" Background="#252527" BorderThickness="1" Padding="10,5,5,5">
+                    <Border.Style>
+                        <Style TargetType="Border">
+                            <Setter Property="BorderBrush" Value="#3A3A3E"/>
+                            <Style.Triggers>
+                                <Trigger Property="IsKeyboardFocusWithin" Value="True">
+                                    <Setter Property="BorderBrush" Value="#3D6A9A"/>
+                                </Trigger>
+                            </Style.Triggers>
+                        </Style>
+                    </Border.Style>
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Text="›" FontFamily="{StaticResource MonoFont}" FontSize="15" Foreground="{StaticResource SubTextBr}"
+                                   Margin="0,3,8,0" VerticalAlignment="Top"/>
+                        <Grid Grid.Column="1">
+                            <TextBox x:Name="InstructionBox" Background="Transparent" BorderThickness="0" Foreground="{StaticResource TextBr}"
+                                     CaretBrush="Transparent" SelectionBrush="{StaticResource AccentBr}" SelectionOpacity="0.45"
+                                     AcceptsReturn="True" AcceptsTab="False" TextWrapping="Wrap" FontFamily="{StaticResource BodyFont}" FontSize="13.5"
+                                     MinHeight="26" MaxHeight="176" VerticalScrollBarVisibility="Auto" VerticalContentAlignment="Top" Padding="0,3"
+                                     PreviewKeyDown="InstructionBox_KeyDown" TextChanged="InstructionBox_TextChanged"
+                                     SelectionChanged="InstructionBox_SelectionChanged"
+                                     GotKeyboardFocus="InstructionBox_FocusChanged" LostKeyboardFocus="InstructionBox_FocusChanged"
+                                     SizeChanged="InstructionBox_SizeChanged">
+                                <TextBox.Template>
+                                    <ControlTemplate TargetType="TextBox">
+                                        <ScrollViewer x:Name="PART_ContentHost" Focusable="False" Padding="{TemplateBinding Padding}"
+                                                      VerticalScrollBarVisibility="{TemplateBinding VerticalScrollBarVisibility}"/>
+                                    </ControlTemplate>
+                                </TextBox.Template>
+                            </TextBox>
+                            <TextBlock x:Name="Placeholder" Text="무엇을 할까요?" IsHitTestVisible="False"
+                                       Foreground="{StaticResource SubTextBr}" FontFamily="{StaticResource BodyFont}" FontSize="13.5" Margin="2,3,0,0"/>
+                            <!-- 직접 그리는 커서: 강조색, 끝이 둥근 2px 막대 -->
+                            <Canvas x:Name="CaretCanvas" IsHitTestVisible="False" ClipToBounds="True">
+                                <Rectangle x:Name="Caret" Width="2" Height="18" RadiusX="1" RadiusY="1" Fill="#5AA9F0" Visibility="Hidden"/>
+                            </Canvas>
+                        </Grid>
+                        <Button Grid.Column="2" Click="SendOrStop_Click" ToolTip="{Binding SendTooltip}" VerticalAlignment="Bottom"
+                                Margin="6,0,0,0" Cursor="Hand" Opacity="{Binding SendOpacity}">
+                            <Button.Template>
+                                <ControlTemplate TargetType="Button">
+                                    <Grid Width="28" Height="28">
+                                        <Ellipse x:Name="Dot" Fill="{StaticResource AccentBr}"/>
+                                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                    </Grid>
+                                    <ControlTemplate.Triggers>
+                                        <Trigger Property="IsMouseOver" Value="True">
+                                            <Setter TargetName="Dot" Property="Fill" Value="#1A8AD8"/>
+                                        </Trigger>
+                                    </ControlTemplate.Triggers>
+                                </ControlTemplate>
+                            </Button.Template>
+                            <TextBlock Text="{Binding SendGlyph}" FontSize="13" FontWeight="Bold" Foreground="White" Margin="0,-1,0,0"/>
+                        </Button>
+                    </Grid>
+                </Border>
             </Grid>
-        </Border>
+            <DockPanel Margin="6,5,6,0">
+                <TextBlock DockPanel.Dock="Right" Text="↑ 이전 요청" FontSize="11" Foreground="{StaticResource SubTextBr}"
+                           Visibility="{Binding ShowHistoryHint, Converter={StaticResource Vis}}"/>
+                <TextBlock Text="{Binding KeyHint}" FontSize="11" Foreground="{StaticResource SubTextBr}"/>
+            </DockPanel>
+        </StackPanel>
     </Grid>
 </Window>

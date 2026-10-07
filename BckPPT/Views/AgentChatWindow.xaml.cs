@@ -104,6 +104,7 @@ public partial class AgentChatWindow : Window, INotifyPropertyChanged
         {
             _isRequesting = value;
             Notify(); Notify(nameof(CanSend)); Notify(nameof(SendGlyph)); Notify(nameof(SendTooltip));
+            Notify(nameof(SendOpacity)); Notify(nameof(KeyHint)); Notify(nameof(ShowHistoryHint));
             RefreshLight();
             if (value) _spinTimer.Start(); else _spinTimer.Stop();
         }
@@ -111,6 +112,15 @@ public partial class AgentChatWindow : Window, INotifyPropertyChanged
     public bool CanSend => !IsRequesting;
     public string SendGlyph => IsRequesting ? "■" : "↑";
     public string SendTooltip => IsRequesting ? "멈추기 (Esc)" : "보내기 (Enter)";
+    /// <summary>쓴 글이 있거나 작업 중일 때만 보내기 단추를 진하게.</summary>
+    public double SendOpacity => IsRequesting || InstructionBox?.Text.Trim().Length > 0 ? 1.0 : 0.35;
+    public string KeyHint => IsRequesting ? "작업 중 · Esc 멈춤" : "Enter 보내기 · Shift+Enter 줄바꿈";
+    public bool ShowHistoryHint => !IsRequesting && _history.Count > 0;
+
+    // ── 이전 요청(↑↓) ──
+    private readonly List<string> _history = new();
+    private int _historyIndex = -1;   // -1이면 지금 쓰는 글
+    private string _draft = "";
     public string EmptyHint => "PowerPoint에서 작업할 문서를 열어 두고 요청을 입력하세요.\n\n" +
                                "예) 35쪽 카드 템플릿으로 첨부한 보고서마다 카드를 하나씩 만들어 37쪽 뒤에 넣어줘\n" +
                                "예) 38~41쪽 공백줄 삭제해줘\n예) 이 md로 43쪽 뒤에 간트형 일정표 그려줘";
@@ -178,6 +188,11 @@ public partial class AgentChatWindow : Window, INotifyPropertyChanged
     /// </summary>
     private async void InstructionBox_KeyDown(object sender, KeyEventArgs e)
     {
+        if (e.Key is Key.Up or Key.Down && Keyboard.Modifiers == ModifierKeys.None && RecallHistory(e.Key == Key.Up))
+        {
+            e.Handled = true;
+            return;
+        }
         var key = e.Key == Key.System ? e.SystemKey : e.Key;
         if (key != Key.Enter) return;
         var mods = Keyboard.Modifiers;
@@ -203,8 +218,77 @@ public partial class AgentChatWindow : Window, INotifyPropertyChanged
         _requestCts?.Cancel();
     }
 
-    private void InstructionBox_TextChanged(object sender, TextChangedEventArgs e) =>
+    private void InstructionBox_TextChanged(object sender, TextChangedEventArgs e)
+    {
         Placeholder.Visibility = InstructionBox.Text.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
+        Notify(nameof(SendOpacity));
+        UpdateCaretSoon();
+    }
+
+    /// <summary>
+    /// 터미널처럼 커서가 첫 줄이면 ↑로 이전 요청, 마지막 줄이면 ↓로 다음 요청(끝이면 쓰던 글).
+    /// 여러 줄을 쓰는 중에 줄 이동을 막지 않도록 첫/끝 줄에서만 가로챈다.
+    /// </summary>
+    private bool RecallHistory(bool older)
+    {
+        if (_history.Count == 0) return false;
+        var box = InstructionBox;
+        int line = box.GetLineIndexFromCharacterIndex(box.CaretIndex);
+        if (older && line > 0) return false;
+        if (!older && (line < 0 || line < box.LineCount - 1)) return false;
+        if (older)
+        {
+            if (_historyIndex == -1) { _draft = box.Text; _historyIndex = _history.Count; }
+            if (_historyIndex == 0) return true;
+            _historyIndex--;
+            box.Text = _history[_historyIndex];
+        }
+        else
+        {
+            if (_historyIndex == -1) return false;
+            _historyIndex++;
+            box.Text = _historyIndex >= _history.Count ? _draft : _history[_historyIndex];
+            if (_historyIndex >= _history.Count) _historyIndex = -1;
+        }
+        box.CaretIndex = box.Text.Length;
+        return true;
+    }
+
+    // ── 직접 그리는 커서: 강조색, 끝이 둥근 2px 막대. 기본 커서는 모양을 바꿀 수 없어 숨겼다. ──
+
+    private void InstructionBox_SelectionChanged(object sender, RoutedEventArgs e) => UpdateCaretSoon();
+    private void InstructionBox_FocusChanged(object sender, KeyboardFocusChangedEventArgs e) => UpdateCaretSoon();
+    private void InstructionBox_SizeChanged(object sender, SizeChangedEventArgs e) => UpdateCaretSoon();
+
+    private bool _caretPending;
+
+    private void UpdateCaretSoon()
+    {
+        if (_caretPending) return;
+        _caretPending = true;
+        Dispatcher.BeginInvoke(() => { _caretPending = false; UpdateCaret(); }, DispatcherPriority.Render);
+    }
+
+    private void UpdateCaret()
+    {
+        var box = InstructionBox;
+        if (!box.IsKeyboardFocused || box.SelectionLength > 0) { Caret.Visibility = Visibility.Hidden; return; }
+        var rect = box.GetRectFromCharacterIndex(box.CaretIndex);
+        if (rect.IsEmpty || double.IsInfinity(rect.Top)) { Caret.Visibility = Visibility.Hidden; return; }
+        var at = box.TranslatePoint(rect.TopLeft, CaretCanvas);
+        Caret.Height = Math.Max(14, rect.Height - 2);
+        Canvas.SetLeft(Caret, Math.Max(0, at.X - 1));
+        Canvas.SetTop(Caret, at.Y + 1);
+        Caret.Visibility = Visibility.Visible;
+        // 움직이는 동안은 켜 두고, 멈추면 0.5초 뒤부터 부드럽게 깜빡인다.
+        Caret.BeginAnimation(OpacityProperty, new System.Windows.Media.Animation.DoubleAnimation(1, 0.15, TimeSpan.FromMilliseconds(450))
+        {
+            BeginTime = TimeSpan.FromMilliseconds(500),
+            AutoReverse = true,
+            RepeatBehavior = System.Windows.Media.Animation.RepeatBehavior.Forever,
+            EasingFunction = new System.Windows.Media.Animation.SineEase(),
+        });
+    }
 
     private void Window_PreviewKeyDown(object sender, KeyEventArgs e)
     {
@@ -219,6 +303,9 @@ public partial class AgentChatWindow : Window, INotifyPropertyChanged
         var instruction = InstructionBox.Text.Trim();
         if (instruction.Length == 0 || IsRequesting) return null;
         // 보내자마자 요청 줄과 기다리는 표시를 띄운다. 대상 찾기·문서 열기에도 몇 초 걸린다.
+        if (_history.LastOrDefault() != instruction) _history.Add(instruction);
+        _historyIndex = -1;
+        _draft = "";
         var turn = new ConsoleTurn(instruction);
         Turns.Add(turn);
         _runningTurn = turn;
