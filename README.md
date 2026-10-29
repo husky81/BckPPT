@@ -46,6 +46,20 @@ BckPPT는 기존 PowerPoint 슬라이드의 레이아웃과 서식을 유지하�
 
 PowerPoint COM 자동화를 사용하므로 현재 버전은 Windows 및 Microsoft PowerPoint 설치 환경을 전제로 합니다.
 
+## LLM 키
+
+채팅 요청(에이전트)에는 gitoky LLM 키가 필요합니다. 다음 줄을 `.env`에 둡니다.
+
+```text
+GITOKY_LLM_API_KEY=발급받은-키
+```
+
+`.env`는 실행 파일 폴더부터 위로 찾고, 없으면 `%LOCALAPPDATA%\BckSoft\BckPPT\.env`를 읽습니다.
+플러그인 업데이트는 설치 폴더를 통째로 바꾸므로 키는 `%LOCALAPPDATA%` 쪽에 두는 편이 안전합니다.
+
+키가 없으면 채팅 요청과 named pipe `create_job`만 꺼지고, 전문 편집창(분석·글꼴 찾기·텍스트 치환·
+Markdown 내보내기)과 localhost 디버그 API는 그대로 동작합니다.
+
 ## 실행
 
 PowerShell에서 다음 명령을 실행합니다.

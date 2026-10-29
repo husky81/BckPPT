@@ -302,6 +302,7 @@ public partial class AgentChatWindow : Window, INotifyPropertyChanged
     {
         var instruction = InstructionBox.Text.Trim();
         if (instruction.Length == 0 || IsRequesting) return null;
+        if (LlmDisabled) { AddNote(LlmDisabledNote, warning: true); return null; }   // 요청 문구는 입력줄에 남긴다
         // 보내자마자 요청 줄과 기다리는 표시를 띄운다. 대상 찾기·문서 열기에도 몇 초 걸린다.
         if (_history.LastOrDefault() != instruction) _history.Add(instruction);
         _historyIndex = -1;
@@ -532,6 +533,8 @@ public partial class AgentChatWindow : Window, INotifyPropertyChanged
         {
             ExternalCommandValidator.Validate(request);
             if (request.Command != "create_job") return;
+            if (_llmClient is UnavailableLlmClient unavailable)
+                throw new InvalidOperationException($"LLM 키가 없어 작업을 받을 수 없습니다. {unavailable.Reason}");
             Activate();
             OpenPresentation(request.FilePath!);
             InstructionBox.Text = request.Instruction!;
@@ -848,8 +851,20 @@ public partial class AgentChatWindow : Window, INotifyPropertyChanged
 
     // ══ 시작 확인 ═════════════════════════════════════════════
 
+    /// <summary>키가 없으면 LLM 요청만 끈다. 편집창·외부 HTTP API처럼 LLM을 쓰지 않는 기능은 그대로 둔다.</summary>
+    private bool LlmDisabled => _llmClient is UnavailableLlmClient;
+
+    private const string LlmDisabledNote =
+        "LLM 키가 없어 채팅 요청은 꺼져 있습니다. ⋯ > 전문 편집창(분석·글꼴 찾기·텍스트 치환·Markdown 내보내기)은 그대로 쓸 수 있습니다.";
+
     private async Task TestLlmConnectionAsync()
     {
+        if (_llmClient is UnavailableLlmClient unavailable)
+        {
+            SetStatus("LLM 꺼짐");
+            AddNote($"{LlmDisabledNote}\n{unavailable.Reason}");
+            return;
+        }
         try { await _llmClient.TestConnectionAsync(); SetStatus("LLM 연결됨"); }
         catch (Exception ex) { AddNote($"LLM에 연결하지 못했습니다: {ex.Message}", warning: true); }
     }
