@@ -924,6 +924,64 @@ public class PptComService : IPptComService
     /// 31MB·38장 착수보고 PPT에서 45초 제한을 넘겼다(2026-10-06 실측).
     /// 제목 개체가 없으면 위쪽(상단 80pt 안)에서 가장 위에 있는 텍스트를 제목으로 본다.
     /// </summary>
+    public IReadOnlyList<PptFontInfo> ListSlideFonts(string presentationPath, int slideIndex)
+        => RunOnSta(() =>
+        {
+            var allowed = PptRules.Current.AllowedFontsSet;
+            dynamic pptApp = GetOrCreateInstance();
+            dynamic? existing = FindOpenPresentation(pptApp, presentationPath);
+            bool ownedByUs = existing is null;
+            dynamic prs = existing ?? pptApp.Presentations.Open(presentationPath, MsoTrue, MsoFalse, MsoFalse);
+            try
+            {
+                var result = new List<PptFontInfo>();
+                // 글자 묶음(run)마다 글꼴을 본다. 상자 전체 글꼴은 섞여 있으면 빈 값이라 찾기에서 빠진다.
+                void Collect(dynamic textRange, string name)
+                {
+                    var seen = new HashSet<(string, float, bool)>();
+                    int runCount = (int)textRange.Runs.Count;
+                    for (int ri = 1; ri <= runCount; ri++)
+                    {
+                        try
+                        {
+                            dynamic run = textRange.Runs[ri];
+                            string text = (string)run.Text;
+                            if (string.IsNullOrWhiteSpace(text)) continue;
+                            string font = (string)run.Font.Name;
+                            float size = (float)Math.Round((float)run.Font.Size, 1);
+                            bool bold = (int)run.Font.Bold == MsoTrue;
+                            if (!seen.Add((font, size, bold))) continue;
+                            string preview = text.Trim().Replace('\r', ' ').Replace('\n', ' ');
+                            result.Add(new PptFontInfo(slideIndex, name, preview[..Math.Min(40, preview.Length)],
+                                font, size, bold, allowed.Contains(font)));
+                        }
+                        catch { }
+                    }
+                }
+
+                List<(dynamic Shape, IReadOnlyList<string> Path)> entries = FlattenShapesWithPath(prs.Slides[slideIndex].Shapes);
+                foreach (var (shape, path) in entries)
+                {
+                    try
+                    {
+                        string name = string.Join("/", path.Append((string)shape.Name));
+                        if ((int)shape.HasTable == MsoTrue)
+                        {
+                            dynamic table = shape.Table;
+                            for (int r = 1; r <= (int)table.Rows.Count; r++)
+                            for (int c = 1; c <= (int)table.Columns.Count; c++)
+                                try { Collect(table.Cell(r, c).Shape.TextFrame2.TextRange, $"{name} [R{r}C{c}]"); } catch { }
+                        }
+                        else if ((int)shape.HasTextFrame == MsoTrue)
+                            Collect(shape.TextFrame2.TextRange, name);
+                    }
+                    catch { }
+                }
+                return (IReadOnlyList<PptFontInfo>)result;
+            }
+            finally { if (ownedByUs) SafeClose(prs); }
+        });
+
     public IReadOnlyList<(int Index, string Title)> ListSlides(string presentationPath)
         => RunOnSta(() =>
         {

@@ -76,6 +76,28 @@ PowerShell에서 다음 명령을 실행합니다.
 .\run.ps1 -BuildOnly
 ```
 
+BckPPT는 창 없이 작업 표시줄 알림 영역(트레이)에서 시작하고 MCP 서버를 켭니다. 트레이 아이콘을 두 번
+누르면 채팅창이 열리고, 오른쪽 메뉴에서 전문 편집창·Claude Code 연결 명령 복사·종료를 고릅니다.
+이미 실행 중일 때 다시 실행하면(CellBox 트레이 메뉴 포함) 채팅창을 띄웁니다.
+
+## MCP 연결
+
+실행 중인 BckPPT는 `http://localhost:38701/mcp`(Streamable HTTP)로 PPT 도구를 내보냅니다.
+판단은 연결한 에이전트가 하고 BckPPT는 PowerPoint를 다루므로 **LLM 키가 없어도 됩니다.**
+
+```powershell
+claude mcp add --transport http bckppt http://localhost:38701/mcp
+```
+
+- 도구마다 `file` 인자로 대상을 고릅니다. 비우면 PowerPoint에서 보고 있는 문서, 절대 경로면 그 파일,
+  아니면 열린 문서 이름 조각입니다.
+- 열린 창의 문서는 그 자리에서 고치고 저장하지 않습니다(저장은 사용자가 합니다). 작업 중 사용자가
+  도형·글을 선택하면 멈춥니다. 창 없는 파일은 고친 뒤 저장합니다.
+- 내부 에이전트의 PPT 도구(슬라이드·도형 읽기, 줄 측정, 문단 교체, 도형·표·선 추가 등)에 더해
+  `list_presentations`, `open_presentation`, `go_to_slide`, `list_fonts`(글꼴 찾기), `export_markdown`,
+  `render_slide`(PNG 그림 반환)가 있습니다. LLM이 필요한 카드 채우기·원문 요약은 내보내지 않습니다.
+- localhost에서만 열리고, localhost가 아닌 Origin(브라우저 페이지)의 요청은 거절합니다.
+
 ## 직접 빌드
 
 ```powershell
@@ -180,12 +202,13 @@ BckPPT/
 ├─ Application/  세션, 작업 상태 머신 및 승인 워크플로
 ├─ Infrastructure/ 외부 명령, 단일 인스턴스, 임시 artifact
 ├─ Llm/          GitOky 스트리밍 LLM 클라이언트
+├─ Mcp/          외부 에이전트용 localhost MCP 서버와 도구 목록
 ├─ PowerPoint/   렌더링 및 품질 검증
 ├─ Rag/          Open XML 인덱싱, SQLite 검색 및 레이아웃 결정
 ├─ Models/       PPT, 슬라이드, Shape 및 분석 결과 모델
 ├─ Services/     PowerPoint COM, 구조 저장, 역할 분류, 변경 이력
 ├─ ViewModels/   메인 편집 작업 상태와 명령
-└─ Views/        메인창과 분석·편집 보조창
+└─ Views/        트레이, 채팅창과 분석·편집 보조창
 Assets/          애플리케이션 아이콘과 원본 자산
 docs/plans/      아키텍처 및 리팩토링 계획
 ```

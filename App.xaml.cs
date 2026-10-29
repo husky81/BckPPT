@@ -4,6 +4,8 @@ using System.Windows.Threading;
 using BckPPT.Application;
 using BckPPT.Services;
 using BckPPT.Infrastructure;
+using BckPPT.Mcp;
+using BckPPT.Views;
 
 namespace BckPPT;
 
@@ -11,6 +13,7 @@ public partial class BckPptApp : System.Windows.Application
 {
     private AppCompositionRoot? _compositionRoot;
     private SingleInstanceCoordinator? _singleInstance;
+    private TrayIcon? _tray;
     private bool _staStarted;
     private static readonly string LogPath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -22,11 +25,12 @@ public partial class BckPptApp : System.Windows.Application
         _singleInstance = new SingleInstanceCoordinator();
         if (!_singleInstance.IsPrimary)
         {
-            var request = ReadExternalRequest(e.Args);
-            if (request is not null)
+            // 이미 트레이에서 돌고 있다. 외부 작업이 없으면(다시 실행·CellBox 메뉴) 채팅창을 띄우게 한다.
+            var request = ReadExternalRequest(e.Args) ?? System.Text.Json.JsonSerializer.Serialize(new
             {
-                try { SingleInstanceCoordinator.SendAsync(request).GetAwaiter().GetResult(); } catch { }
-            }
+                protocolVersion = "1.0", command = ExternalCommandValidator.ShowWindow, requestId = Guid.NewGuid().ToString(),
+            });
+            try { SingleInstanceCoordinator.SendAsync(request).GetAwaiter().GetResult(); } catch { }
             _singleInstance.Dispose();
             Environment.Exit(0);
         }
@@ -44,11 +48,19 @@ public partial class BckPptApp : System.Windows.Application
         _ = StaDispatcher.Instance;
         _staStarted = true;
 
+        // 창 없이 트레이에서 시작한다. MCP 서버로 외부 에이전트를 받고, 채팅창은 필요할 때 띄운다.
         _compositionRoot = new AppCompositionRoot(Dispatcher, StartupOptions.Parse(e.Args));
-        var chatWindow = _compositionRoot.CreateAgentChatWindow();
-        MainWindow = chatWindow;
-        MainWindow.Show();
-        _compositionRoot.StartExternalEndpoint(chatWindow);
+        var mcpError = _compositionRoot.StartBackgroundServices(Dispatcher);
+        var root = _compositionRoot;
+        _tray = new TrayIcon(
+            mcpError is null ? $"MCP: {McpServer.Endpoint}" : $"MCP를 켜지 못했습니다: {mcpError}",
+            McpServer.ClaudeAddCommand,
+            openChat: () => root.ShowChatWindow(),
+            openEditor: root.OpenEditorWindow,
+            exit: Shutdown);
+        _tray.ShowBalloon("BckPPT가 트레이에서 실행 중입니다",
+            (mcpError is null ? $"MCP {McpServer.Endpoint}" : "MCP를 켜지 못했습니다") +
+            (root.IsLlmAvailable ? "" : " · LLM 키 없음(채팅 꺼짐)") + "\n두 번 누르면 채팅창이 열립니다.");
 
         if (ReadExternalRequest(e.Args) is { } startupRequest)
         {
@@ -56,7 +68,7 @@ public partial class BckPptApp : System.Windows.Application
             {
                 var request = System.Text.Json.JsonSerializer.Deserialize<ExternalCommandRequest>(startupRequest,
                     new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web));
-                if (request is not null) chatWindow.AcceptExternalRequest(request);
+                if (request is not null) _compositionRoot.ShowChatWindow().AcceptExternalRequest(request);
             }
             catch { }
         }
@@ -64,6 +76,7 @@ public partial class BckPptApp : System.Windows.Application
 
     protected override void OnExit(ExitEventArgs e)
     {
+        _tray?.Dispose();
         _compositionRoot?.Dispose();
         _singleInstance?.Dispose();
         if (_staStarted) StaDispatcher.Instance.Dispose();
