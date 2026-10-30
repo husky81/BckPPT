@@ -7,7 +7,8 @@ namespace BckPPT.Infrastructure;
 
 public sealed class ExternalCommandEndpoint(
     ExternalJobRegistry registry,
-    Func<ExternalCommandRequest, Task> createJob) : IDisposable
+    Func<ExternalCommandRequest, Task> createJob,
+    Action? showWindow = null) : IDisposable
 {
     private readonly CancellationTokenSource _cts = new();
     private Task? _serverTask;
@@ -45,6 +46,11 @@ public sealed class ExternalCommandEndpoint(
             ExternalCommandValidator.Validate(request);
             if (request.Command == "get_job_status")
                 return registry.Get(request.RequestId) ?? new(false, request.RequestId, "not_found", "작업을 찾을 수 없습니다.");
+            if (request.Command == ExternalCommandValidator.ShowWindow)
+            {
+                showWindow?.Invoke();
+                return new ExternalCommandResponse(true, request.RequestId, "completed", "채팅창을 띄웠습니다.");
+            }
             var accepted = new ExternalCommandResponse(true, request.RequestId, "accepted", "채팅 세션으로 전달했습니다.");
             registry.Set(accepted);
             await createJob(request);

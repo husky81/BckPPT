@@ -50,6 +50,9 @@ public interface IPptComService
     /// <summary>끊긴 세션이 창 없이 남긴 문서(작업 폴더의 사본, alsoPaths)를 저장하지 않고 닫는다. 닫은 파일 이름을 돌려준다.</summary>
     IReadOnlyList<string> CloseOrphanedPresentations(string workDirectory, IEnumerable<string> alsoPaths);
 
+    /// <summary>한 쪽의 글꼴을 글자 묶음(run) 단위로 읽는다(도형 측정 없음). 쪽마다 따로 불러 COM 시간 제한을 넘지 않게 한다.</summary>
+    IReadOnlyList<PptFontInfo> ListSlideFonts(string presentationPath, int slideIndex);
+
     /// <summary>슬라이드 번호와 제목만 빠르게 읽는다(도형 측정 없음).</summary>
     IReadOnlyList<(int Index, string Title)> ListSlides(string presentationPath);
 

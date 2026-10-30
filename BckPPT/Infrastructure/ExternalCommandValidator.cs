@@ -4,11 +4,14 @@ namespace BckPPT.Infrastructure;
 
 public static class ExternalCommandValidator
 {
+    /// <summary>이미 트레이에서 돌고 있을 때 다시 실행하면 보내는 명령. 채팅창을 띄운다.</summary>
+    public const string ShowWindow = "show_window";
+
     public static void Validate(ExternalCommandRequest request)
     {
         if (request.ProtocolVersion != "1.0") throw new ArgumentException("지원하지 않는 protocolVersion입니다.");
         if (!Guid.TryParse(request.RequestId, out _)) throw new ArgumentException("requestId는 UUID여야 합니다.");
-        if (request.Command == "get_job_status") return;
+        if (request.Command is "get_job_status" or ShowWindow) return;
         if (request.Command != "create_job") throw new ArgumentException("지원하지 않는 command입니다.");
         if (string.IsNullOrWhiteSpace(request.FilePath) || !Path.IsPathFullyQualified(request.FilePath))
             throw new ArgumentException("filePath는 절대 경로여야 합니다.");

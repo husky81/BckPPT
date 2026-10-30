@@ -23,7 +23,7 @@ public sealed record GitokyLlmOptions(
         // CellBox 계열 .env는 GITOKY_LLM_KEY를 쓴다. 같은 키를 그대로 옮겨 붙여도 동작하게 둘 다 읽는다.
         var key = Read("GITOKY_LLM_API_KEY") is { Length: > 0 } apiKey ? apiKey : Read("GITOKY_LLM_KEY");
         if (string.IsNullOrWhiteSpace(key))
-            throw new InvalidOperationException(".env에 GITOKY_LLM_API_KEY를 설정해 주세요.");
+            throw new InvalidOperationException($"LLM 키가 없습니다. {UserDotEnvPath} 에 GITOKY_LLM_API_KEY=… 를 넣고 다시 시작해 주세요.");
 
         var baseUrl = Read("GITOKY_LLM_BASE_URL", "https://gitoky.com").TrimEnd('/');
         if (baseUrl.EndsWith("/v1", StringComparison.OrdinalIgnoreCase))
@@ -37,6 +37,12 @@ public sealed record GitokyLlmOptions(
             Read("GITOKY_LLM_WRITER_MODEL") is { Length: > 0 } writer ? writer : null);
     }
 
+    /// <summary>
+    /// 사용자 데이터 폴더의 .env. 플러그인 업데이트는 설치 폴더를 통째로 바꾸므로 키는 여기 두는 편이 안전하다.
+    /// </summary>
+    public static string UserDotEnvPath { get; } = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "BckSoft", "BckPPT", ".env");
+
     private static string FindDotEnv(string baseDirectory)
     {
         for (var directory = new DirectoryInfo(baseDirectory); directory is not null; directory = directory.Parent)
@@ -44,7 +50,7 @@ public sealed record GitokyLlmOptions(
             var candidate = Path.Combine(directory.FullName, ".env");
             if (File.Exists(candidate)) return candidate;
         }
-        return Path.Combine(baseDirectory, ".env");
+        return UserDotEnvPath;
     }
 }
 

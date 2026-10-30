@@ -1,7 +1,10 @@
 namespace BckPPT.Llm;
 
+/// <summary>키·설정이 없을 때 쓰는 자리. 화면은 이 타입을 보고 LLM 요청을 끄고 나머지 기능만 연다.</summary>
 public sealed class UnavailableLlmClient(string reason) : ILlmClient
 {
+    public string Reason => reason;
+
     public async IAsyncEnumerable<LlmStreamEvent> StreamAsync(
         LlmRequest request,
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)

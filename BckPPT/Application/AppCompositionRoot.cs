@@ -4,6 +4,7 @@ using BckPPT.Services;
 using BckPPT.Llm;
 using BckPPT.PowerPoint;
 using BckPPT.Infrastructure;
+using BckPPT.Mcp;
 using BckPPT.Rag;
 using BckPPT.ViewModels;
 using BckPPT.Views;
@@ -25,6 +26,8 @@ public sealed class AppCompositionRoot : IDisposable
     private readonly UpdateService _updateService = new();
     private readonly StartupOptions _startupOptions;
     private BckPptWindow? _editorWindow;
+    private AgentChatWindow? _chatWindow;
+    private McpServer? _mcpServer;
 
     public AppCompositionRoot(Dispatcher dispatcher, StartupOptions? startupOptions = null)
     {
@@ -48,21 +51,42 @@ public sealed class AppCompositionRoot : IDisposable
             new SourceLibrary(SourceLibrary.DefaultDatabasePath));
     }
 
-    public AgentChatWindow CreateAgentChatWindow() =>
-        new(_documentSession, _pptService, _llmClient, _approvalWorkflow, _agentWorkflow, _pptIndexer,
-            _externalJobs, _updateService, OpenEditorWindow, _startupOptions.ResolveInitialDirectory());
+    public bool IsLlmAvailable => _llmClient is not UnavailableLlmClient;
 
-    public void StartExternalEndpoint(AgentChatWindow window)
+    /// <summary>채팅창을 띄운다. 닫혀 있으면 새로 만든다(트레이에서 시작하므로 처음에는 없다).</summary>
+    public AgentChatWindow ShowChatWindow()
     {
-        _externalEndpoint = new ExternalCommandEndpoint(_externalJobs, request =>
+        if (_chatWindow is not { IsLoaded: true })
         {
-            window.Dispatcher.BeginInvoke(() => window.AcceptExternalRequest(request));
-            return Task.CompletedTask;
-        });
-        _externalEndpoint.Start();
+            _chatWindow = new AgentChatWindow(_documentSession, _pptService, _llmClient, _approvalWorkflow, _agentWorkflow,
+                _pptIndexer, _externalJobs, _updateService, OpenEditorWindow, _startupOptions.ResolveInitialDirectory());
+            _chatWindow.Closed += (_, _) => _chatWindow = null;
+            _chatWindow.Show();
+        }
+        if (_chatWindow.WindowState == System.Windows.WindowState.Minimized)
+            _chatWindow.WindowState = System.Windows.WindowState.Normal;
+        _chatWindow.Activate();
+        return _chatWindow;
     }
 
-    private void OpenEditorWindow()
+    /// <summary>named pipe(외부 작업·창 띄우기)와 MCP 서버를 켠다. MCP를 못 켰으면 이유를 돌려준다.</summary>
+    public string? StartBackgroundServices(Dispatcher dispatcher)
+    {
+        _externalEndpoint = new ExternalCommandEndpoint(_externalJobs,
+            request =>
+            {
+                dispatcher.BeginInvoke(() => ShowChatWindow().AcceptExternalRequest(request));
+                return Task.CompletedTask;
+            },
+            () => dispatcher.BeginInvoke(() => ShowChatWindow()));
+        _externalEndpoint.Start();
+
+        _mcpServer = new McpServer(new McpToolCatalog(_pptService));
+        _mcpServer.Start();
+        return _mcpServer.StartError;
+    }
+
+    public void OpenEditorWindow()
     {
         if (_editorWindow is { IsLoaded: true })
         {
@@ -81,6 +105,7 @@ public sealed class AppCompositionRoot : IDisposable
         _agentWorkflow.Dispose();
         (_llmClient as IDisposable)?.Dispose();
         _externalEndpoint?.Dispose();
+        _mcpServer?.Dispose();
         _updateService.Dispose();
         _temporaryArtifacts.Dispose();
     }
