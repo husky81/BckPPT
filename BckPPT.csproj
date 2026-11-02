@@ -17,7 +17,7 @@
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <ApplicationIcon>Assets\icon.ico</ApplicationIcon>
     <!-- 루트 아래 작업 폴더의 obj(AssemblyInfo 등)가 섞이면 특성 중복으로 빌드가 깨진다. -->
-    <DefaultItemExcludes>$(DefaultItemExcludes);tmp\**;artifacts\**;BckPPT.Tests\**</DefaultItemExcludes>
+    <DefaultItemExcludes>$(DefaultItemExcludes);tmp\**;artifacts\**;BckPPT.Tests\**;McpProxy\**</DefaultItemExcludes>
   </PropertyGroup>
 
   <ItemGroup>
@@ -36,6 +36,7 @@
   <ItemGroup>
     <Resource Include="Assets\icon.ico" />
     <Compile Remove="BckPPT.Tests\**\*.cs" />
+    <Compile Remove="McpProxy\**\*.cs" />
   </ItemGroup>
 
 </Project>

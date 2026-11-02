@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Claude Code·Codex가 띄우는 stdio 프록시. BckPPT 앱의 HTTP MCP로 넘기고, 앱이 꺼져 있으면 띄운다.
+       배포는 단일 파일(scripts\package-plugin.ps1): 등록할 때 플러그인 폴더 밖 고정 경로로 복사된다. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>BckPPT.Mcp</RootNamespace>
+    <AssemblyName>BckPptMcp</AssemblyName>
+    <Version>0.0.0</Version>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+  </PropertyGroup>
+
+</Project>

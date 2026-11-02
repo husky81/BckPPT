@@ -22,10 +22,6 @@ public partial class BckPptApp : System.Windows.Application
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
-        // 트레이의 AI 도구 연결(--mcp-*): 결과 JSON만 쓰고 끝낸다. 단일 인스턴스 전달보다 먼저 —
-        // 떠 있는 BckPPT에 넘기면 채팅창이 열리고 트레이는 답을 못 받는다.
-        if (McpServer.ClientRegistration.TryRun(e.Args) is int registrationExit)
-            Environment.Exit(registrationExit);
         _singleInstance = new SingleInstanceCoordinator();
         if (!_singleInstance.IsPrimary)
         {

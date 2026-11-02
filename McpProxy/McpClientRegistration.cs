@@ -17,7 +17,7 @@ namespace BckPPT.Mcp;
 //   --mcp-unregister <client>    등록 해제. stdio면 남은 등록이 없을 때 고정 경로의 프록시도 지운다
 //   --mcp-refresh                업데이트 뒤: 고정 경로로 등록된 곳이 있으면 프록시를 새 판으로 바꾼다
 //
-// 두 방식: stdio(ProxyDirectory·ProxyFileName — BckHWP)와 http(Url — 앱 안의 서버, BckPPT).
+// 두 방식: stdio(ProxyDirectory·ProxyFileName — BckHWP·BckPPT의 프록시)와 http(Url — 앱 안의 서버 주소를 바로 등록).
 // stdio에서 고정 경로를 쓰는 이유: 트레이는 업데이트 때 플러그인 폴더를 통째로 이름 바꿔 교체한다. 다른 레포의 세션이
 // 그 폴더 안 프록시를 쓰고 있으면 교체가 막힌다. 고정 경로의 실행 중인 프록시는 이름만 바꿔 두고 새 파일을 놓는다.
 // ═══════════════════════════════════════════════════════════════════════════

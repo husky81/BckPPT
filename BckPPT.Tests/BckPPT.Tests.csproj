@@ -12,5 +12,7 @@
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>
     <ProjectReference Include="..\BckPPT.csproj" />
+    <!-- 시험이 프록시 실행 파일(BckPptMcp.exe)을 띄운다 -->
+    <ProjectReference Include="..\McpProxy\BckPptMcp.csproj" />
   </ItemGroup>
 </Project>

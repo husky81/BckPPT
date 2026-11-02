@@ -86,15 +86,18 @@ BckPPT는 창 없이 작업 표시줄 알림 영역(트레이)에서 시작하�
 판단은 연결한 에이전트가 하고 BckPPT는 PowerPoint를 다루므로 **LLM 키가 없어도 됩니다.**
 
 셀박스 트레이로 설치했다면 트레이가 Claude Code·Codex 연결을 묻고, 플러그인 카드의 「AI 도구 연결」에서 바꿀 수 있습니다.
-직접 등록하려면:
+트레이는 주소 대신 stdio 프록시 `%LOCALAPPDATA%\BckSoft\BckPPT\Proxy\BckPptMcp.exe`를 등록합니다. 프록시는 요청을 위 주소로
+넘기고, BckPPT가 꺼져 있으면 띄운 뒤 서버가 열릴 때까지 기다립니다(처음 한 번 몇 초). 직접 등록하려면:
 
 ```powershell
+# 트레이와 같은 명령 (사용자 범위, 결과는 JSON). 플러그인 폴더의 mcp\BckPptMcp.exe
+BckPptMcp.exe --mcp-register claude-code   # codex, --mcp-unregister, --mcp-status, --mcp-refresh
+# 또는 주소를 바로 (BckPPT가 떠 있을 때만 연결된다)
 claude mcp add --transport http bckppt http://localhost:38701/mcp
-# 또는 트레이와 같은 명령 (사용자 범위, 결과는 JSON)
-BckPPT.exe --mcp-register claude-code   # codex, --mcp-unregister, --mcp-status
 ```
 
-등록 코드 `BckPPT/Mcp/McpClientRegistration.cs`는 bckhwp 레포 `src/BckHwpMcp/McpClientRegistration.cs`의 사본입니다
+프록시는 `McpProxy/`(단일 파일로 게시, `scripts\package-plugin.ps1`)입니다. 등록 코드 `McpProxy/McpClientRegistration.cs`는
+bckhwp 레포 `src/BckHwpMcp/McpClientRegistration.cs`의 사본입니다
 (규약: bckhwp `docs/mcp-client-registration.md`). 고칠 때 두 곳을 같이 맞춥니다.
 
 - 도구마다 `file` 인자로 대상을 고릅니다. 비우면 PowerPoint에서 보고 있는 문서, 절대 경로면 그 파일,

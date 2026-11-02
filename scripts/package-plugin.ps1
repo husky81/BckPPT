@@ -66,12 +66,19 @@ if (-not $SkipBuild) {
         -p:PublishProfile=win-x64 --nologo `
         -p:Version=$version -p:InformationalVersion=$($commitVersion.Informational)
     if ($LASTEXITCODE -ne 0) { throw "dotnet publish 실패" }
+    # Claude Code·Codex가 띄우는 stdio 프록시. 등록할 때 플러그인 폴더 밖으로 복사되므로 단일 파일이어야 한다.
+    dotnet publish (Join-Path $projectRoot "McpProxy\BckPptMcp.csproj") -c $Configuration -r win-x64 --self-contained true --nologo `
+        -p:PublishSingleFile=true -p:PublishReadyToRun=true -p:DebugType=none `
+        -p:PublishDir="$publishPath\mcp\" `
+        -p:Version=$version -p:InformationalVersion=$($commitVersion.Informational)
+    if ($LASTEXITCODE -ne 0) { throw "MCP 프록시 publish 실패" }
 } else {
     Write-Host "[1/5] publish 생략 (-SkipBuild)" -ForegroundColor DarkGray
 }
 
 $exePath = Join-Path $publishPath "BckPPT.exe"
 if (-not (Test-Path -LiteralPath $exePath)) { throw "게시 결과에서 BckPPT.exe를 찾을 수 없습니다: $publishPath" }
+if (-not (Test-Path -LiteralPath (Join-Path $publishPath "mcp\BckPptMcp.exe"))) { throw "게시 결과에 MCP 프록시(mcp\BckPptMcp.exe)가 없습니다." }
 # -SkipBuild로 재사용하는 publish 결과가 지금 커밋의 빌드인지 확인한다.
 $publishedStamp = (Get-Item -LiteralPath $exePath).VersionInfo.ProductVersion
 if ($publishedStamp -ne $commitVersion.Informational) {
@@ -102,8 +109,8 @@ $manifest = [ordered]@{
     updateManifestUrl = "$($BaseUrl.TrimEnd('/'))/latest.json"
     dataDirs          = @("%LOCALAPPDATA%\BckSoft\BckPPT")
     minCellBoxVersion = "1.0.0"
-    # 셀박스 트레이가 Claude Code·Codex 연결을 묻고 BckPPT.exe --mcp-*로 등록한다 (bckhwp docs/mcp-client-registration.md).
-    mcpRegistrar      = "BckPPT.exe"
+    # 셀박스 트레이가 Claude Code·Codex 연결을 묻고 프록시의 --mcp-*로 등록한다 (bckhwp docs/mcp-client-registration.md).
+    mcpRegistrar      = "mcp/BckPptMcp.exe"
 }
 # JSON은 BOM 없이 쓴다. 스토어 페이지의 JSON.parse가 BOM을 만나면 실패한다.
 Write-JsonFile (Join-Path $publishPath "plugin.json") $manifest

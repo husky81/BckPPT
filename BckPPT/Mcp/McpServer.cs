@@ -10,6 +10,7 @@ namespace BckPPT.Mcp;
 /// <summary>
 /// localhost MCP 서버(Streamable HTTP, JSON 응답). Claude Code 등에서
 /// <c>claude mcp add --transport http bckppt http://localhost:38701/mcp</c> 로 연결한다.
+/// 셀박스 트레이로 등록하면 stdio 프록시(McpProxy, BckPptMcp.exe)가 이 주소로 넘기고, 앱이 꺼져 있으면 띄운다.
 /// 세션을 두지 않는다 — 요청마다 독립이고 상태는 PowerPoint 문서에 있다.
 /// 브라우저 페이지가 localhost로 부르는 것(DNS rebinding)을 막으려고 localhost 밖의 Origin은 거절한다.
 /// </summary>
@@ -18,12 +19,6 @@ public sealed class McpServer(McpToolCatalog catalog) : IDisposable
     public const int Port = 38701;
     public static string Endpoint => $"http://localhost:{Port}/mcp";
     public static string ClaudeAddCommand => $"claude mcp add --transport http bckppt {Endpoint}";
-
-    /// <summary>
-    /// 셀박스 트레이가 부르는 Claude Code·Codex 사용자 범위 등록(<c>BckPPT.exe --mcp-*</c>, plugin.json <c>mcpRegistrar</c>).
-    /// 이 앱이 띄우는 주소를 등록하므로 BckHWP처럼 프록시를 복사하지 않는다.
-    /// </summary>
-    public static McpClientRegistration ClientRegistration => new() { ClaudeName = "bckppt", CodexName = "bckppt", Url = Endpoint };
 
     private static readonly string[] SupportedVersions = ["2025-06-18", "2025-03-26", "2024-11-05"];
     private static readonly JsonSerializerOptions Json = new() { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
