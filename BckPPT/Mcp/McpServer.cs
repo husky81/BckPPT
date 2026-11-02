@@ -19,6 +19,12 @@ public sealed class McpServer(McpToolCatalog catalog) : IDisposable
     public static string Endpoint => $"http://localhost:{Port}/mcp";
     public static string ClaudeAddCommand => $"claude mcp add --transport http bckppt {Endpoint}";
 
+    /// <summary>
+    /// 셀박스 트레이가 부르는 Claude Code·Codex 사용자 범위 등록(<c>BckPPT.exe --mcp-*</c>, plugin.json <c>mcpRegistrar</c>).
+    /// 이 앱이 띄우는 주소를 등록하므로 BckHWP처럼 프록시를 복사하지 않는다.
+    /// </summary>
+    public static McpClientRegistration ClientRegistration => new() { ClaudeName = "bckppt", CodexName = "bckppt", Url = Endpoint };
+
     private static readonly string[] SupportedVersions = ["2025-06-18", "2025-03-26", "2024-11-05"];
     private static readonly JsonSerializerOptions Json = new() { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
 

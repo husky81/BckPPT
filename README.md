@@ -85,9 +85,17 @@ BckPPT는 창 없이 작업 표시줄 알림 영역(트레이)에서 시작하�
 실행 중인 BckPPT는 `http://localhost:38701/mcp`(Streamable HTTP)로 PPT 도구를 내보냅니다.
 판단은 연결한 에이전트가 하고 BckPPT는 PowerPoint를 다루므로 **LLM 키가 없어도 됩니다.**
 
+셀박스 트레이로 설치했다면 트레이가 Claude Code·Codex 연결을 묻고, 플러그인 카드의 「AI 도구 연결」에서 바꿀 수 있습니다.
+직접 등록하려면:
+
 ```powershell
 claude mcp add --transport http bckppt http://localhost:38701/mcp
+# 또는 트레이와 같은 명령 (사용자 범위, 결과는 JSON)
+BckPPT.exe --mcp-register claude-code   # codex, --mcp-unregister, --mcp-status
 ```
+
+등록 코드 `BckPPT/Mcp/McpClientRegistration.cs`는 bckhwp 레포 `src/BckHwpMcp/McpClientRegistration.cs`의 사본입니다
+(규약: bckhwp `docs/mcp-client-registration.md`). 고칠 때 두 곳을 같이 맞춥니다.
 
 - 도구마다 `file` 인자로 대상을 고릅니다. 비우면 PowerPoint에서 보고 있는 문서, 절대 경로면 그 파일,
   아니면 열린 문서 이름 조각입니다.

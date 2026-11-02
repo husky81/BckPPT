@@ -102,6 +102,8 @@ $manifest = [ordered]@{
     updateManifestUrl = "$($BaseUrl.TrimEnd('/'))/latest.json"
     dataDirs          = @("%LOCALAPPDATA%\BckSoft\BckPPT")
     minCellBoxVersion = "1.0.0"
+    # 셀박스 트레이가 Claude Code·Codex 연결을 묻고 BckPPT.exe --mcp-*로 등록한다 (bckhwp docs/mcp-client-registration.md).
+    mcpRegistrar      = "BckPPT.exe"
 }
 # JSON은 BOM 없이 쓴다. 스토어 페이지의 JSON.parse가 BOM을 만나면 실패한다.
 Write-JsonFile (Join-Path $publishPath "plugin.json") $manifest
