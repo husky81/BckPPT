@@ -277,8 +277,10 @@ public class PptComService : IPptComService
                     if ((int)prs.Windows.Count == 0) continue;   // 숨은 창(기준본·작업 사본)은 목록에 두지 않는다
                     string full = (string)prs.FullName;
                     bool saved = ((string)prs.Path).Length > 0;
+                    bool readOnly = false;
+                    try { readOnly = (int)prs.ReadOnly == MsoTrue; } catch { }
                     list.Add(new OpenPresentationInfo((string)prs.Name, full, (int)prs.Slides.Count,
-                        string.Equals(full, active, StringComparison.OrdinalIgnoreCase), saved));
+                        string.Equals(full, active, StringComparison.OrdinalIgnoreCase), saved, readOnly));
                 }
                 catch { }
             }
@@ -993,36 +995,40 @@ public class PptComService : IPptComService
             {
                 var result = new List<(int, string)>();
                 foreach (dynamic slide in prs.Slides)
-                {
-                    string title = "";
-                    try
-                    {
-                        if ((int)slide.Shapes.HasTitle == MsoTrue)
-                            title = (string)slide.Shapes.Title.TextFrame2.TextRange.Text;
-                    }
-                    catch { }
-                    if (string.IsNullOrWhiteSpace(title))
-                    {
-                        float best = 80f;
-                        foreach (dynamic shape in slide.Shapes)
-                        {
-                            try
-                            {
-                                if ((int)shape.HasTextFrame != MsoTrue || (float)shape.Top >= best) continue;
-                                string text = (string)shape.TextFrame2.TextRange.Text;
-                                if (string.IsNullOrWhiteSpace(text)) continue;
-                                (best, title) = ((float)shape.Top, text);
-                            }
-                            catch { }
-                        }
-                    }
-                    title = title.Replace('\r', ' ').Replace('\v', ' ').Trim();
-                    result.Add(((int)slide.SlideIndex, title.Length <= 80 ? title : title[..80]));
-                }
+                    result.Add(((int)slide.SlideIndex, SlideTitle(slide)));
                 return (IReadOnlyList<(int, string)>)result;
             }
             finally { if (ownedByUs) SafeClose(prs); }
         });
+
+    /// <summary>제목 개체의 글. 없으면 위쪽(상단 80pt 안)에서 가장 위에 있는 글. 80자까지.</summary>
+    private static string SlideTitle(dynamic slide)
+    {
+        string title = "";
+        try
+        {
+            if ((int)slide.Shapes.HasTitle == MsoTrue)
+                title = (string)slide.Shapes.Title.TextFrame2.TextRange.Text;
+        }
+        catch { }
+        if (string.IsNullOrWhiteSpace(title))
+        {
+            float best = 80f;
+            foreach (dynamic shape in slide.Shapes)
+            {
+                try
+                {
+                    if ((int)shape.HasTextFrame != MsoTrue || (float)shape.Top >= best) continue;
+                    string text = (string)shape.TextFrame2.TextRange.Text;
+                    if (string.IsNullOrWhiteSpace(text)) continue;
+                    (best, title) = ((float)shape.Top, text);
+                }
+                catch { }
+            }
+        }
+        title = title.Replace('\r', ' ').Replace('\v', ' ').Trim();
+        return title.Length <= 80 ? title : title[..80];
+    }
 
     /// <summary>
     /// 문서를 창 없이 열어 두고, 돌려받은 핸들을 해제할 때 닫는다. 이미 열려 있던 문서는 건드리지 않는다.
@@ -1595,6 +1601,14 @@ public class PptComService : IPptComService
                     {
                         int paraNum = (int)tr.Paragraphs.Count;
 
+                        // 빈 상자·빈 표 칸은 문단을 0개로 센다. 첫 문단 쓰기는 글 전체를 넣는 것으로 한다
+                        // (전에는 "문단 수(0)와 어긋남"으로 빈 칸을 채우지 못했다, 2026-11-03).
+                        if (paraNum == 0 && edit.Kind != ParagraphEditKind.Delete && edit.ParagraphIndex <= 1)
+                        {
+                            tr.Text = edit.NewText;
+                            continue;
+                        }
+
                         // 삽입의 인덱스 0은 "맨 앞에 넣기"를 뜻한다.
                         int lowest = edit.Kind == ParagraphEditKind.Insert ? 0 : 1;
                         if (edit.ParagraphIndex < lowest || edit.ParagraphIndex > paraNum)
@@ -1816,8 +1830,105 @@ public class PptComService : IPptComService
             }
         });
 
+    /// <summary>
+    /// 다른 파일의 쪽을 붙인다. 클립보드를 쓰지 않는다(InsertFromFile). 붙인 쪽은 대상 문서의 디자인을 따른다.
+    /// 원본 파일이 창에 열려 있어도 디스크에 저장된 판을 읽는다.
+    /// </summary>
+    public (int First, int Count) ImportSlides(string sourcePath, int fromSlide, int toSlide, string targetPath, int insertAfterSlideIndex)
+        => RunOnSta(() =>
+        {
+            dynamic pptApp = GetOrCreateInstance();
+            dynamic? target = FindOpenPresentation(pptApp, targetPath);
+            bool ownsTarget = target is null;
+            if (ownsTarget) target = pptApp.Presentations.Open(targetPath, MsoFalse, MsoFalse, MsoFalse);
+            try
+            {
+                if (insertAfterSlideIndex < 0 || insertAfterSlideIndex > (int)target!.Slides.Count)
+                    throw new ArgumentOutOfRangeException(nameof(insertAfterSlideIndex), $"after는 0~{(int)target!.Slides.Count} 사이여야 합니다.");
+                CheckUserActivity(target);
+                int count = (int)target.Slides.InsertFromFile(sourcePath, insertAfterSlideIndex, fromSlide, toSlide);
+                ShowIfWatched(target, insertAfterSlideIndex + 1);
+                SaveUnlessKept(target);
+                return (insertAfterSlideIndex + 1, count);
+            }
+            finally { if (ownsTarget) SafeClose(target); }
+        });
+
+    /// <summary>쪽들을 지우고 지운 쪽의 (번호, 제목)을 돌려준다. 번호는 지우기 전 기준.</summary>
+    public IReadOnlyList<(int Index, string Title)> DeleteSlides(string presentationPath, IReadOnlyCollection<int> slideIndexes)
+        => RunOnSta(() =>
+        {
+            dynamic pptApp = GetOrCreateInstance();
+            dynamic? prs = FindOpenPresentation(pptApp, presentationPath);
+            bool ownedByUs = prs is null;
+            if (ownedByUs) prs = pptApp.Presentations.Open(presentationPath, MsoFalse, MsoFalse, MsoFalse);
+            try
+            {
+                int slideCount = (int)prs!.Slides.Count;
+                var targets = slideIndexes.Distinct().OrderByDescending(i => i).ToList();
+                if (targets.Count == 0 || targets.Any(i => i < 1 || i > slideCount))
+                    throw new ArgumentOutOfRangeException(nameof(slideIndexes), $"쪽 번호는 1~{slideCount} 사이여야 합니다.");
+                if (targets.Count >= slideCount) throw new InvalidOperationException("모든 쪽을 지울 수는 없습니다.");
+                CheckUserActivity(prs);
+                var deleted = new List<(int, string)>();
+                foreach (int index in targets)
+                {
+                    dynamic slide = prs.Slides[index];
+                    deleted.Add((index, SlideTitle(slide)));
+                    slide.Delete();
+                }
+                SaveUnlessKept(prs);
+                deleted.Reverse();
+                return (IReadOnlyList<(int, string)>)deleted;
+            }
+            finally { if (ownedByUs) SafeClose(prs); }
+        });
+
+    /// <summary>쪽을 newIndex 자리로 옮긴다(옮긴 뒤 그 쪽의 번호가 newIndex).</summary>
+    public void MoveSlide(string presentationPath, int slideIndex, int newIndex)
+        => RunOnSta(() =>
+        {
+            dynamic pptApp = GetOrCreateInstance();
+            dynamic? prs = FindOpenPresentation(pptApp, presentationPath);
+            bool ownedByUs = prs is null;
+            if (ownedByUs) prs = pptApp.Presentations.Open(presentationPath, MsoFalse, MsoFalse, MsoFalse);
+            try
+            {
+                int slideCount = (int)prs!.Slides.Count;
+                if (slideIndex < 1 || slideIndex > slideCount || newIndex < 1 || newIndex > slideCount)
+                    throw new ArgumentOutOfRangeException(nameof(newIndex), $"쪽 번호는 1~{slideCount} 사이여야 합니다.");
+                CheckUserActivity(prs);
+                prs.Slides[slideIndex].MoveTo(newIndex);
+                ShowIfWatched(prs, newIndex);
+                SaveUnlessKept(prs);
+            }
+            finally { if (ownedByUs) SafeClose(prs); }
+        });
+
     // ── 도형 목록·배치·서식 ──────────────────────────────────────
     // 주소는 모두 ShapeAddress 규약("이름", "이름#2", "그룹/이름")을 따른다.
+
+    /// <summary>표의 칸 글(행마다 칸 배열). 병합된 칸은 합쳐진 칸마다 같은 글이 나온다.</summary>
+    public IReadOnlyList<IReadOnlyList<string>> ReadTable(string presentationPath, int slideIndex, string address)
+        => OnSlide(presentationPath, slideIndex, save: false, slide =>
+        {
+            dynamic shape = RequireShape(slide, slideIndex, address);
+            if ((int)shape.HasTable != MsoTrue) throw new InvalidOperationException($"{slideIndex}쪽 '{address}'는 표가 아닙니다.");
+            dynamic table = shape.Table;
+            var rows = new List<IReadOnlyList<string>>();
+            for (int r = 1; r <= (int)table.Rows.Count; r++)
+            {
+                var row = new List<string>();
+                for (int c = 1; c <= (int)table.Columns.Count; c++)
+                {
+                    string text = "";
+                    try { text = (string)table.Cell(r, c).Shape.TextFrame2.TextRange.Text; } catch { }
+                    row.Add(text);
+                }
+                rows.Add(row);
+            }
+            return (IReadOnlyList<IReadOnlyList<string>>)rows;
+        });
 
     /// <summary>슬라이드 하나의 작업을 열린 문서(없으면 직접 연 문서)에서 수행한다.</summary>
     private static T OnSlide<T>(string presentationPath, int slideIndex, bool save, Func<dynamic, T> work,
@@ -1867,9 +1978,15 @@ public class PptComService : IPptComService
                 }
                 catch { }
 
-                int type = 0, id = 0;
+                int type = 0, id = 0, rows = 0, columns = 0;
                 try { type = (int)shape.Type; } catch { }
                 try { id = (int)shape.Id; } catch { }
+                try
+                {
+                    if ((int)shape.HasTable == MsoTrue)
+                        (rows, columns) = ((int)shape.Table.Rows.Count, (int)shape.Table.Columns.Count);
+                }
+                catch { }
                 // 겹치는 이름은 "#n" 대신 Id 주소를 준다. "#n"은 다른 도형 이름을 바꾸면 밀려
                 // 모델이 엉뚱한 상자를 고쳤다(2026-10-06 실측).
                 int sameName = names.Count(n => n == name);
@@ -1877,7 +1994,7 @@ public class PptComService : IPptComService
                 result.Add(new ShapeEntry(
                     address, name, string.Join("/", shapes[i].Path), type,
                     (float)shape.Left, (float)shape.Top, (float)shape.Width, (float)shape.Height,
-                    hasText, preview, id));
+                    hasText, preview, id, rows, columns));
             }
             return (IReadOnlyList<ShapeEntry>)result;
         });

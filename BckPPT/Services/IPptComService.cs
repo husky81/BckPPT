@@ -63,6 +63,14 @@ public interface IPptComService
     void SetShapeText(string presentationPath, int slideIndex, string shapeName, string newText);
     int DuplicateSlide(string presentationPath, int sourceSlideIndex, int insertAfterSlideIndex);
     int ImportSlide(string sourcePath, int sourceSlideIndex, string targetPath, int insertAfterSlideIndex);
+    /// <summary>다른 파일의 from~to 쪽을 after 뒤에 붙인다(클립보드 안 씀, 대상 디자인). 붙인 첫 쪽 번호와 쪽 수.</summary>
+    (int First, int Count) ImportSlides(string sourcePath, int fromSlide, int toSlide, string targetPath, int insertAfterSlideIndex);
+    /// <summary>쪽들을 지우고 지운 쪽의 (지우기 전 번호, 제목)을 돌려준다.</summary>
+    IReadOnlyList<(int Index, string Title)> DeleteSlides(string presentationPath, IReadOnlyCollection<int> slideIndexes);
+    /// <summary>쪽을 newIndex 자리로 옮긴다.</summary>
+    void MoveSlide(string presentationPath, int slideIndex, int newIndex);
+    /// <summary>표의 칸 글(행마다 칸 배열).</summary>
+    IReadOnlyList<IReadOnlyList<string>> ReadTable(string presentationPath, int slideIndex, string address);
 
     /// <summary>설정된 ReplaceRules를 프레젠테이션 전체에 일괄 적용. 변경된 항목 목록 반환.</summary>
     IReadOnlyList<(int SlideIndex, string ShapeName, string OldText, string NewText)>

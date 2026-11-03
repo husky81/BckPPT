@@ -27,6 +27,9 @@ public static class PptAgentTools
                 Schema("""{"slide": {"type": "integer"}}""", "slide"), false, ListShapes),
             new("read_text", "도형의 문단 목록과 상자 높이·글자 크기. 문단 번호는 1부터",
                 Schema("{" + SlideShape + "}", "slide", "shape"), false, ReadText),
+            new("read_table",
+                "표의 칸 글을 행·열로 읽는다. 칸마다 주소 '표 주소 [R행C열]'을 함께 준다. 칸을 고칠 때는 그 주소를 set_paragraphs·set_texts·read_text의 shape에 그대로 쓴다",
+                Schema("{" + SlideShape + "}", "slide", "shape"), false, ReadTable),
             new("line_breaks",
                 "PowerPoint가 실제로 나눈 줄. 각 줄 끝 유형: auto(자동 줄바꿈), enter(문단 끝), shift(Shift+Enter). 문구 길이를 맞출 때 쓰는 핵심 측정 도구",
                 Schema("{" + SlideShape + "}", "slide", "shape"), false, LineBreaks),
@@ -218,6 +221,8 @@ public static class PptAgentTools
                 bool label = s.Height <= 22 && s.TextPreview.Length <= 10 && !s.TextPreview.Contains('¶');
                 sb.Append(label ? " | (소제목) " : " | ").Append(s.TextPreview);
             }
+            if (s.TableRows > 0)
+                sb.Append($" | 표 {s.TableRows}행×{s.TableColumns}열 (read_table로 칸을 읽는다)");
             sb.Append('\n');
         }
 
@@ -249,6 +254,31 @@ public static class PptAgentTools
         var paragraphs = info.FullText.TrimEnd('\r').Split('\r');
         for (int i = 0; i < paragraphs.Length; i++)
             sb.Append($"[{i + 1}] {paragraphs[i].Replace("\v", "\\n")}\n");
+        return sb.ToString();
+    }
+
+    private static async Task<string> ReadTable(AgentToolContext ctx, JsonElement args, CancellationToken ct)
+    {
+        int slide = ToolArgs.Int(args, "slide");
+        string shape = ToolArgs.String(args, "shape");
+        var rows = await Task.Run(() => ctx.Ppt.ReadTable(ctx.WorkingPath, slide, shape), ct);
+        return FormatTable(shape, rows);
+    }
+
+    /// <summary>칸마다 주소와 글. 칸 안 문단 경계는 ¶, Shift+Enter는 ↵. 빈 칸도 주소를 보여 채울 자리를 알게 한다.</summary>
+    public static string FormatTable(string address, IReadOnlyList<IReadOnlyList<string>> rows)
+    {
+        int columns = rows.Count == 0 ? 0 : rows.Max(r => r.Count);
+        var sb = new StringBuilder($"{address}: 표 {rows.Count}행×{columns}열. 병합된 칸은 합쳐진 칸마다 같은 글이 나온다\n");
+        for (int r = 0; r < rows.Count; r++)
+        {
+            sb.Append($"R{r + 1}\n");
+            for (int c = 0; c < rows[r].Count; c++)
+            {
+                string text = rows[r][c].TrimEnd('\r').Replace("\r", " ¶ ").Replace("\v", " ↵ ");
+                sb.Append($"  {address} [R{r + 1}C{c + 1}] | {(text.Length == 0 ? "(빈 칸)" : text)}\n");
+            }
+        }
         return sb.ToString();
     }
 

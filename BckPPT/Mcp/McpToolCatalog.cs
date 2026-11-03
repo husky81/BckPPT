@@ -61,6 +61,28 @@ public sealed class McpToolCatalog
             WithFile(Schema(("output_path", "string", "저장할 .md 절대 경로. 비우면 PPT 옆에 같은 이름으로"))), ExportMarkdown);
         Add("render_slide", "슬라이드를 PNG로 렌더해 그림으로 돌려준다. 고친 뒤 넘침·겹침을 눈으로 확인할 때 쓴다",
             WithFile(Schema(("slide", "integer", "쪽 번호(1부터)")), "slide"), RenderSlide);
+        Add("import_slides",
+            "다른 PPT 파일의 쪽을 이 문서 after 쪽 뒤에 붙인다(클립보드를 쓰지 않는다). 붙인 쪽은 이 문서의 디자인(테마)을 따른다. " +
+            "source가 창에 열려 있어도 디스크에 저장된 판을 읽으니, 고친 내용이 있으면 사용자에게 먼저 저장해 달라고 한다 (문서를 고친다)",
+            WithFile(Schema(
+                ("source", "string", "가져올 PPT. 절대 경로나 열린 문서 이름 조각"),
+                ("from", "integer", "가져올 첫 쪽(1부터)"),
+                ("to", "integer", "가져올 끝 쪽. 비우면 from 한 쪽"),
+                ("after", "integer", "이 문서에서 이 쪽 뒤에 붙인다(0이면 맨 앞)")), "source", "from", "after"), ImportSlides);
+        Add("delete_slides",
+            "쪽들을 지운다. 지운 쪽의 번호·제목을 돌려준다. 지우기 전에 list_slides로 번호를 확인하고 사용자에게 어느 쪽을 지울지 확인받는다. " +
+            "창에 열리지 않은 파일은 바로 저장되므로 confirm=true가 있어야 지운다 (문서를 고친다)",
+            WithFile(new JsonObject
+            {
+                ["type"] = "object",
+                ["properties"] = new JsonObject
+                {
+                    ["slides"] = new JsonObject { ["type"] = "array", ["items"] = new JsonObject { ["type"] = "integer" }, ["description"] = "지울 쪽 번호들(1부터, 지우기 전 번호)" },
+                    ["confirm"] = new JsonObject { ["type"] = "boolean", ["description"] = "창에 열리지 않은 파일을 지울 때 사용자 확인을 받았으면 true" },
+                },
+            }, "slides"), DeleteSlides);
+        Add("move_slide", "쪽을 옮긴다. to는 옮긴 뒤 그 쪽의 번호 (문서를 고친다)",
+            WithFile(Schema(("slide", "integer", "옮길 쪽(1부터)"), ("to", "integer", "옮긴 뒤 번호")), "slide", "to"), MoveSlide);
 
         foreach (var tool in _agentTools.Tools)
         {
@@ -126,12 +148,41 @@ public sealed class McpToolCatalog
     private async Task<McpToolResult> CallAgentTool(string name, bool writes, JsonElement args, CancellationToken ct)
     {
         var path = ResolveFile(args);
-        // 창에 열린 문서는 사용자가 보고 있으니 저장하지 않고 고친다. 그동안 사용자가 도형을 고르면 멈춘다.
-        using var watch = writes && _ppt.IsOpenInWindow(path) ? _ppt.WatchUserActivity(path) : null;
-        var outcome = await _agentTools.ExecuteAsync(new AgentToolContext(_ppt, path),
-            new LlmToolCall(Guid.NewGuid().ToString("N"), name, args.GetRawText()), ct);
-        return new([McpContent.FromText(outcome.Content)], outcome.IsError);
+        if (!writes)
+        {
+            var read = await _agentTools.ExecuteAsync(new AgentToolContext(_ppt, path),
+                new LlmToolCall(Guid.NewGuid().ToString("N"), name, args.GetRawText()), ct);
+            return new([McpContent.FromText(read.Content)], read.IsError);
+        }
+        return await WriteAsync(path, async () =>
+        {
+            var outcome = await _agentTools.ExecuteAsync(new AgentToolContext(_ppt, path),
+                new LlmToolCall(Guid.NewGuid().ToString("N"), name, args.GetRawText()), ct);
+            return new McpToolResult([McpContent.FromText(outcome.Content)], outcome.IsError);
+        });
     }
+
+    /// <summary>
+    /// 쓰기 도구 공통. 창에 열린 문서는 사용자가 보고 있으니 저장하지 않고 고친다(그동안 사용자가 도형을 고르면 멈춘다).
+    /// 읽기 전용으로 열린 창이면 고친 내용을 그 이름으로 저장할 수 없으니 결과에 알린다.
+    /// CellBox 동기화 폴더의 큰 PPT가 읽기 전용으로 열려 고친 내용을 저장하지 못한 일이 있었다(2026-11-03).
+    /// </summary>
+    private async Task<McpToolResult> WriteAsync(string path, Func<Task<McpToolResult>> write)
+    {
+        bool inWindow = _ppt.IsOpenInWindow(path);
+        using var watch = inWindow ? _ppt.WatchUserActivity(path) : null;
+        var result = await write();
+        if (result.IsError || !inWindow || !IsReadOnlyWindow(path)) return result;
+        return result with
+        {
+            Content = [.. result.Content, McpContent.FromText(
+                "주의: 이 문서는 PowerPoint에 읽기 전용으로 열려 있습니다. 고친 내용은 창에 보이지만 같은 이름으로 저장되지 않으니, " +
+                "사용자에게 '다른 이름으로 저장'하거나 파일을 쓰기 가능하게 다시 열어 달라고 알리세요.")],
+        };
+    }
+
+    private bool IsReadOnlyWindow(string path) =>
+        _ppt.ListOpenWindows().Any(o => o.IsReadOnly && string.Equals(o.Path, path, StringComparison.OrdinalIgnoreCase));
 
     // ── MCP 전용 도구 ────────────────────────────────────────
 
@@ -141,7 +192,8 @@ public sealed class McpToolCatalog
         if (open.Count == 0) return McpToolResult.Ok("PowerPoint에 열린 문서가 없습니다.");
         var sb = new StringBuilder($"열린 문서 {open.Count}개\n");
         foreach (var o in open)
-            sb.AppendLine($"{(o.IsActive ? "▶" : " ")} {o.Name} · {o.SlideCount}쪽 · {(o.IsSaved ? o.Path : "저장 안 된 새 문서")}");
+            sb.AppendLine($"{(o.IsActive ? "▶" : " ")} {o.Name} · {o.SlideCount}쪽 · {(o.IsSaved ? o.Path : "저장 안 된 새 문서")}" +
+                          (o.IsReadOnly ? " · 읽기 전용(고쳐도 같은 이름으로 저장 안 됨)" : ""));
         if (_ppt.GetActivePresentation() is { CurrentSlide: int current } active)
             sb.AppendLine($"보고 있는 쪽: {active.Name} {current}쪽");
         return McpToolResult.Ok(sb.ToString().TrimEnd());
@@ -211,6 +263,53 @@ public sealed class McpToolCatalog
         var result = await Task.Run(() => _ppt.ExportMarkdown(path, output, ct), ct);
         return McpToolResult.Ok($"{result.SlideCount}쪽을 내보냈습니다: {result.OutputPath}" +
                                 (result.WarningCount > 0 ? $" (경고 {result.WarningCount}건)" : ""));
+    }
+
+    private Task<McpToolResult> ImportSlides(JsonElement args, CancellationToken ct)
+    {
+        var path = ResolveFile(args);
+        var source = ResolveFile(ToolArgs.OptionalString(args, "source") ?? throw new AgentToolException("인자 'source'가 필요합니다."));
+        if (string.Equals(source, path, StringComparison.OrdinalIgnoreCase))
+            throw new AgentToolException("같은 문서의 쪽은 duplicate_slide로 복제하세요.");
+        int from = ToolArgs.Int(args, "from");
+        int to = ToolArgs.OptionalInt(args, "to") ?? from;
+        int after = ToolArgs.Int(args, "after");
+        if (from < 1 || to < from) throw new AgentToolException("from은 1 이상, to는 from 이상이어야 합니다.");
+        int sourceCount = _ppt.ListSlides(source).Count;
+        if (to > sourceCount) throw new AgentToolException($"{Path.GetFileName(source)}는 {sourceCount}쪽까지 있습니다.");
+        return WriteAsync(path, async () =>
+        {
+            var (first, count) = await Task.Run(() => _ppt.ImportSlides(source, from, to, path, after), ct);
+            return McpToolResult.Ok($"{Path.GetFileName(source)} {from}~{to}쪽을 {first}~{first + count - 1}쪽으로 붙였습니다. " +
+                                    $"뒤 쪽 번호는 {count}씩 밀렸습니다. 디자인은 이 문서 것을 따르니 render_slide로 확인하세요.");
+        });
+    }
+
+    private Task<McpToolResult> DeleteSlides(JsonElement args, CancellationToken ct)
+    {
+        var path = ResolveFile(args);
+        var slides = args.TryGetProperty("slides", out var s) && s.ValueKind == JsonValueKind.Array
+            ? s.EnumerateArray().Where(e => e.ValueKind == JsonValueKind.Number).Select(e => e.GetInt32()).ToList()
+            : throw new AgentToolException("인자 'slides'(쪽 번호 배열)가 필요합니다.");
+        if (!_ppt.IsOpenInWindow(path) && ToolArgs.OptionalBool(args, "confirm") != true)
+            throw new AgentToolException("창에 열리지 않은 파일은 지우는 즉시 저장됩니다. 사용자에게 지울 쪽을 확인받은 뒤 confirm=true로 다시 부르세요.");
+        return WriteAsync(path, async () =>
+        {
+            var deleted = await Task.Run(() => _ppt.DeleteSlides(path, slides), ct);
+            return McpToolResult.Ok($"{deleted.Count}쪽을 지웠습니다(지우기 전 번호): " +
+                                    string.Join(", ", deleted.Select(d => $"{d.Index}쪽 「{(d.Title.Length > 0 ? d.Title : "제목 없음")}」")));
+        });
+    }
+
+    private Task<McpToolResult> MoveSlide(JsonElement args, CancellationToken ct)
+    {
+        var path = ResolveFile(args);
+        int slide = ToolArgs.Int(args, "slide"), to = ToolArgs.Int(args, "to");
+        return WriteAsync(path, async () =>
+        {
+            await Task.Run(() => _ppt.MoveSlide(path, slide, to), ct);
+            return McpToolResult.Ok($"{slide}쪽을 {to}쪽 자리로 옮겼습니다.");
+        });
     }
 
     private async Task<McpToolResult> RenderSlide(JsonElement args, CancellationToken ct)

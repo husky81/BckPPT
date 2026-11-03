@@ -280,12 +280,41 @@ public sealed class FakePptComService : IPptComService
         Slide(slideIndex).Select(s => new PptFontInfo(slideIndex, s.Name, s.Paragraphs.FirstOrDefault() ?? "",
             s.Format.FontName, s.Format.Size, s.Format.Bold, true)).ToList();
     public IReadOnlyList<(int Index, string Title)> ListSlides(string presentationPath) =>
-        Slides.Select((s, i) => (i + 1, s.FirstOrDefault()?.Paragraphs.FirstOrDefault() ?? "")).ToList();
+        OtherFiles.GetValueOrDefault(presentationPath, Slides).Select((s, i) => (i + 1, s.FirstOrDefault()?.Paragraphs.FirstOrDefault() ?? "")).ToList();
     public int ReplaceText(string presentationPath, string find, string replace, IReadOnlyList<(int slideIndex, string shapeName)>? targets = null) => throw new NotSupportedException();
     public int NormalizeFonts(string presentationPath) => throw new NotSupportedException();
     public void ReplaceImage(string presentationPath, int slideIndex, float targetLeft, float targetTop, string newImagePath) => throw new NotSupportedException();
     public void SetShapeText(string presentationPath, int slideIndex, string shapeName, string newText) => throw new NotSupportedException();
     public int ImportSlide(string sourcePath, int sourceSlideIndex, string targetPath, int insertAfterSlideIndex) => throw new NotSupportedException();
+
+    /// <summary>import_slides가 읽을 다른 파일의 쪽(경로 → 쪽 목록).</summary>
+    public Dictionary<string, List<List<FakeShape>>> OtherFiles { get; } = new(StringComparer.OrdinalIgnoreCase);
+    public (int First, int Count) ImportSlides(string sourcePath, int fromSlide, int toSlide, string targetPath, int insertAfterSlideIndex)
+    {
+        ThrowIfEditing();
+        Calls.Add($"import {Path.GetFileName(sourcePath)} {fromSlide}-{toSlide} after {insertAfterSlideIndex}");
+        var pages = OtherFiles[sourcePath].Skip(fromSlide - 1).Take(toSlide - fromSlide + 1).Select(p => p.Select(x => x.Clone()).ToList()).ToList();
+        Slides.InsertRange(insertAfterSlideIndex, pages);
+        return (insertAfterSlideIndex + 1, pages.Count);
+    }
+    public IReadOnlyList<(int Index, string Title)> DeleteSlides(string presentationPath, IReadOnlyCollection<int> slideIndexes)
+    {
+        ThrowIfEditing();
+        var deleted = slideIndexes.Distinct().Order().Select(i => (i, Slides[i - 1].FirstOrDefault()?.Paragraphs.FirstOrDefault() ?? "")).ToList();
+        foreach (var (i, _) in deleted.AsEnumerable().Reverse()) Slides.RemoveAt(i - 1);
+        Calls.Add($"delete {string.Join(",", deleted.Select(d => d.i))}");
+        return deleted;
+    }
+    public void MoveSlide(string presentationPath, int slideIndex, int newIndex)
+    {
+        ThrowIfEditing();
+        var slide = Slides[slideIndex - 1];
+        Slides.RemoveAt(slideIndex - 1);
+        Slides.Insert(newIndex - 1, slide);
+    }
+    /// <summary>표 칸 글. 표 도형의 문단 하나가 한 행이고 칸은 '|'로 나눈다(AddTable과 같은 규약).</summary>
+    public IReadOnlyList<IReadOnlyList<string>> ReadTable(string presentationPath, int slideIndex, string address) =>
+        Shape(slideIndex, address).Paragraphs.Select(r => (IReadOnlyList<string>)r.Split('|')).ToList();
     public IReadOnlyList<(int SlideIndex, string ShapeName, string OldText, string NewText)> ApplyRules(string presentationPath, IReadOnlyList<ReplaceRule> rules) => throw new NotSupportedException();
     public void RestoreParagraphColors(string presentationPath, IReadOnlyList<ParagraphColorSnapshot> snapshots) => throw new NotSupportedException();
     public SlideLayout GetSlideLayout(string presentationPath, int slideIndex) => throw new NotSupportedException();

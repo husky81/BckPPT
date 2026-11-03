@@ -4,7 +4,7 @@ namespace BckPPT.Models;
 public record ActivePresentationInfo(string Name, string Path, int SlideCount, int? CurrentSlide);
 
 /// <summary>PowerPoint 창에 열린 문서 하나. <see cref="IsSaved"/>가 false면 저장된 적 없는 새 문서(경로 없음)다.</summary>
-public record OpenPresentationInfo(string Name, string Path, int SlideCount, bool IsActive, bool IsSaved);
+public record OpenPresentationInfo(string Name, string Path, int SlideCount, bool IsActive, bool IsSaved, bool IsReadOnly = false);
 
 public record PptPresentation(string Name, string Path, int SlideCount)
 {
