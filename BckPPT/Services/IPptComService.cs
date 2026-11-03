@@ -69,6 +69,8 @@ public interface IPptComService
     IReadOnlyList<(int Index, string Title)> DeleteSlides(string presentationPath, IReadOnlyCollection<int> slideIndexes);
     /// <summary>쪽을 newIndex 자리로 옮긴다.</summary>
     void MoveSlide(string presentationPath, int slideIndex, int newIndex);
+    /// <summary>진단 로그용 PowerPoint 상태 한 줄(문서마다 창 수·읽기 전용·창 없이 남은 것). PowerPoint를 새로 띄우지 않는다.</summary>
+    string DescribeState();
     /// <summary>표의 칸 글(행마다 칸 배열).</summary>
     IReadOnlyList<IReadOnlyList<string>> ReadTable(string presentationPath, int slideIndex, string address);
 

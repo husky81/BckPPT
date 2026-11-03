@@ -40,7 +40,11 @@ public class PptComService : IPptComService
     private static void SafeClose(dynamic? prs)
     {
         if (prs is null) return;
-        try { prs.Close(); }    catch { }
+        string path = "";
+        try { path = (string)prs.FullName; } catch { }
+        // 실패하면 문서가 창 없이 남아 다음 쓰기가 "읽기 전용" 저장 오류를 냈다(2026-11-03, 가끔). 진단 로그에 남긴다.
+        try { prs.Close(); }
+        catch (Exception ex) { PptDiagnosticLog.Write("close-failed", $"{path} — {ex.GetBaseException().Message}"); }
         try { Marshal.ReleaseComObject(prs); } catch { }
     }
 
@@ -2950,7 +2954,42 @@ public class PptComService : IPptComService
                 ?? throw new InvalidOperationException("PowerPoint가 설치되어 있지 않습니다.");
             dynamic app = Activator.CreateInstance(pptType)!;
             app.Visible = MsoTrue;
+            // 사용자가 PowerPoint를 닫은 뒤 호출이 오면 BckPPT가 새로 띄우고 끄지 않는다. 빈 PowerPoint의 후보라 남긴다.
+            PptDiagnosticLog.Write("started-powerpoint", Environment.StackTrace.Split('\n').Skip(2).Take(4)
+                .Select(l => l.Trim()).Aggregate((a, b) => a + " ← " + b));
             return app;
         }
     }
+
+    /// <summary>
+    /// 진단용 PowerPoint 상태 한 줄. PowerPoint를 새로 띄우지 않는다.
+    /// 문서마다 창 수·읽기 전용·저장 여부와, BckPPT가 창 없이 열어 둔 것(held)인지 적는다.
+    /// 창 없는 문서가 held가 아니면 "orphan"으로 표시한다.
+    /// </summary>
+    public string DescribeState()
+        => RunOnSta(() =>
+        {
+            int processes = Process.GetProcessesByName("POWERPNT").Length;
+            if (TryGetActiveInstance() is not { } app) return $"PowerPoint 없음(프로세스 {processes})";
+            var parts = new List<string>();
+            try { parts.Add($"visible={(int)app.Visible == MsoTrue} 프로세스={processes}"); } catch { parts.Add($"프로세스={processes}"); }
+            try
+            {
+                foreach (dynamic prs in app.Presentations)
+                {
+                    try
+                    {
+                        string path = (string)prs.FullName;
+                        int windows = (int)prs.Windows.Count;
+                        bool held;
+                        lock (HeldOpen) held = HeldOpen.Contains(path);
+                        parts.Add($"{path} 창={windows} ro={(int)prs.ReadOnly == MsoTrue} saved={(int)prs.Saved == MsoTrue}" +
+                                  (windows == 0 ? held ? " held" : " orphan" : ""));
+                    }
+                    catch (Exception ex) { parts.Add($"(문서 읽기 실패: {ex.GetBaseException().Message})"); }
+                }
+            }
+            catch (Exception ex) { parts.Add($"(목록 실패: {ex.GetBaseException().Message})"); }
+            return string.Join(" | ", parts);
+        });
 }

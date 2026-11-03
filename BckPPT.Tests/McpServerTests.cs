@@ -8,6 +8,10 @@ public sealed class McpServerTests
 {
     private const string DeckPath = @"C:\Decks\보고.pptx";
 
+    // 진단 로그는 실제 %LOCALAPPDATA% 대신 임시 폴더에 쓴다.
+    private static readonly string LogDir = Path.Combine(Path.GetTempPath(), "bckppt-tests-logs");
+    static McpServerTests() => BckPPT.Services.PptDiagnosticLog.Directory = LogDir;
+
     private static (McpServer Server, FakePptComService Ppt) Create()
     {
         var ppt = new FakePptComService();
@@ -162,6 +166,17 @@ public sealed class McpServerTests
         Assert.Contains("표 2행×2열", text);
         Assert.Contains("표 1 [R1C2] | 값", text);
         Assert.Contains("표 1 [R2C2] | (빈 칸)", text);
+    }
+
+    [Fact]
+    public async Task ToolsCall_WritesTheCallAndPowerPointStateToTheDiagnosticLog()
+    {
+        var (server, ppt) = Create();
+        ppt.Active = null;
+        await Rpc(server, "tools/call", """{"name":"list_slides","arguments":{"file":"보고"}}""");
+        var log = File.ReadAllText(Path.Combine(LogDir, $"com-{DateTime.Now:yyyyMMdd}.log"));
+        Assert.Contains("[mcp] list_slides file=보고", log);
+        Assert.Contains("[state] fake 2쪽", log);
     }
 
     [Fact]

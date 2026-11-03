@@ -95,7 +95,27 @@ public sealed class McpToolCatalog
 
     public IReadOnlyCollection<McpTool> Tools => _tools.Values;
 
+    /// <summary>도구를 부르고 진단 로그에 호출(도구·파일·시간·오류)과 그 뒤 PowerPoint 상태를 남긴다.</summary>
     public async Task<McpToolResult> CallAsync(string name, JsonElement arguments, CancellationToken cancellationToken)
+    {
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        string file = arguments.ValueKind == JsonValueKind.Object ? ToolArgs.OptionalString(arguments, "file") ?? "(보고 있는 문서)" : "";
+        McpToolResult? result = null;
+        try { return result = await CallCoreAsync(name, arguments, cancellationToken); }
+        finally
+        {
+            string outcome = result is null ? "취소" : result.IsError ? "오류: " + Truncate(result.Content.FirstOrDefault()?.Text) : "ok";
+            PptDiagnosticLog.Write("mcp", $"{name} file={file} {watch.ElapsedMilliseconds}ms {outcome}");
+            string state;
+            try { state = await Task.Run(_ppt.DescribeState); }
+            catch (Exception ex) { state = "상태 읽기 실패: " + ex.GetBaseException().Message; }
+            PptDiagnosticLog.Write("state", state);
+        }
+
+        static string Truncate(string? text) => text is null ? "" : text.Length <= 200 ? text : text[..200] + "…";
+    }
+
+    private async Task<McpToolResult> CallCoreAsync(string name, JsonElement arguments, CancellationToken cancellationToken)
     {
         if (!_tools.TryGetValue(name, out var tool))
             return McpToolResult.Error($"'{name}' 도구는 없습니다.");

@@ -313,6 +313,7 @@ public sealed class FakePptComService : IPptComService
         Slides.Insert(newIndex - 1, slide);
     }
     /// <summary>표 칸 글. 표 도형의 문단 하나가 한 행이고 칸은 '|'로 나눈다(AddTable과 같은 규약).</summary>
+    public string DescribeState() => $"fake {Slides.Count}쪽";
     public IReadOnlyList<IReadOnlyList<string>> ReadTable(string presentationPath, int slideIndex, string address) =>
         Shape(slideIndex, address).Paragraphs.Select(r => (IReadOnlyList<string>)r.Split('|')).ToList();
     public IReadOnlyList<(int SlideIndex, string ShapeName, string OldText, string NewText)> ApplyRules(string presentationPath, IReadOnlyList<ReplaceRule> rules) => throw new NotSupportedException();
