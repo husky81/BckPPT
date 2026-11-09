@@ -1,4 +1,4 @@
-using System.IO;
+﻿using System.IO;
 using System.Text.Json;
 using BckPPT.Agent.Tools;
 using BckPPT.Llm;
@@ -18,6 +18,7 @@ public sealed class AgentSession : IDisposable
     private readonly List<LlmMessage> _messages = new();
     private readonly List<IDisposable> _openHandles = new();
     private Action<string, TimeSpan>? _slowCallHandler;
+    private IDisposable? _watchHandle;
 
     private AgentSession(string sourcePath, string workingPath, AgentToolContext context, AgentSessionLog log)
     {
@@ -102,7 +103,7 @@ public sealed class AgentSession : IDisposable
         {
             if (inPlace)
             {
-                session._openHandles.Add(ppt.WatchUserActivity(workingPath));
+                session._watchHandle = ppt.WatchUserActivity(workingPath);
                 session._openHandles.Add(ppt.KeepOpen(baselinePath, readOnly: true));
             }
             else
@@ -201,9 +202,33 @@ public sealed class AgentSession : IDisposable
         try { if (File.Exists(baseline)) File.Delete(baseline); } catch { }
     }
 
+    /// <summary>턴 종료·예외·취소 시 숨은 문서를 놓되 사용자 활동 감시는 세션 동안 유지한다.</summary>
+    public void ReleaseToolDocuments() => ReleaseOpenDocuments();
+
+    public void HoldToolDocuments(IPptComService ppt)
+    {
+        if (_openHandles.Count > 0) return;
+        if (InPlace) _openHandles.Add(ppt.KeepOpen(Context.BaselinePath!, readOnly: true));
+        else
+        {
+            _openHandles.Add(ppt.KeepOpen(WorkingPath, readOnly: false));
+            _openHandles.Add(ppt.KeepOpen(SourcePath, readOnly: true));
+        }
+    }
+
     private void ReleaseOpenDocuments()
     {
-        foreach (var handle in _openHandles) handle.Dispose();
+        if (_openHandles.Count > 0)
+            PptDiagnosticLog.Event("session-release-documents", new { session = Id, source = SourcePath, working = WorkingPath, handles = _openHandles.Count, InPlace });
+        foreach (var handle in _openHandles.AsEnumerable().Reverse())
+        {
+            try { handle.Dispose(); }
+            catch (Exception ex)
+            {
+                Log.Write("close_handle_failed", new { ex.Message });
+                PptDiagnosticLog.Event("session-release-failed", new { session = Id, source = SourcePath, working = WorkingPath, error = ex.ToString() });
+            }
+        }
         _openHandles.Clear();
     }
 
@@ -211,6 +236,8 @@ public sealed class AgentSession : IDisposable
     {
         if (_slowCallHandler is not null) PptComService.SlowCall -= _slowCallHandler;
         ReleaseOpenDocuments();
+        _watchHandle?.Dispose();
+        _watchHandle = null;
         Log.Dispose();
     }
 }

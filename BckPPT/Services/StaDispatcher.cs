@@ -60,9 +60,13 @@ public sealed class StaDispatcher : IDisposable
     /// </summary>
     public void Post(Action action)
     {
-        if (_queue.IsAddingCompleted) return;
+        if (_queue.IsAddingCompleted)
+        {
+            PptDiagnosticLog.Write("sta-post-rejected", "Dispatcher is disposed; cleanup was not queued.");
+            return;
+        }
         try { _queue.Add((action, new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously))); }
-        catch (InvalidOperationException) { }
+        catch (InvalidOperationException ex) { PptDiagnosticLog.Write("sta-post-rejected", ex.ToString()); }
     }
 
     /// <summary>동기 래퍼 (호출 스레드를 블록한다).</summary>
@@ -89,7 +93,14 @@ public sealed class StaDispatcher : IDisposable
     private void Quarantine(Task stuck)
     {
         _isHealthy = false;
-        stuck.ContinueWith(_ => { _isHealthy = true; Recovered?.Invoke(); }, TaskScheduler.Default);
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        PptDiagnosticLog.Event("sta-quarantined", new { timeoutSeconds = DefaultTimeout.TotalSeconds, queued = _queue.Count });
+        stuck.ContinueWith(completed =>
+        {
+            _isHealthy = true;
+            PptDiagnosticLog.Event("sta-recovered", new { elapsedMs = watch.ElapsedMilliseconds, status = completed.Status.ToString(), error = completed.Exception?.ToString(), queued = _queue.Count });
+            Recovered?.Invoke();
+        }, TaskScheduler.Default);
     }
 
     /// <summary>격리가 풀렸을 때(멈춘 작업이 끝났을 때).</summary>

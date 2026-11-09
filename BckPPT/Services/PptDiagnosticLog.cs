@@ -1,4 +1,7 @@
 using System.IO;
+using System.Text.Json;
+using System.Text.Encodings.Web;
+using System.Text.Unicode;
 
 namespace BckPPT.Services;
 
@@ -11,6 +14,18 @@ namespace BckPPT.Services;
 public static class PptDiagnosticLog
 {
     private static readonly object Gate = new();
+    private static readonly string RunId = Guid.NewGuid().ToString("N");
+    private static readonly string Version = typeof(PptDiagnosticLog).Assembly.GetName().Version?.ToString() ?? "unknown";
+    private static long _sequence;
+    private static readonly JsonSerializerOptions Json = new() { Encoder = JavaScriptEncoder.Create(UnicodeRanges.All) };
+
+    public static void Event(string kind, object data)
+    {
+        try { Write(kind, JsonSerializer.Serialize(data, Json)); } catch { }
+    }
+
+    private static string FormatLine(string kind, string message, DateTimeOffset now)
+        => $"{now:yyyy-MM-ddTHH:mm:ss.fffzzz} [{kind}] run={RunId} host={Environment.ProcessId} thread={Environment.CurrentManagedThreadId} seq={Interlocked.Increment(ref _sequence)} version={Version} {message.ReplaceLineEndings(" ⏎ ")}{Environment.NewLine}";
 
     public static string Directory { get; set; } = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "BckSoft", "BckPPT", "logs");
@@ -19,12 +34,12 @@ public static class PptDiagnosticLog
     {
         try
         {
-            var now = DateTime.Now;
+            var now = DateTimeOffset.Now;
             lock (Gate)
             {
                 System.IO.Directory.CreateDirectory(Directory);
                 File.AppendAllText(Path.Combine(Directory, $"com-{now:yyyyMMdd}.log"),
-                    $"{now:HH:mm:ss.fff} [{kind}] {message.ReplaceLineEndings(" ⏎ ")}{Environment.NewLine}");
+                    FormatLine(kind, message, now));
             }
         }
         catch { }

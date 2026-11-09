@@ -36,16 +36,185 @@ public class PptComService : IPptComService
 
     // ── COM 안전 해제 헬퍼 ────────────────────────────────────────
 
-    /// <summary>presentation.Close() + ReleaseComObject를 각각 try-catch로 감싸 이중 해제 방지.</summary>
+    // STA only. Keep the exact RCW: a path can later refer to a different user document.
+    private sealed class OwnedPresentation(object presentation, string path)
+    {
+        public readonly string Id = Guid.NewGuid().ToString("N");
+        public readonly DateTimeOffset OpenedAt = DateTimeOffset.Now;
+        public readonly string? OpenOperation = CurrentOperation;
+        public readonly string? OpenCaller = CurrentCaller;
+        public int PowerPointPid;
+        public string? PowerPointStartedAt;
+        public int CloseAttempts;
+        public bool LockProbeRequested;
+        public object Presentation = presentation;
+        public string Path = path;
+        public int Leases;
+        public bool DeferredSave;
+        public bool Pending;
+    }
+
+    private static readonly List<OwnedPresentation> Owned = new();
+    [ThreadStatic] private static string? CurrentOperation;
+    [ThreadStatic] private static string? CurrentCaller;
+
+    private static void LogOwned(string kind, OwnedPresentation owned, string detail = "")
+        => PptDiagnosticLog.Event(kind, new
+        {
+            document = owned.Id, path = owned.Path, operation = CurrentOperation, caller = CurrentCaller,
+            openedBy = owned.OpenOperation, openedByCaller = owned.OpenCaller,
+            openedAt = owned.OpenedAt, ageMs = (long)(DateTimeOffset.Now - owned.OpenedAt).TotalMilliseconds,
+            powerpoint = owned.PowerPointPid, powerpointStartedAt = owned.PowerPointStartedAt,
+            leases = owned.Leases, deferredSave = owned.DeferredSave, pending = owned.Pending,
+            totalCloseAttempts = owned.CloseAttempts, detail
+        });
+
+    private static dynamic OpenOwned(dynamic app, string path, int readOnly, int untitled, int withWindow)
+    {
+        // Never claim a document that was already open, including invisible user documents.
+        if (FindOpenPresentation(app, path) is { } existing)
+        {
+            object instance = existing;
+            var tracked = Owned.Find(x => ReferenceEquals(x.Presentation, instance));
+            if (tracked is not null) LogOwned("open-reused-owned", tracked);
+            else PptDiagnosticLog.Event("open-reused-unowned", new { path, operation = CurrentOperation, caller = CurrentCaller });
+            return existing;
+        }
+        var watch = Stopwatch.StartNew();
+        PptDiagnosticLog.Event("open-start", new { path, readOnly, withWindow, operation = CurrentOperation, caller = CurrentCaller });
+        object prs;
+        try { prs = app.Presentations.Open(path, readOnly, untitled, withWindow); }
+        catch (Exception ex)
+        {
+            PptDiagnosticLog.Event("open-failed", new { path, operation = CurrentOperation, caller = CurrentCaller, elapsedMs = watch.ElapsedMilliseconds, error = ex.ToString() });
+            throw;
+        }
+        var owned = new OwnedPresentation(prs, Path.GetFullPath(path));
+        Owned.Add(owned);
+        try
+        {
+            GetWindowThreadProcessId(new IntPtr((int)app.HWND), out owned.PowerPointPid);
+            if (owned.PowerPointPid > 0)
+            {
+                using var process = Process.GetProcessById(owned.PowerPointPid);
+                owned.PowerPointStartedAt = process.StartTime.ToUniversalTime().ToString("O");
+            }
+        }
+        catch (Exception ex) { LogOwned("powerpoint-identity-unavailable", owned, ex.GetBaseException().Message); }
+        LogOwned("opened-owned", owned, $"readOnly={readOnly} withWindow={withWindow} elapsedMs={watch.ElapsedMilliseconds}");
+        return prs;
+    }
+
     private static void SafeClose(dynamic? prs)
     {
         if (prs is null) return;
-        string path = "";
-        try { path = (string)prs.FullName; } catch { }
-        // 실패하면 문서가 창 없이 남아 다음 쓰기가 "읽기 전용" 저장 오류를 냈다(2026-11-03, 가끔). 진단 로그에 남긴다.
-        try { prs.Close(); }
-        catch (Exception ex) { PptDiagnosticLog.Write("close-failed", $"{path} — {ex.GetBaseException().Message}"); }
-        try { Marshal.ReleaseComObject(prs); } catch { }
+        object instance = prs;
+        var owned = Owned.Find(x => ReferenceEquals(x.Presentation, instance));
+        if (owned is null)
+        {
+            PptDiagnosticLog.Event("close-skipped-unowned", new { operation = CurrentOperation, caller = CurrentCaller });
+            return;
+        }
+        if (owned.Leases > 0) { LogOwned("close-skipped-leased", owned); return; }
+        owned.Pending = true;
+        CloseOwned(owned);
+    }
+
+    private static bool CloseOwned(OwnedPresentation owned)
+    {
+        dynamic prs = owned.Presentation;
+        var watch = Stopwatch.StartNew();
+        string stage = "inspect";
+        for (int attempt = 1; attempt <= 3; attempt++)
+        {
+            owned.CloseAttempts++;
+            stage = "inspect";
+            LogOwned("close-attempt", owned, $"attempt={attempt}/3");
+            try
+            {
+                // Do not save or close after the user has made the document visible.
+                int windows = (int)prs.Windows.Count;
+                if (windows > 0)
+                {
+                    LogOwned("close-preserved-visible", owned, $"windows={windows}");
+                    Owned.Remove(owned);
+                    return false;
+                }
+                if (owned.DeferredSave && (int)prs.Saved != MsoTrue)
+                {
+                    stage = "save";
+                    LogOwned("deferred-save-start", owned);
+                    prs.Save();
+                    LogOwned("deferred-save-complete", owned);
+                }
+                stage = "check-saved";
+                bool saved = (int)prs.Saved == MsoTrue;
+                LogOwned("close-inspected", owned, $"windows={windows} saved={saved}");
+                if (!saved)
+                {
+                    LogOwned("close-preserved-unsaved", owned);
+                    return false;
+                }
+                // Hold the owning application across Close to verify collection membership.
+                dynamic app = prs.Application;
+                stage = "close";
+                prs.Close();
+                stage = "verify-collection";
+                bool remains = FindOpenPresentation(app, owned.Path) is not null;
+                if (remains) throw new IOException("Presentation remains in the owning PowerPoint instance after Close.");
+                Owned.Remove(owned);
+                try { if (Marshal.IsComObject(owned.Presentation)) Marshal.ReleaseComObject(owned.Presentation); }
+                catch (Exception ex) { LogOwned("release-failed", owned, ex.ToString()); }
+                LogOwned("close-complete", owned, $"elapsedMs={watch.ElapsedMilliseconds} collectionAbsent=true");
+                VerifyFileReleased(owned);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                LogOwned("close-failed", owned, $"stage={stage} attempt={attempt}/3 elapsedMs={watch.ElapsedMilliseconds} hr=0x{ex.HResult:X8} {ex}");
+                if (attempt < 3) Thread.Sleep(100 * attempt);
+            }
+        }
+        LogOwned("close-pending-retry", owned, $"stage={stage} elapsedMs={watch.ElapsedMilliseconds}");
+        if (!owned.LockProbeRequested)
+        {
+            owned.LockProbeRequested = true;
+            PptFileLockDiagnostics.LogOwners(owned.Path, owned.Id);
+        }
+        return false; // Retain ownership and the RCW for subsequent cleanup attempts.
+    }
+
+    private static void VerifyFileReleased(OwnedPresentation owned)
+    {
+        string path = owned.Path;
+        for (int attempt = 1; attempt <= 3; attempt++)
+        {
+            try
+            {
+                using var probe = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.None);
+                LogOwned("file-release-verified", owned, $"attempt={attempt}/3");
+                return;
+            }
+            catch (IOException ex)
+            {
+                if (attempt == 3)
+                {
+                    LogOwned("file-release-unverified", owned, $"attempt={attempt}/3 hr=0x{ex.HResult:X8} {ex}");
+                    PptFileLockDiagnostics.LogOwners(path, owned.Id);
+                }
+                else Thread.Sleep(100 * attempt);
+            }
+            catch (Exception ex) { LogOwned("file-release-unverified", owned, ex.ToString()); return; }
+        }
+    }
+
+    private static void RetryPendingCloses()
+    {
+        foreach (var owned in Owned.Where(x => x.Pending && x.Leases == 0).ToArray())
+        {
+            LogOwned("close-retry-pending", owned);
+            CloseOwned(owned);
+        }
     }
 
     // ── STA 스레드 래퍼 (StaDispatcher 싱글턴 사용) ─────────────
@@ -53,17 +222,47 @@ public class PptComService : IPptComService
     private static T RunOnSta<T>(Func<T> func, [System.Runtime.CompilerServices.CallerMemberName] string caller = "")
     {
         var watch = Stopwatch.StartNew();
-        try { return StaDispatcher.Instance.Invoke(func); }
-        catch (COMException ex) when (IsBusyRejection(ex)) { throw new PptUserInterventionException(); }
+        string operation = Guid.NewGuid().ToString("N");
+        PptDiagnosticLog.Event("com-dispatch", new { operation, caller, healthy = StaDispatcher.Instance.IsHealthy });
+        try { return StaDispatcher.Instance.Invoke(() => ExecuteLogged(func, operation, caller)); }
+        catch (Exception ex)
+        {
+            PptDiagnosticLog.Event("com-wait-failed", new { operation, caller, elapsedMs = watch.ElapsedMilliseconds, error = ex.ToString() });
+            if (ex is COMException com && IsBusyRejection(com)) throw new PptUserInterventionException();
+            throw;
+        }
         finally { ReportIfSlow(caller, watch.Elapsed); }
     }
 
     private static void RunOnSta(Action action, [System.Runtime.CompilerServices.CallerMemberName] string caller = "")
+        => RunOnSta(() => { action(); return true; }, caller);
+
+    private static T ExecuteLogged<T>(Func<T> func, string operation, string caller)
     {
+        var previousOperation = CurrentOperation;
+        var previousCaller = CurrentCaller;
+        CurrentOperation = operation;
+        CurrentCaller = caller;
         var watch = Stopwatch.StartNew();
-        try { StaDispatcher.Instance.Invoke(action); }
-        catch (COMException ex) when (IsBusyRejection(ex)) { throw new PptUserInterventionException(); }
-        finally { ReportIfSlow(caller, watch.Elapsed); }
+        string outcome = "completed";
+        PptDiagnosticLog.Event("com-start", new { operation, caller });
+        try { return func(); }
+        catch (Exception ex)
+        {
+            outcome = ex is OperationCanceledException ? "cancelled" : "failed";
+            PptDiagnosticLog.Event("com-operation-failed", new { operation, caller, outcome, error = ex.ToString() });
+            throw;
+        }
+        finally
+        {
+            try
+            {
+                RetryPendingCloses();
+                foreach (var owned in Owned.Where(x => x.Pending)) LogOwned("com-pending-document", owned);
+                PptDiagnosticLog.Event("com-end", new { operation, caller, outcome, elapsedMs = watch.ElapsedMilliseconds, owned = Owned.Count, pending = Owned.Count(x => x.Pending) });
+            }
+            finally { CurrentOperation = previousOperation; CurrentCaller = previousCaller; }
+        }
     }
 
     /// <summary>사용자가 글을 고치는 중이면 PowerPoint가 호출을 거절한다(RPC_E_CALL_REJECTED·SERVERCALL_RETRYLATER).</summary>
@@ -292,6 +491,9 @@ public class PptComService : IPptComService
         });
 
     [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out int processId);
+
+    [DllImport("user32.dll")]
     private static extern bool AllowSetForegroundWindow(int processId);
 
     public void ActivatePresentation(string presentationPath)
@@ -336,7 +538,7 @@ public class PptComService : IPptComService
             dynamic? existing = FindOpenPresentation(pptApp, presentationPath);
             bool ownedByUs = existing is null;
             dynamic prs = existing
-                ?? pptApp.Presentations.Open(presentationPath, MsoTrue, MsoFalse, MsoFalse);
+                ?? OpenOwned(pptApp, presentationPath, MsoTrue, MsoFalse, MsoFalse);
             try
             {
                 var slides = new List<SlideListItem>();
@@ -594,7 +796,7 @@ public class PptComService : IPptComService
             dynamic pptApp = GetOrCreateInstance();
             dynamic? existing = FindOpenPresentation(pptApp, presentationPath);
             bool ownedByUs = existing is null;
-            dynamic prs = existing ?? pptApp.Presentations.Open(presentationPath, MsoTrue, MsoFalse, MsoFalse);
+            dynamic prs = existing ?? OpenOwned(pptApp, presentationPath, MsoTrue, MsoFalse, MsoFalse);
             try
             {
                 var markdown = new StringBuilder();
@@ -823,7 +1025,7 @@ public class PptComService : IPptComService
         {
             var rules  = PptRules.Current;
             dynamic pptApp = GetOrCreateInstance();
-            dynamic prs = pptApp.Presentations.Open(
+            dynamic prs = OpenOwned(pptApp,
                 presentationPath, MsoFalse, MsoFalse, MsoFalse);
             try
             {
@@ -866,7 +1068,7 @@ public class PptComService : IPptComService
             dynamic? prs   = FindOpenPresentation(pptApp, presentationPath);
             bool ownedByUs = prs is null;
             if (ownedByUs)
-                prs = pptApp.Presentations.Open(presentationPath, MsoFalse, MsoFalse, MsoFalse);
+                prs = OpenOwned(pptApp, presentationPath, MsoFalse, MsoFalse, MsoFalse);
             try
             {
                 dynamic slide = prs!.Slides[slideIndex];
@@ -937,7 +1139,7 @@ public class PptComService : IPptComService
             dynamic pptApp = GetOrCreateInstance();
             dynamic? existing = FindOpenPresentation(pptApp, presentationPath);
             bool ownedByUs = existing is null;
-            dynamic prs = existing ?? pptApp.Presentations.Open(presentationPath, MsoTrue, MsoFalse, MsoFalse);
+            dynamic prs = existing ?? OpenOwned(pptApp, presentationPath, MsoTrue, MsoFalse, MsoFalse);
             try
             {
                 var result = new List<PptFontInfo>();
@@ -994,7 +1196,7 @@ public class PptComService : IPptComService
             dynamic pptApp = GetOrCreateInstance();
             dynamic? existing = FindOpenPresentation(pptApp, presentationPath);
             bool ownedByUs = existing is null;
-            dynamic prs = existing ?? pptApp.Presentations.Open(presentationPath, MsoTrue, MsoFalse, MsoFalse);
+            dynamic prs = existing ?? OpenOwned(pptApp, presentationPath, MsoTrue, MsoFalse, MsoFalse);
             try
             {
                 var result = new List<(int, string)>();
@@ -1040,16 +1242,26 @@ public class PptComService : IPptComService
     /// </summary>
     public IDisposable KeepOpen(string presentationPath, bool readOnly)
     {
-        bool opened = RunOnSta(() =>
+        var handle = new OpenHandle();
+        try
         {
-            dynamic app = GetOrCreateInstance();
-            if (FindOpenPresentation(app, presentationPath) is not null) return false;
-            app.Presentations.Open(presentationPath, readOnly ? MsoTrue : MsoFalse, MsoFalse, MsoFalse);
-            return true;
-        });
-        if (opened && !readOnly) lock (KeptOpen) KeptOpen.Add(presentationPath);
-        if (opened) lock (HeldOpen) HeldOpen.Add(presentationPath);
-        return new OpenHandle(opened ? presentationPath : null);
+            RunOnSta(() =>
+            {
+                dynamic app = GetOrCreateInstance();
+                object prs = OpenOwned(app, Path.GetFullPath(presentationPath), readOnly ? MsoTrue : MsoFalse, MsoFalse, MsoFalse);
+                var owned = Owned.Find(x => ReferenceEquals(x.Presentation, prs));
+                if (owned is null) return;
+                owned.Leases++;
+                owned.Pending = false;
+                owned.DeferredSave |= !readOnly;
+                handle.Owned = owned;
+                LogOwned("lease-acquired", owned, $"handle={handle.Id} readOnly={readOnly}");
+                lock (HeldOpen) HeldOpen.Add(owned.Path);
+                if (!readOnly) lock (KeptOpen) KeptOpen.Add(owned.Path);
+            });
+            return handle;
+        }
+        catch { handle.Dispose(); throw; } // Queued cleanup also covers a late Open after timeout.
     }
 
     /// <summary>열린 창에서 바로 작업 중인 문서. 저장하지 않고, 쓰기 전마다 사용자 조작을 확인한다.</summary>
@@ -1123,9 +1335,8 @@ public class PptComService : IPptComService
     private static readonly HashSet<string> HeldOpen = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
-    /// 끊긴 세션이 창 없이 남긴 문서를 저장하지 않고 닫는다. 대상은 작업 폴더 안의 사본과 <paramref name="alsoPaths"/>(새 작업의 원본)뿐이고,
-    /// 창이 있는 문서(사용자가 연 것)와 이 프로세스가 열어 둔 문서는 두지 않고 건너뛴다.
-    /// 시간 초과로 끊긴 실행의 사본 4개와 원본 2개가 남아 다음 실행이 같은 단계에서 또 45초를 넘겼다(2026-10-07).
+    /// 소유권이 기록된 작업 폴더·alsoPaths 문서만 재시도한다.
+    /// 활성 핸들·사용자 창·미저장 변경을 보호한다. 다른 실행이 남긴 숨은 문서는 소유권을 입증할 수 없어 닫지 않는다.
     /// </summary>
     public IReadOnlyList<string> CloseOrphanedPresentations(string workDirectory, IEnumerable<string> alsoPaths)
     {
@@ -1134,23 +1345,14 @@ public class PptComService : IPptComService
         return RunOnSta(() =>
         {
             var closed = new List<string>();
-            if (TryGetActiveInstance() is not { } app) return (IReadOnlyList<string>)closed;
-            var presentations = new List<dynamic>();
-            foreach (dynamic prs in app.Presentations) presentations.Add(prs);
-            foreach (dynamic prs in presentations)
+            foreach (var owned in Owned.ToArray())
             {
-                try
-                {
-                    string path = (string)prs.FullName;
-                    if ((int)prs.Windows.Count > 0) continue;
-                    lock (HeldOpen) if (HeldOpen.Contains(path)) continue;
-                    if (!path.StartsWith(work, StringComparison.OrdinalIgnoreCase) && !extra.Contains(path)) continue;
-                    prs.Saved = MsoTrue;   // 묻지 않고, 저장하지 않고 닫는다
-                    prs.Close();
-                    closed.Add(Path.GetFileName(path));
-                }
-                catch { }
+                if (owned.Leases > 0) continue;
+                if (!owned.Path.StartsWith(work, StringComparison.OrdinalIgnoreCase) && !extra.Contains(owned.Path)) continue;
+                owned.Pending = true;
+                if (CloseOwned(owned)) closed.Add(Path.GetFileName(owned.Path));
             }
+            // A hidden window or matching path alone is never proof of BckPPT ownership.
             return (IReadOnlyList<string>)closed;
         });
     }
@@ -1171,29 +1373,39 @@ public class PptComService : IPptComService
         prs.Save();
     }
 
-    private sealed class OpenHandle(string? path) : IDisposable
+    private sealed class OpenHandle : IDisposable
     {
-        private string? _path = path;
-
+        public readonly string Id = Guid.NewGuid().ToString("N");
+        public OwnedPresentation? Owned;
+        private int _disposed;
         public void Dispose()
         {
-            if (Interlocked.Exchange(ref _path, null) is not { } path) return;
-            bool deferred;
-            lock (KeptOpen) deferred = KeptOpen.Remove(path);
-            lock (HeldOpen) HeldOpen.Remove(path);
+            if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
             void Close()
             {
-                if (TryGetActiveInstance() is { } app && FindOpenPresentation(app, path) is { } prs)
-                {
-                    if (deferred) prs.Save();   // 미뤄 둔 저장
-                    // 사용자가 "결과 열어 보기"로 창을 띄웠다면 닫지 않는다.
-                    if ((int)prs.Windows.Count == 0) SafeClose(prs);
-                }
+                var owned = Owned;
+                if (owned is null) return;
+                Owned = null;
+                owned.Leases--;
+                LogOwned("lease-released", owned, $"handle={Id}");
+                if (owned.Leases > 0) return;
+                lock (KeptOpen) KeptOpen.Remove(owned.Path);
+                lock (HeldOpen) HeldOpen.Remove(owned.Path);
+                owned.Pending = true;
+                CloseOwned(owned);
             }
-            // 시간 초과로 격리된 중이면 멈춘 작업 뒤에 예약한다. 전에는 여기서 예외가 나 문서가 창 없이 남았다.
-            if (!StaDispatcher.Instance.IsHealthy) { StaDispatcher.Instance.Post(() => { try { Close(); } catch { } }); return; }
+            if (!StaDispatcher.Instance.IsHealthy)
+            {
+                PptDiagnosticLog.Event("close-queued", new { reason = "sta-unhealthy", handle = Id, document = Owned?.Id });
+                StaDispatcher.Instance.Post(() => ExecuteLogged(() => { Close(); return true; }, Guid.NewGuid().ToString("N"), "OpenHandle.QueuedDispose"));
+                return;
+            }
             try { RunOnSta(Close); }
-            catch { StaDispatcher.Instance.Post(() => { try { Close(); } catch { } }); }
+            catch (Exception ex)
+            {
+                PptDiagnosticLog.Event("close-queued", new { reason = "dispose-failed", handle = Id, document = Owned?.Id, error = ex.ToString() });
+                StaDispatcher.Instance.Post(() => ExecuteLogged(() => { Close(); return true; }, Guid.NewGuid().ToString("N"), "OpenHandle.QueuedDispose"));
+            }
         }
     }
 
@@ -1207,7 +1419,7 @@ public class PptComService : IPptComService
             dynamic? prs   = FindOpenPresentation(pptApp, presentationPath);
             bool ownedByUs = prs is null;
             if (ownedByUs)
-                prs = pptApp.Presentations.Open(presentationPath, MsoFalse, MsoFalse, MsoFalse);
+                prs = OpenOwned(pptApp, presentationPath, MsoFalse, MsoFalse, MsoFalse);
             try
             {
                 int count = 0;
@@ -1260,7 +1472,7 @@ public class PptComService : IPptComService
             dynamic? prs   = FindOpenPresentation(pptApp, presentationPath);
             bool ownedByUs = prs is null;
             if (ownedByUs)
-                prs = pptApp.Presentations.Open(presentationPath, MsoFalse, MsoFalse, MsoFalse);
+                prs = OpenOwned(pptApp, presentationPath, MsoFalse, MsoFalse, MsoFalse);
             try
             {
                 var changed = new List<(int, string, string, string)>();
@@ -1318,7 +1530,7 @@ public class PptComService : IPptComService
         {
             var rules  = PptRules.Current;
             dynamic pptApp = GetOrCreateInstance();
-            dynamic prs = pptApp.Presentations.Open(
+            dynamic prs = OpenOwned(pptApp,
                 presentationPath, MsoFalse, MsoFalse, MsoFalse);
             try
             {
@@ -1364,7 +1576,7 @@ public class PptComService : IPptComService
             dynamic? existing = FindOpenPresentation(pptApp, presentationPath);
             bool ownedByUs = existing is null;
             dynamic prs = existing
-                ?? pptApp.Presentations.Open(presentationPath, MsoTrue, MsoFalse, MsoFalse);
+                ?? OpenOwned(pptApp, presentationPath, MsoTrue, MsoFalse, MsoFalse);
             try
             {
                 dynamic slide = prs.Slides[slideIndex];
@@ -1400,7 +1612,7 @@ public class PptComService : IPptComService
             dynamic? prs = FindOpenPresentation(pptApp, presentationPath);
             bool ownedByUs = prs is null;
             if (ownedByUs)
-                prs = pptApp.Presentations.Open(presentationPath, MsoFalse, MsoFalse, MsoFalse);
+                prs = OpenOwned(pptApp, presentationPath, MsoFalse, MsoFalse, MsoFalse);
             try
             {
                 dynamic slide = prs!.Slides[slideIndex];
@@ -1444,7 +1656,7 @@ public class PptComService : IPptComService
             dynamic? prs   = FindOpenPresentation(pptApp, presentationPath);
             bool ownedByUs = prs is null;
             if (ownedByUs)
-                prs = pptApp.Presentations.Open(presentationPath, MsoFalse, MsoFalse, MsoFalse);
+                prs = OpenOwned(pptApp, presentationPath, MsoFalse, MsoFalse, MsoFalse);
             try
             {
                 dynamic slide = prs!.Slides[slideIndex];
@@ -1572,7 +1784,7 @@ public class PptComService : IPptComService
             dynamic? prs   = FindOpenPresentation(pptApp, presentationPath);
             bool ownedByUs = prs is null;
             if (ownedByUs)
-                prs = pptApp.Presentations.Open(presentationPath, MsoFalse, MsoFalse, MsoFalse);
+                prs = OpenOwned(pptApp, presentationPath, MsoFalse, MsoFalse, MsoFalse);
             try
             {
                 CheckUserActivity(prs!);
@@ -1750,7 +1962,7 @@ public class PptComService : IPptComService
             dynamic? prs   = FindOpenPresentation(pptApp, presentationPath);
             bool ownedByUs = prs is null;
             if (ownedByUs)
-                prs = pptApp.Presentations.Open(presentationPath, MsoFalse, MsoFalse, MsoFalse);
+                prs = OpenOwned(pptApp, presentationPath, MsoFalse, MsoFalse, MsoFalse);
             try
             {
                 foreach (var group in snapshots.GroupBy(s => (s.SlideIndex, s.ShapeName)))
@@ -1785,7 +1997,7 @@ public class PptComService : IPptComService
             dynamic pptApp = GetOrCreateInstance();
             dynamic? prs = FindOpenPresentation(pptApp, presentationPath);
             bool ownedByUs = prs is null;
-            if (ownedByUs) prs = pptApp.Presentations.Open(presentationPath, MsoFalse, MsoFalse, MsoFalse);
+            if (ownedByUs) prs = OpenOwned(pptApp, presentationPath, MsoFalse, MsoFalse, MsoFalse);
             try
             {
                 int slideCount = (int)prs!.Slides.Count;
@@ -1812,10 +2024,10 @@ public class PptComService : IPptComService
             dynamic? target = FindOpenPresentation(pptApp, targetPath);
             bool ownsSource = source is null;
             bool ownsTarget = target is null;
-            if (ownsSource) source = pptApp.Presentations.Open(sourcePath, MsoTrue, MsoFalse, MsoFalse);
-            if (ownsTarget) target = pptApp.Presentations.Open(targetPath, MsoFalse, MsoFalse, MsoFalse);
+            if (ownsSource) source = OpenOwned(pptApp, sourcePath, MsoTrue, MsoFalse, MsoFalse);
             try
             {
+                if (ownsTarget) target = OpenOwned(pptApp, targetPath, MsoFalse, MsoFalse, MsoFalse);
                 if (sourceSlideIndex < 1 || sourceSlideIndex > (int)source!.Slides.Count)
                     throw new ArgumentOutOfRangeException(nameof(sourceSlideIndex));
                 if (insertAfterSlideIndex < 0 || insertAfterSlideIndex > (int)target!.Slides.Count)
@@ -1844,7 +2056,7 @@ public class PptComService : IPptComService
             dynamic pptApp = GetOrCreateInstance();
             dynamic? target = FindOpenPresentation(pptApp, targetPath);
             bool ownsTarget = target is null;
-            if (ownsTarget) target = pptApp.Presentations.Open(targetPath, MsoFalse, MsoFalse, MsoFalse);
+            if (ownsTarget) target = OpenOwned(pptApp, targetPath, MsoFalse, MsoFalse, MsoFalse);
             try
             {
                 if (insertAfterSlideIndex < 0 || insertAfterSlideIndex > (int)target!.Slides.Count)
@@ -1865,7 +2077,7 @@ public class PptComService : IPptComService
             dynamic pptApp = GetOrCreateInstance();
             dynamic? prs = FindOpenPresentation(pptApp, presentationPath);
             bool ownedByUs = prs is null;
-            if (ownedByUs) prs = pptApp.Presentations.Open(presentationPath, MsoFalse, MsoFalse, MsoFalse);
+            if (ownedByUs) prs = OpenOwned(pptApp, presentationPath, MsoFalse, MsoFalse, MsoFalse);
             try
             {
                 int slideCount = (int)prs!.Slides.Count;
@@ -1895,7 +2107,7 @@ public class PptComService : IPptComService
             dynamic pptApp = GetOrCreateInstance();
             dynamic? prs = FindOpenPresentation(pptApp, presentationPath);
             bool ownedByUs = prs is null;
-            if (ownedByUs) prs = pptApp.Presentations.Open(presentationPath, MsoFalse, MsoFalse, MsoFalse);
+            if (ownedByUs) prs = OpenOwned(pptApp, presentationPath, MsoFalse, MsoFalse, MsoFalse);
             try
             {
                 int slideCount = (int)prs!.Slides.Count;
@@ -1943,7 +2155,7 @@ public class PptComService : IPptComService
             dynamic? prs   = FindOpenPresentation(pptApp, presentationPath);
             bool ownedByUs = prs is null;
             if (ownedByUs)
-                prs = pptApp.Presentations.Open(presentationPath, save ? MsoFalse : MsoTrue, MsoFalse, MsoFalse);
+                prs = OpenOwned(pptApp, presentationPath, save ? MsoFalse : MsoTrue, MsoFalse, MsoFalse);
             try
             {
                 if (save) CheckUserActivity(prs!);
@@ -2378,7 +2590,7 @@ public class PptComService : IPptComService
             dynamic? existing = FindOpenPresentation(pptApp, presentationPath);
             bool ownedByUs = existing is null;
             dynamic prs = existing
-                ?? pptApp.Presentations.Open(presentationPath, MsoTrue, MsoFalse, MsoFalse);
+                ?? OpenOwned(pptApp, presentationPath, MsoTrue, MsoFalse, MsoFalse);
             try
             {
                 dynamic slide = prs.Slides[slideIndex];
@@ -2466,7 +2678,7 @@ public class PptComService : IPptComService
             dynamic? existing = FindOpenPresentation(pptApp, presentationPath);
             bool ownedByUs = existing is null;
             dynamic prs = existing
-                ?? pptApp.Presentations.Open(presentationPath, MsoTrue, MsoFalse, MsoFalse);
+                ?? OpenOwned(pptApp, presentationPath, MsoTrue, MsoFalse, MsoFalse);
             try
             {
                 float slideW = (float)prs.PageSetup.SlideWidth;
@@ -2595,7 +2807,7 @@ public class PptComService : IPptComService
             dynamic pptApp = GetOrCreateInstance();
             dynamic? existing = FindOpenPresentation(pptApp, presentationPath);
             bool ownedByUs = existing is null;
-            dynamic prs = existing ?? pptApp.Presentations.Open(
+            dynamic prs = existing ?? OpenOwned(pptApp,
                 presentationPath, MsoTrue, MsoFalse, MsoFalse);
             try
             {
@@ -2669,7 +2881,7 @@ public class PptComService : IPptComService
             dynamic? existing = FindOpenPresentation(pptApp, presentationPath);
             bool ownedByUs = existing is null;
             dynamic prs = existing
-                ?? pptApp.Presentations.Open(presentationPath, MsoTrue, MsoFalse, MsoFalse);
+                ?? OpenOwned(pptApp, presentationPath, MsoTrue, MsoFalse, MsoFalse);
             try
             {
                 dynamic slide = prs.Slides[slideIndex];
@@ -2964,15 +3176,30 @@ public class PptComService : IPptComService
     /// <summary>
     /// 진단용 PowerPoint 상태 한 줄. PowerPoint를 새로 띄우지 않는다.
     /// 문서마다 창 수·읽기 전용·저장 여부와, BckPPT가 창 없이 열어 둔 것(held)인지 적는다.
-    /// 창 없는 문서가 held가 아니면 "orphan"으로 표시한다.
+    /// 창 없는 문서의 소유권을 알 수 없으면 "hidden-unowned"로 표시한다.
     /// </summary>
     public string DescribeState()
         => RunOnSta(() =>
         {
-            int processes = Process.GetProcessesByName("POWERPNT").Length;
-            if (TryGetActiveInstance() is not { } app) return $"PowerPoint 없음(프로세스 {processes})";
-            var parts = new List<string>();
-            try { parts.Add($"visible={(int)app.Visible == MsoTrue} 프로세스={processes}"); } catch { parts.Add($"프로세스={processes}"); }
+            var processDetails = new List<string>();
+            foreach (var process in Process.GetProcessesByName("POWERPNT"))
+            {
+                using (process)
+                {
+                    try { processDetails.Add($"pid={process.Id},started={process.StartTime.ToUniversalTime():O},hwnd={process.MainWindowHandle}"); }
+                    catch (Exception ex) { processDetails.Add($"pid={process.Id},error={ex.GetBaseException().Message}"); }
+                }
+            }
+            int processes = processDetails.Count;
+            string processState = $"프로세스={processes} [{string.Join("; ", processDetails)}]";
+            if (TryGetActiveInstance() is not { } app) return $"ROT PowerPoint 없음 {processState}";
+            var parts = new List<string> { processState };
+            try
+            {
+                GetWindowThreadProcessId(new IntPtr((int)app.HWND), out int activePid);
+                parts.Add($"rotPid={activePid} visible={(int)app.Visible == MsoTrue}");
+            }
+            catch (Exception ex) { parts.Add($"rotIdentityError={ex.GetBaseException().Message}"); }
             try
             {
                 foreach (dynamic prs in app.Presentations)
@@ -2984,7 +3211,7 @@ public class PptComService : IPptComService
                         bool held;
                         lock (HeldOpen) held = HeldOpen.Contains(path);
                         parts.Add($"{path} 창={windows} ro={(int)prs.ReadOnly == MsoTrue} saved={(int)prs.Saved == MsoTrue}" +
-                                  (windows == 0 ? held ? " held" : " orphan" : ""));
+                                  (windows == 0 ? held ? " held" : Owned.Any(x => ReferenceEquals(x.Presentation, (object)prs)) ? " owned-pending" : " hidden-unowned" : ""));
                     }
                     catch (Exception ex) { parts.Add($"(문서 읽기 실패: {ex.GetBaseException().Message})"); }
                 }

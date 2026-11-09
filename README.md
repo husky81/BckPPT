@@ -205,6 +205,20 @@ BckPPT.exe --request-file C:\Requests\ppt-job.json
 
 현재 앱은 manifest 검증 경계까지 제공하며 무인 다운로드·교체는 활성화하지 않습니다.
 
+## PowerPoint 파일 점유 진단 로그
+
+로그는 `%LOCALAPPDATA%\BckSoft\BckPPT\logs\com-yyyyMMdd.log`에 날짜별로 남습니다. 문제가 생긴 시각과 파일 이름으로 검색한 뒤 `document` ID로 같은 문서의 열기·핸들 해제·저장·닫기·점유 검증을 이어서 확인합니다. 한글 파일 이름은 그대로 기록합니다.
+
+- `run`, `host`, `version`: BckPPT 실행 ID, PID, 버전. `operation`, `caller`: COM 작업 ID와 호출 API. 시간 초과로 호출자가 돌아간 뒤 완료되는 작업도 같은 ID를 유지합니다.
+- `opened-owned`: 도구가 직접 연 문서. `powerpoint`, `powerpointStartedAt`으로 PowerPoint PID 재사용을 구별합니다. `open-reused-unowned`와 `hidden-unowned`는 소유권이 확인되지 않은 문서이며 BckPPT가 남겼다는 뜻이 아닙니다.
+- `lease-acquired` / `lease-released`: 활성 핸들 수. `close-preserved-visible` / `close-preserved-unsaved`: 사용자 창 또는 미저장 변경 때문에 닫지 않은 문서입니다.
+- `close-failed`: 실패 단계(`save`, `close`, `verify-collection` 등), HRESULT, 예외와 스택, 시도 횟수와 경과 시간. `close-pending-retry`는 소유권을 보관하고 다음 정리를 기다리는 상태입니다.
+- `close-complete`는 PowerPoint 문서 목록에서 사라졌다는 뜻입니다. `file-release-verified`는 파일 독점 열기까지 성공했다는 별도 확인입니다. `file-release-unverified`이면 다른 프로세스나 동기화 프로그램이 점유할 수도 있습니다.
+- `file-lock-owners`는 닫기 반복 실패 또는 점유 검증 실패 시 백그라운드에서 조회한 Restart Manager 결과입니다. 프로세스 PID·시작 시각·앱 이름을 기록하며 종료·재시작은 하지 않습니다. 빈 목록이나 조회 실패는 점유 해제의 증거가 아닙니다. 동시에 다른 조회가 실행 중이면 `file-lock-owners-skipped`를 남깁니다.
+- `sta-quarantined` / `sta-recovered`, `com-wait-failed` / `com-end`로 시간 초과와 실제 작업 종료 시각을 구분합니다.
+
+로그에는 파일 경로와 프로세스 정보가 포함됩니다. 문서 본문이나 COM 호출 인수 전체는 추가 기록하지 않습니다. 자동으로 프로세스를 종료하지 않으며, 소유권이 불명확한 문서나 미저장 변경을 버리지 않습니다.
+
 ## 프로젝트 구조
 
 ```text

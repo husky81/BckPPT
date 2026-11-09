@@ -103,24 +103,40 @@ public sealed class AgentWorkflow(
     {
         var session = Session ?? throw new InvalidOperationException("이어갈 작업이 없습니다.");
         var pending = session.Context.PendingCards ?? throw new InvalidOperationException("붙여넣기를 기다리는 카드 작업이 없습니다.");
-        var meterBefore = _meter!.Snapshot();
-        if (session.InPlace) ppt.ClearSelection(session.WorkingPath);
-        int changesBefore = session.Context.Changes.Count;
-        session.Context.Status = progress is null ? null
-            : new Progress<string>(text => progress.Report(new AgentEvent(AgentEventKind.Message, text)));
-        session.Context.LlmFit = LlmFit;
-        var report = await step(new CardPipeline(session.Context), pending);
-        session.Context.PendingCards = null;   // 답을 읽지 못하면 위에서 예외가 나 대기 상태가 유지된다
-        session.Log.Write("cards_applied", new { report = AgentSessionLog.Clip(report) });
+        string outcome = "completed";
+        try
+        {
+            session.HoldToolDocuments(ppt);
+            var meterBefore = _meter!.Snapshot();
+            if (session.InPlace) ppt.ClearSelection(session.WorkingPath);
+            int changesBefore = session.Context.Changes.Count;
+            session.Context.Status = progress is null ? null
+                : new Progress<string>(text => progress.Report(new AgentEvent(AgentEventKind.Message, text)));
+            session.Context.LlmFit = LlmFit;
+            var report = await step(new CardPipeline(session.Context), pending);
+            session.Context.PendingCards = null;   // 답을 읽지 못하면 위에서 예외가 나 대기 상태가 유지된다
+            session.Log.Write("cards_applied", new { report = AgentSessionLog.Clip(report) });
 
-        var issues = new List<BckPPT.PowerPoint.LintIssue>();
-        foreach (var slide in session.Context.Origins.Touched)
-            issues.AddRange(await Agent.Tools.PptAgentTools.LintAsync(session.Context, slide, null, ct));
-        var usage = UsageMeter.Delta(meterBefore, _meter.Snapshot());
-        var run = new AgentRunResult(AgentStopReason.Finished, report, 0,
-            usage.Values.Aggregate(LlmUsage.Zero, (a, v) => a + v.Usage), issues);
-        var (before, after, slides) = await RenderAsync(session, ct);
-        return new AgentTurnResult(run, before, after, session.Context.Changes.Skip(changesBefore).ToList(), usage) { AfterSlides = slides };
+            var issues = new List<BckPPT.PowerPoint.LintIssue>();
+            foreach (var slide in session.Context.Origins.Touched)
+                issues.AddRange(await Agent.Tools.PptAgentTools.LintAsync(session.Context, slide, null, ct));
+            var usage = UsageMeter.Delta(meterBefore, _meter.Snapshot());
+            var run = new AgentRunResult(AgentStopReason.Finished, report, 0,
+                usage.Values.Aggregate(LlmUsage.Zero, (a, v) => a + v.Usage), issues);
+            var (before, after, slides) = await RenderAsync(session, ct);
+            return new AgentTurnResult(run, before, after, session.Context.Changes.Skip(changesBefore).ToList(), usage) { AfterSlides = slides };
+        }
+        catch (Exception ex)
+        {
+            outcome = ex is OperationCanceledException ? "cancelled" : "failed";
+            PptDiagnosticLog.Event("session-turn-failed", new { session = session.Id, outcome, error = ex.ToString() });
+            throw;
+        }
+        finally
+        {
+            PptDiagnosticLog.Event("session-turn-end", new { session = session.Id, outcome, source = session.SourcePath, working = session.WorkingPath });
+            session.ReleaseToolDocuments();
+        }
     }
 
     private async Task<(IReadOnlyList<string> Before, IReadOnlyList<string> After, IReadOnlyList<int> Slides)> RenderAsync(AgentSession session, CancellationToken ct)
@@ -220,38 +236,54 @@ public sealed class AgentWorkflow(
             Session = AgentFactory.StartSession(_metered, options, ppt, sourcePath, inPlace: inPlace);
             Session.Context.Meter = _meter;
         }
-        var meterBefore = _meter!.Snapshot();
-        // 바로 작업에서 앞서 사용자 조작으로 멈췄다면 그 선택이 남아 있다. 이번 요청은 선택을 풀고 시작한다.
-        if (Session.InPlace) ppt.ClearSelection(Session.WorkingPath);
-        Session.Context.Status = progress is null ? null
-            : new Progress<string>(text => progress.Report(new AgentEvent(AgentEventKind.Message, text)));
-
-        Session.Context.ExternalWriter = ExternalWriting;
-        Session.Context.LlmFit = LlmFit;
-        Session.Context.PendingCards = null;   // 새 요청이 오면 붙여넣기 대기는 취소한다
-
-        // 요청에 원문 파일·폴더 경로를 적으면 첨부한다. 버튼을 쓰지 않고 경로를 적어 "도구가 없다"로 끝난 일이 있었다.
-        var mentioned = MentionedSourcePaths(instruction)
-            .Where(p => !_attached.Contains(Path.GetFullPath(p), StringComparer.OrdinalIgnoreCase)).ToList();
-        if (mentioned.Count > 0)
+        string outcome = "completed";
+        try
         {
-            Session.Context.Status?.Report($"요청에 적힌 경로의 원문을 첨부하는 중: {string.Join(", ", mentioned.Select(Path.GetFileName))}");
-            var (files, pages) = await AttachAsync(mentioned, ct);
-            Session.Context.Status?.Report($"원문 {files}개 · {pages}쪽 첨부");
+            Session.HoldToolDocuments(ppt);
+            var meterBefore = _meter!.Snapshot();
+            // 바로 작업에서 앞서 사용자 조작으로 멈췄다면 그 선택이 남아 있다. 이번 요청은 선택을 풀고 시작한다.
+            if (Session.InPlace) ppt.ClearSelection(Session.WorkingPath);
+            Session.Context.Status = progress is null ? null
+                : new Progress<string>(text => progress.Report(new AgentEvent(AgentEventKind.Message, text)));
+
+            Session.Context.ExternalWriter = ExternalWriting;
+            Session.Context.LlmFit = LlmFit;
+            Session.Context.PendingCards = null;   // 새 요청이 오면 붙여넣기 대기는 취소한다
+
+            // 요청에 원문 파일·폴더 경로를 적으면 첨부한다. 버튼을 쓰지 않고 경로를 적어 "도구가 없다"로 끝난 일이 있었다.
+            var mentioned = MentionedSourcePaths(instruction)
+                .Where(p => !_attached.Contains(Path.GetFullPath(p), StringComparer.OrdinalIgnoreCase)).ToList();
+            if (mentioned.Count > 0)
+            {
+                Session.Context.Status?.Report($"요청에 적힌 경로의 원문을 첨부하는 중: {string.Join(", ", mentioned.Select(Path.GetFileName))}");
+                var (files, pages) = await AttachAsync(mentioned, ct);
+                Session.Context.Status?.Report($"원문 {files}개 · {pages}쪽 첨부");
+            }
+            bool hasSources = _attached.Count > 0;
+            var scoped = hasSources ? library.WithScope(_attached) : null;
+            Session.Context.Sources = scoped;
+            var request = scoped is null
+                ? instruction
+                : $"{instruction}\n\n(첨부 원문: {string.Join(", ", scoped.Documents().Select(d => $"{d.Alias}={d.Name}"))})";
+
+            int changesBefore = Session.Context.Changes.Count;
+            var run = await AgentFactory.CreateLoop(_metered!, options, hasSources, LoopOptions).RunAsync(Session, request, progress, ct);
+
+            var (before, after, slides) = await RenderAsync(Session, ct);
+            return new AgentTurnResult(run, before, after, Session.Context.Changes.Skip(changesBefore).ToList(),
+                UsageMeter.Delta(meterBefore, _meter.Snapshot())) { AfterSlides = slides };
         }
-        bool hasSources = _attached.Count > 0;
-        var scoped = hasSources ? library.WithScope(_attached) : null;
-        Session.Context.Sources = scoped;
-        var request = scoped is null
-            ? instruction
-            : $"{instruction}\n\n(첨부 원문: {string.Join(", ", scoped.Documents().Select(d => $"{d.Alias}={d.Name}"))})";
-
-        int changesBefore = Session.Context.Changes.Count;
-        var run = await AgentFactory.CreateLoop(_metered!, options, hasSources, LoopOptions).RunAsync(Session, request, progress, ct);
-
-        var (before, after, slides) = await RenderAsync(Session, ct);
-        return new AgentTurnResult(run, before, after, Session.Context.Changes.Skip(changesBefore).ToList(),
-            UsageMeter.Delta(meterBefore, _meter.Snapshot())) { AfterSlides = slides };
+        catch (Exception ex)
+        {
+            outcome = ex is OperationCanceledException ? "cancelled" : "failed";
+            PptDiagnosticLog.Event("session-turn-failed", new { session = Session.Id, outcome, error = ex.ToString() });
+            throw;
+        }
+        finally
+        {
+            PptDiagnosticLog.Event("session-turn-end", new { session = Session.Id, outcome, source = Session.SourcePath, working = Session.WorkingPath });
+            Session.ReleaseToolDocuments();
+        }
     }
 
     /// <summary>작업 사본을 원본 옆 결과 파일로 남기고 세션을 끝낸다. 결과 파일 경로를 돌려준다.</summary>

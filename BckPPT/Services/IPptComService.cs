@@ -1,4 +1,4 @@
-using BckPPT.Models;
+﻿using BckPPT.Models;
 
 namespace BckPPT.Services;
 
@@ -47,7 +47,7 @@ public interface IPptComService
     IDisposable WatchUserActivity(string presentationPath);
     /// <summary>창의 선택을 푼다. 바로 작업에서 요청을 시작할 때, 앞서 멈춘 뒤 남은 선택으로 다시 멈추지 않게 한다.</summary>
     void ClearSelection(string presentationPath);
-    /// <summary>끊긴 세션이 창 없이 남긴 문서(작업 폴더의 사본, alsoPaths)를 저장하지 않고 닫는다. 닫은 파일 이름을 돌려준다.</summary>
+    /// <summary>소유권이 확인된 숨은 문서 중 사용 중이 아닌 작업 폴더·alsoPaths 대상을 정리한다. 미저장 변경은 보존하며 닫은 파일 이름을 돌려준다.</summary>
     IReadOnlyList<string> CloseOrphanedPresentations(string workDirectory, IEnumerable<string> alsoPaths);
 
     /// <summary>한 쪽의 글꼴을 글자 묶음(run) 단위로 읽는다(도형 측정 없음). 쪽마다 따로 불러 COM 시간 제한을 넘지 않게 한다.</summary>
