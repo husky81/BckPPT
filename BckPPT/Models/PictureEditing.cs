@@ -43,6 +43,11 @@ public record PictureRequest(
     public PictureZ Z { get; init; }
     public PictureBorder? Border { get; init; }
     public bool Shadow { get; init; }
+    /// <summary>출처(URL·문서명)·이용 조건. 태그로 남겨 export_picture_credits가 읽는다.</summary>
+    public string? Credit { get; init; }
+    public string? License { get; init; }
+    /// <summary>태그에 적을 원본 경로. 비우면 ImagePath(압축본처럼 임시 파일을 넣을 때 원래 원본을 남긴다).</summary>
+    public string? RecordedSource { get; init; }
 }
 
 /// <summary>이미 넣은 그림의 자르기 바꾸기. Crop·Focus/Zoom·Reset 중 하나. KeepFrame이면 도형 자리·크기를 그대로 둔다.</summary>
@@ -57,7 +62,51 @@ public record PlacedPicture(string Name, string Address, float Left, float Top, 
 
 /// <summary>목록에 붙는 그림 정보. FullWidth/Height는 자르기 전 그림 전체가 지금 배율로 차지하는 크기(pt).
 /// SourcePath는 BckPPT가 넣을 때 태그에 적어 둔 원본 파일(또는 대체 텍스트에 남은 파일 이름).</summary>
-public record PictureInfo(CropFractions Crop, float FullWidth, float FullHeight, int? PixelWidth = null, int? PixelHeight = null, string? SourcePath = null);
+public record PictureInfo(CropFractions Crop, float FullWidth, float FullHeight, int? PixelWidth = null, int? PixelHeight = null, string? SourcePath = null)
+{
+    /// <summary>BckPPT가 넣을(또는 마지막으로 고칠) 때의 자리·자르기. 태그가 없으면 null.</summary>
+    public PlacedState? Placed { get; init; }
+    public string? Credit { get; init; }
+    public string? License { get; init; }
+}
+
+/// <summary>BckPPT가 마지막으로 정한 그림 자리·자르기. 지금 값과 다르면 사용자가 손댄 것이다.</summary>
+public record PlacedState(BoxF Box, CropFractions Crop)
+{
+    private static readonly System.Globalization.CultureInfo Inv = System.Globalization.CultureInfo.InvariantCulture;
+
+    /// <summary>「l,t,w,h;L,T,R,B」</summary>
+    public string Format() => string.Join(",", new[] { Box.Left, Box.Top, Box.Width, Box.Height }.Select(v => v.ToString("0.##", Inv))) + ";" +
+                              string.Join(",", new[] { Crop.Left, Crop.Top, Crop.Right, Crop.Bottom }.Select(v => v.ToString("0.####", Inv)));
+
+    public static PlacedState? Parse(string? text)
+    {
+        var parts = text?.Split(';');
+        if (parts is not { Length: 2 }) return null;
+        static float[]? Nums(string s)
+        {
+            var v = s.Split(',');
+            if (v.Length != 4) return null;
+            var r = new float[4];
+            for (int i = 0; i < 4; i++)
+                if (!float.TryParse(v[i], System.Globalization.NumberStyles.Float, Inv, out r[i])) return null;
+            return r;
+        }
+        if (Nums(parts[0]) is not { } b || Nums(parts[1]) is not { } c) return null;
+        return new PlacedState(new BoxF(b[0], b[1], b[2], b[3]), new CropFractions(c[0], c[1], c[2], c[3]));
+    }
+
+    /// <summary>지금 자리·자르기와 다른 점(없으면 null). 자리는 0.75pt, 자르기는 0.5%까지 같다고 본다.</summary>
+    public string? Differences(BoxF now, CropFractions crop)
+    {
+        var diffs = new List<string>();
+        if (Math.Abs(now.Left - Box.Left) > 0.75f || Math.Abs(now.Top - Box.Top) > 0.75f) diffs.Add("자리");
+        if (Math.Abs(now.Width - Box.Width) > 0.75f || Math.Abs(now.Height - Box.Height) > 0.75f) diffs.Add("크기");
+        if (Math.Abs(crop.Left - Crop.Left) > 0.005f || Math.Abs(crop.Top - Crop.Top) > 0.005f ||
+            Math.Abs(crop.Right - Crop.Right) > 0.005f || Math.Abs(crop.Bottom - Crop.Bottom) > 0.005f) diffs.Add("자르기");
+        return diffs.Count == 0 ? null : string.Join("·", diffs);
+    }
+}
 
 /// <summary>그림 맞추기 계산. PowerPoint 없이 시험할 수 있게 COM과 떼어 둔다.</summary>
 public static class PictureFitter
@@ -161,6 +210,47 @@ public static class PictureFitter
         return (shape, crop);
     }
 
+    /// <summary>실제 인쇄 해상도(dpi): 원본 픽셀 ÷ 자르기 전 그림 전체 너비(inch). 자르면 남은 부분이 같은 너비로 늘어나니 낮아진다.</summary>
+    public static float EffectiveDpi(int pixelWidth, float shapeWidth, CropFractions crop)
+    {
+        float keep = 1 - crop.Left - crop.Right;
+        if (pixelWidth <= 0 || shapeWidth <= 0 || keep <= 0) return 0;
+        return pixelWidth / (shapeWidth / keep / 72f);
+    }
+
+    public const float LowDpi = 150;
+
+    /// <summary>남길 영역 {x0,y0,x1,y1}(원본 기준 0~1)을 잘라 낼 비율로.</summary>
+    public static CropFractions FromKeep(float x0, float y0, float x1, float y1) => new(x0, y0, 1 - x1, 1 - y1);
+
+    /// <summary>
+    /// 기준 도형 안 모서리에 붙일 자리. size는 기준 너비 대비 너비, 높이는 aspect(가로/세로)로 정한다. margin은 기준 도형 안쪽 여백(pt).
+    /// </summary>
+    public static BoxF Anchor(BoxF reference, string corner, float size, float margin, float aspect)
+    {
+        if (size is <= 0 or > 1) throw new ArgumentException("anchor.size는 0보다 크고 1 이하입니다(기준 도형 너비 대비).");
+        if (aspect <= 0) throw new ArgumentException("그림 비율을 알 수 없습니다.");
+        float w = reference.Width * size, h = w / aspect;
+        float maxH = reference.Height - 2 * margin;
+        if (h > maxH && maxH > 1) { h = maxH; w = h * aspect; }
+        float left = reference.Left + margin, top = reference.Top + margin;
+        float right = reference.Left + reference.Width - margin - w, bottom = reference.Top + reference.Height - margin - h;
+        float cx = reference.Left + (reference.Width - w) / 2, cy = reference.Top + (reference.Height - h) / 2;
+        return corner.Trim().ToLowerInvariant() switch
+        {
+            "top-left" => new BoxF(left, top, w, h),
+            "top-right" => new BoxF(right, top, w, h),
+            "bottom-left" => new BoxF(left, bottom, w, h),
+            "bottom-right" => new BoxF(right, bottom, w, h),
+            "center" => new BoxF(cx, cy, w, h),
+            "top" => new BoxF(cx, top, w, h),
+            "bottom" => new BoxF(cx, bottom, w, h),
+            "left" => new BoxF(left, cy, w, h),
+            "right" => new BoxF(right, cy, w, h),
+            _ => throw new ArgumentException("anchor.corner는 top-left·top-right·bottom-left·bottom-right·center·top·bottom·left·right 중 하나입니다."),
+        };
+    }
+
     /// <summary>칸을 rows×columns 격자로 나눈다(왼쪽 위부터 줄 단위). 사이 간격 gap.</summary>
     public static IReadOnlyList<BoxF> Grid(BoxF box, int rows, int columns, float gap)
     {
@@ -205,3 +295,6 @@ public static class PictureFitter
         return (pw, ph, pw * (crop.Right - crop.Left) / 2, ph * (crop.Bottom - crop.Top) / 2);
     }
 }
+
+/// <summary>렌더한 쪽 PNG와 쪽 크기(pt).</summary>
+public record RenderedSlide(string PngPath, float SlideWidth, float SlideHeight);

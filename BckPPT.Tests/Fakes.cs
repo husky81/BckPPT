@@ -54,9 +54,11 @@ public sealed class FakeShape(string name, float left, float top, float width, f
     public object? Spec { get; set; }
     /// <summary>그림이면 원본 기준 자른 비율(그림이 아니면 null).</summary>
     public CropFractions? PictureCrop { get; set; }
+    /// <summary>BckPPT가 넣을 때 자리·자르기(태그 흉내).</summary>
+    public PlacedState? Placed { get; set; }
 
     public FakeShape Clone() => new(Name, Left, Top, Width, Height, CharsPerLine, Paragraphs.ToArray())
-        { Format = Format, Id = Id, Group = Group, Spec = Spec, PictureCrop = PictureCrop };
+        { Format = Format, Id = Id, Group = Group, Spec = Spec, PictureCrop = PictureCrop, Placed = Placed };
 
     /// <summary>글자 수로 자동 줄바꿈을 흉내 낸다. \v는 Shift+Enter, 문단 끝은 Enter.</summary>
     public IReadOnlyList<TextLineInfo> Lines()
@@ -161,7 +163,10 @@ public sealed class FakePptComService : IPptComService
 
     /// <summary>그림 도형 정보. 원본은 400×300(4:3)으로 보고 지금 배율의 전체 크기를 자른 비율에서 되짚는다.</summary>
     private static PictureInfo FakePicture(FakeShape s, CropFractions c) =>
-        new(c, s.Width / (1 - c.Left - c.Right), s.Height / (1 - c.Top - c.Bottom), 400, 300, (s.Spec as PictureRequest)?.ImagePath);
+        new(c, s.Width / (1 - c.Left - c.Right), s.Height / (1 - c.Top - c.Bottom), 400, 300, (s.Spec as PictureRequest)?.ImagePath)
+        {
+            Placed = s.Placed, Credit = (s.Spec as PictureRequest)?.Credit, License = (s.Spec as PictureRequest)?.License,
+        };
 
     public TextFormatInfo GetTextFormat(string presentationPath, int slideIndex, string address) =>
         Read(presentationPath, slideIndex).First(s => s.Is(address)).Format;
@@ -246,7 +251,37 @@ public sealed class FakePptComService : IPptComService
         return name;
     }
 
-    public Task<string?> GetSlideThumbnailAsync(string presentationPath, int slideIndex) => Task.FromResult<string?>(null);
+    /// <summary>true면 렌더가 쪽마다 회색 PNG를 만든다(축소판 시험용).</summary>
+    public bool RenderPng { get; set; }
+    public Task<string?> GetSlideThumbnailAsync(string presentationPath, int slideIndex) =>
+        Task.FromResult<string?>(RenderPng ? WritePng(960, 540) : null);
+
+    private static string WritePng(int w, int h)
+    {
+        var file = Path.Combine(Path.GetTempPath(), $"bckppt-fake-{Guid.NewGuid():N}.png");
+        using var bmp = new System.Drawing.Bitmap(w, h);
+        using (var g = System.Drawing.Graphics.FromImage(bmp)) g.Clear(System.Drawing.Color.Gray);
+        bmp.Save(file, System.Drawing.Imaging.ImageFormat.Png);
+        return file;
+    }
+
+    /// <summary>쪽 크기 720×405pt로 보고 pt당 픽셀만큼 렌더한다.</summary>
+    public Task<RenderedSlide?> RenderSlideAsync(string presentationPath, int slideIndex, float pixelsPerPoint) =>
+        Task.FromResult<RenderedSlide?>(new RenderedSlide(WritePng((int)(720 * pixelsPerPoint), (int)(405 * pixelsPerPoint)), 720, 405));
+
+    public Dictionary<int, List<string>> Notes { get; } = new();
+    public void SetNotesParagraph(string presentationPath, int slideIndex, string marker, string text)
+    {
+        ThrowIfEditing();
+        var list = Notes.TryGetValue(slideIndex, out var l) ? l : Notes[slideIndex] = new();
+        int at = list.FindIndex(p => p.StartsWith(marker, StringComparison.Ordinal));
+        if (text.Length == 0) { if (at >= 0) list.RemoveAt(at); }
+        else if (at >= 0) list[at] = text;
+        else list.Add(text);
+    }
+
+    public List<OpenPresentationInfo> Windowless { get; } = new();
+    public IReadOnlyList<OpenPresentationInfo> ListWindowlessPresentations() => Windowless;
 
     public List<string> Orphans { get; } = new();
     public IReadOnlyList<string> CloseOrphanedPresentations(string workDirectory, IEnumerable<string> alsoPaths)
@@ -270,6 +305,13 @@ public sealed class FakePptComService : IPptComService
     public OpenPresentationResult OpenAndWait(string filePath, bool unblock, TimeSpan timeout, CancellationToken cancellationToken = default)
     {
         Calls.Add($"open {Path.GetFileName(filePath)} unblock={unblock}");
+        if (Windowless.FirstOrDefault(w => string.Equals(w.Path, filePath, StringComparison.OrdinalIgnoreCase)) is { } hidden)
+        {
+            Windowless.Remove(hidden);
+            OpenWindows.Add(hidden);
+            OpenInWindow = true;
+            return new OpenPresentationResult(OpenedState.Editable, false, false, TimeSpan.Zero, hidden.SlideCount);
+        }
         bool unblocked = unblock && DownloadMark;
         if (unblock) { DownloadMark = false; ProtectedViews.RemoveAll(v => v.Path == filePath); if (OpenState == OpenedState.ProtectedView) OpenState = OpenedState.Editable; }
         return new OpenPresentationResult(OpenState, DownloadMark || unblocked, unblocked, TimeSpan.FromSeconds(1), Slides.Count);
@@ -279,7 +321,7 @@ public sealed class FakePptComService : IPptComService
 
     /// <summary>그림 도형: 넣은 요청을 Spec에 두고 Picture 정보를 붙인다(원본 4:3 가정).</summary>
     public IReadOnlyList<PlacedPicture> PlacePictures(string presentationPath, int slideIndex, IReadOnlyList<PictureRequest> requests,
-        string? replaceAddress = null, bool keepReplacedName = false)
+        string? replaceAddress = null, bool keepReplacedName = false, IReadOnlyCollection<string>? deleteAlso = null)
     {
         ThrowIfEditing();
         var list = Slide(slideIndex);
@@ -292,12 +334,18 @@ public sealed class FakePptComService : IPptComService
             oldName = old.Name;
             list.Remove(old);
         }
+        foreach (var a in deleteAlso ?? [])
+        {
+            var x = Shape(slideIndex, a);
+            if (list.IndexOf(x) < at) at--;
+            list.Remove(x);
+        }
         var placed = new List<PlacedPicture>();
         foreach (var r in requests)
         {
             var (box, crop) = PictureFitter.Place(r, 400, 300);
             string name = r.Name ?? (keepReplacedName && requests.Count == 1 && oldName.Length > 0 ? oldName : $"Picture {list.Count + 1}");
-            var shape = new FakeShape(name, box.Left, box.Top, box.Width, box.Height, 100) { Spec = r, PictureCrop = crop };
+            var shape = new FakeShape(name, box.Left, box.Top, box.Width, box.Height, 100) { Spec = r, PictureCrop = crop, Placed = new PlacedState(box, crop) };
             list.Insert(at++, shape);
             Calls.Add($"picture {Path.GetFileName(r.ImagePath)} {box.Left:0.##},{box.Top:0.##} {box.Width:0.##}x{box.Height:0.##}");
             placed.Add(new PlacedPicture(name, name, box.Left, box.Top, box.Width, box.Height, crop, 400, 300));
@@ -311,6 +359,7 @@ public sealed class FakePptComService : IPptComService
         var info = FakePicture(s, s.PictureCrop ?? throw new InvalidOperationException("그림이 아닙니다."));
         var (box, crop) = PictureFitter.Recrop(new BoxF(s.Left, s.Top, s.Width, s.Height), info.FullWidth, info.FullHeight, info.Crop, request);
         (s.Left, s.Top, s.Width, s.Height, s.PictureCrop) = (box.Left, box.Top, box.Width, box.Height, crop);
+        s.Placed = new PlacedState(box, crop);
         Calls.Add($"crop {s.Name} {crop}");
         return new PlacedPicture(s.Name, s.Name, box.Left, box.Top, box.Width, box.Height, crop);
     }
@@ -320,7 +369,11 @@ public sealed class FakePptComService : IPptComService
         var s = Shape(slideIndex, address);
         var info = FakePicture(s, s.PictureCrop ?? throw new InvalidOperationException("그림이 아닙니다."));
         using var bmp = new System.Drawing.Bitmap(400, 300);
-        using (var g = System.Drawing.Graphics.FromImage(bmp)) g.Clear(System.Drawing.Color.SteelBlue);
+        // 잡음 그림: 실제 사진처럼 PNG가 커서 줄이기(compress_pictures) 시험이 된다.
+        var random = new Random(7);
+        for (int y = 0; y < 300; y++)
+            for (int x = 0; x < 400; x++)
+                bmp.SetPixel(x, y, System.Drawing.Color.FromArgb(random.Next(256), random.Next(256), random.Next(256)));
         using var ms = new MemoryStream();
         bmp.Save(ms, System.Drawing.Imaging.ImageFormat.Png);
         return new PictureSource(ms.ToArray(), "원본 파일", info.SourcePath, info, new BoxF(s.Left, s.Top, s.Width, s.Height));

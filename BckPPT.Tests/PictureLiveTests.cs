@@ -151,6 +151,57 @@ public sealed class PictureLiveTests
                 await Call("list_shapes", new JsonObject { ["slide"] = 2, ["type"] = "picture" });
             }
 
+            // ── 2026-11-17c: 칸 통째로 바꾸기·사용자 수정 알아보기·계획·inset 기준·출처·크기·영역 렌더 ──
+            Assert.True(Ok(await Call("set_geometry", new JsonObject { ["slide"] = 1, ["shape"] = "AS-IS 1", ["width"] = 120 })));   // 「사용자」가 줄임
+            await Call("list_shapes", new JsonObject { ["slide"] = 1, ["type"] = "picture", ["in_box"] = "AS-IS 칸" });
+            Assert.False(Ok(await Call("replace_pictures_in_box", new JsonObject
+            {
+                ["slide"] = 1, ["paths"] = new JsonArray(Path.Combine(dir, "small43.png")), ["box"] = "AS-IS 칸",
+            })));
+            Assert.True(Ok(await Call("replace_pictures_in_box", new JsonObject
+            {
+                ["slide"] = 1, ["paths"] = new JsonArray(Path.Combine(dir, "small43.png")), ["box"] = "AS-IS 칸", ["skip_user_modified"] = true,
+            })));
+            Assert.True(Ok(await Call("replace_pictures_in_box", new JsonObject
+            {
+                ["slide"] = 1, ["paths"] = new JsonArray(Path.Combine(dir, "big43.png"), Path.Combine(dir, "tall.png")), ["box"] = "AS-IS 칸", ["force"] = true,
+                ["keeps"] = new JsonArray(new JsonObject { ["x0"] = 0.4, ["y0"] = 0.3, ["x1"] = 0.9, ["y1"] = 0.7 }), ["source"] = "시험 촬영", ["license"] = "자체",
+            })));
+            Assert.True(Ok(await Call("add_picture", new JsonObject
+            {
+                ["slide"] = 1, ["path"] = Path.Combine(dir, "small43.png"), ["name"] = "기준 inset",
+                ["anchor"] = new JsonObject { ["shape"] = "큰 사진 cover", ["corner"] = "bottom-right", ["size"] = 0.3, ["margin"] = 3 },
+                ["border"] = new JsonObject { ["color"] = "#FFFFFF", ["width"] = 1.5 }, ["shadow"] = true, ["source"] = "https://example.org/inset",
+            })));
+            var planFile = Path.Combine(dir, "plan-live.txt");
+            await File.WriteAllLinesAsync(planFile, [
+                "# 시험 계획",
+                "2|오른쪽|big43.png@focus=0.5,0.5,1.5;small43.png@keep=0,0,0.5,1",
+                "2|아래|tall.png",
+                "9|오른쪽|big43.png",
+            ]);
+            var cells = new JsonObject
+            {
+                ["오른쪽"] = new JsonObject { ["left"] = 480, ["top"] = 120, ["width"] = 420, ["height"] = 300 },
+                ["아래"] = new JsonObject { ["left"] = 40, ["top"] = 430, ["width"] = 300, ["height"] = 90 },
+            };
+            Assert.True(Ok(await Call("apply_picture_plan", new JsonObject { ["plan_path"] = planFile, ["cells"] = cells.DeepClone(), ["dry_run"] = true })));
+            Assert.True(Ok(await Call("apply_picture_plan", new JsonObject { ["plan_path"] = planFile, ["cells"] = cells.DeepClone() })));
+            Assert.True(Ok(await Call("render_region", new JsonObject { ["slide"] = 1, ["shape"] = "AS-IS 칸" })));
+            Assert.True(Ok(await Call("image_sheet", new JsonObject
+            {
+                ["paths"] = new JsonArray(Path.Combine(dir, "big43.png"), Path.Combine(dir, "small43.png"), Path.Combine(dir, "tall.png")),
+            })));
+            Assert.True(Ok(await Call("export_picture_credits", new JsonObject { ["write_notes"] = true })));
+            await Call("list_shapes", new JsonObject { ["slide"] = 1, ["type"] = "picture" });
+            Assert.True(Ok(await Call("document_size", new JsonObject { ["top"] = 8 })));
+            Assert.True(Ok(await Call("compress_pictures", new JsonObject { ["dpi"] = 150 })));
+            Assert.True(Ok(await Call("compress_pictures", new JsonObject { ["dpi"] = 150, ["confirm"] = true })));
+            Assert.True(Ok(await Call("document_size", new JsonObject { ["top"] = 8 })));
+            Assert.True(Ok(await Call("render_slides", new JsonObject { ["slides"] = new JsonArray(1, 2) })));
+            // 창 없이 남은 문서(지난 시험 사본 등) 목록 — 읽기만 한다.
+            log.AppendLine("창 없는 문서: " + string.Join(", ", ppt.ListWindowlessPresentations().Select(o => o.Name)));
+
             if (Environment.GetEnvironmentVariable("BCKPPT_LIVE_PROTECTED") == "1")
             {
                 var pv = Path.Combine(dir, "live-protected.pptx");

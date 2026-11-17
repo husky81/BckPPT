@@ -2259,6 +2259,114 @@ public class PptComService : IPptComService
     private const int MsoPicture = 13, MsoLinkedPicture = 11, MsoPlaceholder = 14;
     /// <summary>BckPPT가 넣은 그림의 원본 파일 경로를 적는 태그.</summary>
     private const string SourceTag = "BCKPPT_SOURCE";
+    /// <summary>BckPPT가 마지막으로 정한 자리·자르기(「l,t,w,h;L,T,R,B」). 지금 값과 다르면 사용자가 손댄 그림이다.</summary>
+    private const string PlacedTag = "BCKPPT_PLACED";
+    private const string CreditTag = "BCKPPT_CREDIT", LicenseTag = "BCKPPT_LICENSE";
+
+    private static void RecordPlaced(dynamic pic)
+    {
+        try
+        {
+            PictureInfo? info = ReadPictureInfo(pic);
+            var state = new PlacedState(new BoxF((float)pic.Left, (float)pic.Top, (float)pic.Width, (float)pic.Height), info?.Crop ?? CropFractions.None);
+            pic.Tags.Add(PlacedTag, state.Format());
+        }
+        catch { }
+    }
+
+    /// <summary>테두리·그림자를 옮긴다.</summary>
+    private static void CopyLook(dynamic from, dynamic to)
+    {
+        try
+        {
+            if ((int)from.Line.Visible == MsoTrue)
+            {
+                to.Line.Visible = MsoTrue;
+                to.Line.ForeColor.RGB = (int)from.Line.ForeColor.RGB;
+                to.Line.Weight = (float)from.Line.Weight;
+            }
+        }
+        catch { }
+        try
+        {
+            if ((int)from.Shadow.Visible == MsoTrue)
+            {
+                dynamic a = from.Shadow, b = to.Shadow;
+                b.Visible = MsoTrue;
+                try { b.Style = (int)a.Style; } catch { }
+                b.ForeColor.RGB = (int)a.ForeColor.RGB;
+                b.Transparency = (float)a.Transparency;
+                b.Blur = (float)a.Blur;
+                b.OffsetX = (float)a.OffsetX;
+                b.OffsetY = (float)a.OffsetY;
+            }
+        }
+        catch { }
+    }
+
+    public IReadOnlyList<OpenPresentationInfo> ListWindowlessPresentations()
+        => RunOnSta(() =>
+        {
+            var list = new List<OpenPresentationInfo>();
+            if (TryGetActiveInstance() is not { } app) return (IReadOnlyList<OpenPresentationInfo>)list;
+            foreach (dynamic prs in app.Presentations)
+            {
+                try
+                {
+                    if ((int)prs.Windows.Count > 0) continue;
+                    object instance = prs;
+                    if (Owned.Exists(x => ReferenceEquals(x.Presentation, instance))) continue;   // BckPPT가 작업용으로 연 것
+                    string full = (string)prs.FullName;
+                    if (((string)prs.Path).Length == 0) continue;
+                    bool readOnly = false;
+                    try { readOnly = (int)prs.ReadOnly == MsoTrue; } catch { }
+                    list.Add(new OpenPresentationInfo((string)prs.Name, full, (int)prs.Slides.Count, false, true, readOnly));
+                }
+                catch { }
+            }
+            return (IReadOnlyList<OpenPresentationInfo>)list;
+        });
+
+    public Task<RenderedSlide?> RenderSlideAsync(string presentationPath, int slideIndex, float pixelsPerPoint)
+        => Task.Run(() => RunOnSta(() =>
+        {
+            dynamic pptApp = GetOrCreateInstance();
+            dynamic? existing = FindOpenPresentation(pptApp, presentationPath);
+            bool ownedByUs = existing is null;
+            dynamic prs = existing ?? OpenOwned(pptApp, presentationPath, MsoTrue, MsoFalse, MsoFalse);
+            try
+            {
+                float w = (float)prs.PageSetup.SlideWidth, h = (float)prs.PageSetup.SlideHeight;
+                string file = Path.Combine(Path.GetTempPath(), $"bckppt_region_{slideIndex}_{Guid.NewGuid():N}.png");
+                // 너무 크면 PowerPoint가 거절한다. 긴 변 8000px까지.
+                float k = Math.Min(pixelsPerPoint, 8000f / Math.Max(w, h));
+                prs.Slides[slideIndex].Export(file, "PNG", (int)Math.Round(w * k), (int)Math.Round(h * k));
+                return (RenderedSlide?)new RenderedSlide(file, w, h);
+            }
+            catch { return (RenderedSlide?)null; }
+            finally { if (ownedByUs) SafeClose(prs); }
+        }));
+
+    public void SetNotesParagraph(string presentationPath, int slideIndex, string marker, string text)
+        => OnSlide(presentationPath, slideIndex, save: true, slide =>
+        {
+            dynamic? body = null;
+            foreach (dynamic sh in slide.NotesPage.Shapes)
+            {
+                try { if ((int)sh.PlaceholderFormat.Type == 2) { body = sh; break; } } catch { }   // ppPlaceholderBody
+            }
+            if (body is null) throw new InvalidOperationException($"{slideIndex}쪽에 발표자 메모 칸이 없습니다.");
+            dynamic tr = body.TextFrame.TextRange;
+            string all = (string)tr.Text;
+            var paragraphs = all.Length == 0 ? new List<string>() : all.Split('\r').ToList();
+            int at = paragraphs.FindIndex(p => p.StartsWith(marker, StringComparison.Ordinal));
+            if (text.Length == 0) { if (at >= 0) paragraphs.RemoveAt(at); }
+            else if (at >= 0) paragraphs[at] = text;
+            else paragraphs.Add(text);
+            string next = string.Join("\r", paragraphs.Where((p, i) => p.Length > 0 || i < paragraphs.Count - 1));
+            if (next != all) tr.Text = next;
+            return true;
+        });
 
     /// <summary>작은 그림을 큰 그림 위에 올릴 때 떠 보이게 하는 바깥 그림자.</summary>
     private static void ApplyShadow(dynamic pic)
@@ -2286,6 +2394,7 @@ public class PptComService : IPptComService
             pic.LockAspectRatio = MsoFalse;
             ApplyCrop(pic, box, crop);
             pic.LockAspectRatio = lockAspect;
+            RecordPlaced(pic);
             string name = (string)pic.Name;
             int id = (int)pic.Id;
             List<(dynamic Shape, IReadOnlyList<string> Path)> flat = FlattenShapesWithPath(slide.Shapes);
@@ -2351,7 +2460,7 @@ public class PptComService : IPptComService
     }
 
     public IReadOnlyList<PlacedPicture> PlacePictures(string presentationPath, int slideIndex, IReadOnlyList<PictureRequest> requests,
-        string? replaceAddress = null, bool keepReplacedName = false)
+        string? replaceAddress = null, bool keepReplacedName = false, IReadOnlyCollection<string>? deleteAlso = null)
     {
         // 파일 확인과 픽셀 읽기는 COM 밖에서 한다.
         var files = requests.Select(r =>
@@ -2367,6 +2476,9 @@ public class PptComService : IPptComService
         {
             dynamic? old = replaceAddress is null ? null : RequireShape(slide, slideIndex, replaceAddress);
             string oldName = old is null ? "" : (string)old.Name;
+            // 같이 지울 도형은 넣기 전에 모두 찾아 둔다(주소가 이름이면 새 그림과 헷갈릴 수 있다).
+            var extra = new List<dynamic>();
+            foreach (var a in deleteAlso ?? []) if (a != replaceAddress) extra.Add(RequireShape(slide, slideIndex, a));
             // 그룹 안 도형이면 그룹 자리(최상위 Z순서)에 넣는다.
             dynamic? anchor = old;
             if (old is not null) try { anchor = old.ParentGroup; } catch { }
@@ -2386,8 +2498,13 @@ public class PptComService : IPptComService
                 pic.LockAspectRatio = MsoTrue;
                 string? name = r.Name ?? (keepReplacedName && requests.Count == 1 && oldName.Length > 0 ? oldName : null);
                 if (name is not null) pic.Name = name;
-                // 원본 파일을 적어 둔다. list_shapes·picture_preview가 읽는다(보이지 않는 태그).
-                try { pic.Tags.Add(SourceTag, files[i].Full); } catch { }
+                // 원본 파일·넣은 자리·출처를 적어 둔다. list_shapes·picture_preview가 읽는다(보이지 않는 태그).
+                try { pic.Tags.Add(SourceTag, r.RecordedSource ?? files[i].Full); } catch { }
+                RecordPlaced(pic);
+                if (!string.IsNullOrWhiteSpace(r.Credit)) try { pic.Tags.Add(CreditTag, r.Credit!.Trim()); } catch { }
+                if (!string.IsNullOrWhiteSpace(r.License)) try { pic.Tags.Add(LicenseTag, r.License!.Trim()); } catch { }
+                // 한 장을 바꿔 넣을 때는 원래 그림의 테두리·그림자를 이어받는다(inset을 바꿔도 모양이 남게).
+                if (old is not null && requests.Count == 1 && r.Border is null && !r.Shadow) CopyLook(old, pic);
                 if (r.Border is { } border)
                 {
                     pic.Line.Visible = MsoTrue;
@@ -2409,6 +2526,7 @@ public class PptComService : IPptComService
                 }
                 old!.Delete();
             }
+            foreach (var x in extra) x.Delete();
             foreach (var (pic, r) in added.Zip(requests))
             {
                 if (r.Z == PictureZ.Front) pic.ZOrder(0);        // msoBringToFront
@@ -2477,7 +2595,11 @@ public class PptComService : IPptComService
                 }
                 catch { }
             }
-            return new PictureInfo(crop, pw, ph, SourcePath: source);
+            string? Tag(string name) { try { return (string)shape.Tags.Item(name) is { Length: > 0 } v ? v : null; } catch { return null; } }
+            return new PictureInfo(crop, pw, ph, SourcePath: source)
+            {
+                Placed = PlacedState.Parse(Tag(PlacedTag)), Credit = Tag(CreditTag), License = Tag(LicenseTag),
+            };
         }
         catch { return null; }
     }

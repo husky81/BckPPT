@@ -112,7 +112,15 @@ bckhwp 레포 `src/BckHwpMcp/McpClientRegistration.cs`의 사본입니다
   자르기는 PowerPoint 자르기라 원본이 남습니다. `focus`·`zoom`으로 보여 줄 부분을 고르고, `set_picture_crop`으로
   나중에 다시 자릅니다. `picture_preview`(넣은 그림)·`image_preview`(넣기 전 파일)는 원본 전체에 0.1 격자·눈금과
   자른 영역을 그린 PNG를 돌려줍니다. `add_picture`는 `z`·`border`·`shadow`로 큰 그림 위 inset을 올립니다.
-  `list_shapes`는 `in_box`·`type` 필터와 그림의 자른 양·문서에 든 그림 픽셀·원본 파일 이름을 보여 줍니다.
+  `list_shapes`는 `in_box`·`type` 필터와 그림의 자른 양·문서에 든 그림 픽셀·원본 파일 이름·실제 dpi·출처를 보여 줍니다.
+- 자르기는 `crop`(잘라 낼 양) 또는 `keep`(남길 영역)으로 줍니다. 넣은 결과에 실제 해상도를 적고 150dpi 미만이면 경고합니다.
+  `add_picture`의 `anchor`는 기준 도형 모서리에 붙여 넣고, `source`·`license`는 출처로 남아 `export_picture_credits`가
+  쪽별 목록(또는 발표자 메모)을 만듭니다.
+- `replace_pictures_in_box`는 칸 안 그림과 「[그림…]」 글상자를 지우고 새로 넣고, `apply_picture_plan`은
+  「쪽|칸|경로[@crop|@keep|@focus];…」 계획을 칸별로 적용해 결과 표와 축소판을 돌려줍니다. BckPPT가 넣은 뒤 사용자가
+  자리·크기·자르기를 바꾼 그림은 표시되고, 덮어쓰기 전에 멈춥니다(`force`).
+- `image_sheet`(후보 사진 축소판), `render_region`(쪽 일부를 크게), `document_size`·`compress_pictures`(문서 크기,
+  확인 없이는 미리보기만)가 있습니다. 창을 닫아 메모리에만 남은 문서는 오류에 알리고, `show_window=true`면 창을 띄워 이어서 처리합니다.
 - `open_presentation`은 문서가 올라올 때까지 기다리고, 메일·인터넷에서 받은 파일이 「제한된 보기」로 열리면
   알립니다(`unblock=true`면 받은 파일 표시를 지우고 편집 모드로 다시 엽니다).
 - localhost에서만 열리고, localhost가 아닌 Origin(브라우저 페이지)의 요청은 거절합니다.

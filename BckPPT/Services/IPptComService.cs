@@ -137,7 +137,13 @@ public interface IPptComService
     /// keepReplacedName이면 한 장일 때 지운 도형 이름을 이어받는다.
     /// </summary>
     IReadOnlyList<PlacedPicture> PlacePictures(string presentationPath, int slideIndex, IReadOnlyList<PictureRequest> requests,
-        string? replaceAddress = null, bool keepReplacedName = false);
+        string? replaceAddress = null, bool keepReplacedName = false, IReadOnlyCollection<string>? deleteAlso = null);
+    /// <summary>PowerPoint에 올라와 있지만 창이 없는 문서(창을 닫았는데 메모리에 남은 것). BckPPT가 작업용으로 연 문서는 빠진다.</summary>
+    IReadOnlyList<OpenPresentationInfo> ListWindowlessPresentations();
+    /// <summary>쪽을 pt당 pixelsPerPoint 픽셀로 PNG 렌더한다. 쪽 크기(pt)도 돌려준다. 실패하면 null.</summary>
+    Task<RenderedSlide?> RenderSlideAsync(string presentationPath, int slideIndex, float pixelsPerPoint);
+    /// <summary>발표자 메모에서 marker로 시작하는 문단을 text로 바꾼다(없으면 끝에 더한다). text가 비면 그 문단을 지운다.</summary>
+    void SetNotesParagraph(string presentationPath, int slideIndex, string marker, string text);
     /// <summary>넣은 그림의 자른 영역을 바꾼다. 결과는 바꾼 뒤의 도형 자리·자른 비율.</summary>
     PlacedPicture SetPictureCrop(string presentationPath, int slideIndex, string address, PictureCropRequest request);
     /// <summary>

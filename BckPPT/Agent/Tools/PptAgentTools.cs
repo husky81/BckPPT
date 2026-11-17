@@ -277,6 +277,11 @@ public static class PptAgentTools
                 // 저장된 파일에서 읽는다. PowerPoint가 저장할 때 그림을 압축하면 넣은 파일보다 작다.
                 if (pic.PixelWidth is int pw && pic.PixelHeight is int ph) sb.Append($" · 문서에 든 그림 {pw}×{ph}px");
                 if (pic.SourcePath is { Length: > 0 } src) sb.Append($" · 원본 파일 {Path.GetFileName(src)}");
+                if (pic.PixelWidth is int dpx && PictureFitter.EffectiveDpi(dpx, s.Width, pic.Crop) is var dpi and > 0)
+                    sb.Append($" · 약 {dpi:0}dpi" + (dpi < PictureFitter.LowDpi ? "(낮음)" : ""));
+                if (pic.Placed?.Differences(new BoxF(s.Left, s.Top, s.Width, s.Height), pic.Crop) is { } changed)
+                    sb.Append($" · 사용자가 바꿈({changed})");
+                if (pic.Credit is { } credit) sb.Append($" · 출처 {credit}" + (pic.License is { } lic ? $" ({lic})" : ""));
             }
             sb.Append('\n');
         }

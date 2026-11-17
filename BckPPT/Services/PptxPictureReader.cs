@@ -76,6 +76,49 @@ public static class PptxPictureReader
         catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException or System.Xml.XmlException) { }
     }
 
+    /// <summary>
+    /// 저장된 pptx의 그림 목록(쪽 순서). 그림 파일 크기는 zip에 든 크기(압축 뒤), 자른 부분이 있는지는 blipFill의 srcRect로 본다.
+    /// 같은 그림 파일을 여러 도형이 쓰면 SharedBy가 그 수다. 읽지 못하면 null.
+    /// </summary>
+    public static DocumentSize? ReadDocumentSize(string pptxPath)
+    {
+        if (!File.Exists(pptxPath) || !pptxPath.EndsWith(".pptx", StringComparison.OrdinalIgnoreCase)) return null;
+        try
+        {
+            using var stream = new FileStream(pptxPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            using var zip = new ZipArchive(stream, ZipArchiveMode.Read);
+            var presentation = Load(zip, "ppt/presentation.xml");
+            var rids = presentation?.Root?.Element(P + "sldIdLst")?.Elements(P + "sldId").Select(e => e.Attribute(R + "id")?.Value).ToList() ?? [];
+            var pictures = new List<DocumentPicture>();
+            for (int i = 0; i < rids.Count; i++)
+            {
+                if (rids[i] is not { } rid || Target(zip, "ppt/presentation.xml", rid) is not { } part || Load(zip, part) is not { } slide) continue;
+                void Visit(XElement? cNvPr, XElement? blipFill)
+                {
+                    var embed = blipFill?.Element(A + "blip")?.Attribute(R + "embed")?.Value;
+                    if (embed is null || Target(zip, part, embed) is not { } media || zip.GetEntry(media) is not { } entry) return;
+                    var src = blipFill!.Element(A + "srcRect");
+                    // srcRect 단위는 1/1000%. 크기 맞춤 끝자리(±몇)는 자른 것으로 보지 않는다(0.5% 넘을 때만).
+                    bool cropped = src is not null && src.Attributes().Any(a => a.Name.LocalName is "l" or "t" or "r" or "b" &&
+                                                                               int.TryParse(a.Value, out int v) && Math.Abs(v) > 500);
+                    int.TryParse((string?)cNvPr?.Attribute("id"), out int id);
+                    var size = ReadImageSize(entry);
+                    pictures.Add(new DocumentPicture(i + 1, id, (string?)cNvPr?.Attribute("name") ?? "", media, entry.CompressedLength,
+                        size?.Item1, size?.Item2, cropped));
+                }
+                foreach (var pic in slide.Descendants(P + "pic"))
+                    Visit(pic.Element(P + "nvPicPr")?.Element(P + "cNvPr"), pic.Element(P + "blipFill"));
+                foreach (var sp in slide.Descendants(P + "sp"))
+                    Visit(sp.Element(P + "nvSpPr")?.Element(P + "cNvPr"), sp.Element(P + "spPr")?.Element(A + "blipFill"));
+            }
+            var shared = pictures.GroupBy(p => p.Media).ToDictionary(g => g.Key, g => g.Count());
+            var media = zip.Entries.Where(e => e.FullName.StartsWith("ppt/media/", StringComparison.OrdinalIgnoreCase)).ToList();
+            return new DocumentSize(new FileInfo(pptxPath).Length, media.Sum(e => e.CompressedLength), media.Count,
+                pictures.Select(p => p with { SharedBy = shared[p.Media] }).ToList());
+        }
+        catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException or System.Xml.XmlException) { return null; }
+    }
+
     private static XDocument? Load(ZipArchive zip, string part)
     {
         var entry = zip.GetEntry(part);
@@ -146,3 +189,6 @@ public static class PptxPictureReader
 
     private static int BigEndian(byte[] b, int i) => b[i] << 24 | b[i + 1] << 16 | b[i + 2] << 8 | b[i + 3];
 }
+
+public record DocumentPicture(int Slide, int ShapeId, string ShapeName, string Media, long Bytes, int? PixelWidth, int? PixelHeight, bool HasCrop, int SharedBy = 1);
+public record DocumentSize(long FileBytes, long MediaBytes, int MediaCount, IReadOnlyList<DocumentPicture> Pictures);
