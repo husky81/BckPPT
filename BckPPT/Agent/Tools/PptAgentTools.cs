@@ -276,6 +276,7 @@ public static class PptAgentTools
                 sb.Append(pic.Crop.IsNone ? " 자르지 않음" : $" 잘림 {pic.Crop}");
                 // 저장된 파일에서 읽는다. PowerPoint가 저장할 때 그림을 압축하면 넣은 파일보다 작다.
                 if (pic.PixelWidth is int pw && pic.PixelHeight is int ph) sb.Append($" · 문서에 든 그림 {pw}×{ph}px");
+                if (pic.SourcePath is { Length: > 0 } src) sb.Append($" · 원본 파일 {Path.GetFileName(src)}");
             }
             sb.Append('\n');
         }

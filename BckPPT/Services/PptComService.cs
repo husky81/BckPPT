@@ -2257,6 +2257,98 @@ public class PptComService : IPptComService
     // ── 그림 ─────────────────────────────────────────────────────
 
     private const int MsoPicture = 13, MsoLinkedPicture = 11, MsoPlaceholder = 14;
+    /// <summary>BckPPT가 넣은 그림의 원본 파일 경로를 적는 태그.</summary>
+    private const string SourceTag = "BCKPPT_SOURCE";
+
+    /// <summary>작은 그림을 큰 그림 위에 올릴 때 떠 보이게 하는 바깥 그림자.</summary>
+    private static void ApplyShadow(dynamic pic)
+    {
+        dynamic sh = pic.Shadow;
+        sh.Visible = MsoTrue;
+        try { sh.Style = 2; } catch { }   // msoShadowStyleOuterShadow
+        sh.ForeColor.RGB = 0;
+        sh.Transparency = 0.6f;
+        sh.Blur = 4f;
+        sh.OffsetX = 1.5f;
+        sh.OffsetY = 1.5f;
+    }
+
+    public PlacedPicture SetPictureCrop(string presentationPath, int slideIndex, string address, PictureCropRequest request)
+        => OnSlide(presentationPath, slideIndex, save: true, slide =>
+        {
+            dynamic pic = RequireShape(slide, slideIndex, address);
+            PictureInfo? read = ReadPictureInfo(pic);
+            PictureInfo info = read ?? throw new InvalidOperationException($"「{address}」는 그림이 아닙니다.");
+            var frame = new BoxF((float)pic.Left, (float)pic.Top, (float)pic.Width, (float)pic.Height);
+            var (box, crop) = PictureFitter.Recrop(frame, info.FullWidth, info.FullHeight, info.Crop, request);
+            int lockAspect = MsoTrue;
+            try { lockAspect = (int)pic.LockAspectRatio; } catch { }
+            pic.LockAspectRatio = MsoFalse;
+            ApplyCrop(pic, box, crop);
+            pic.LockAspectRatio = lockAspect;
+            string name = (string)pic.Name;
+            int id = (int)pic.Id;
+            List<(dynamic Shape, IReadOnlyList<string> Path)> flat = FlattenShapesWithPath(slide.Shapes);
+            int same = flat.Count(s => (string)s.Shape.Name == name);
+            PictureInfo? after = ReadPictureInfo(pic);
+            return new PlacedPicture(name, ShapeAddress.FormatStable(name, same, id),
+                (float)pic.Left, (float)pic.Top, (float)pic.Width, (float)pic.Height, after?.Crop ?? crop);
+        });
+
+    public PictureSource GetPictureSource(string presentationPath, int slideIndex, string address)
+    {
+        var (info, frame, slideId, shapeId) = OnSlide(presentationPath, slideIndex, save: false, slide =>
+        {
+            dynamic pic = RequireShape(slide, slideIndex, address);
+            PictureInfo? read = ReadPictureInfo(pic);
+            PictureInfo info = read ?? throw new InvalidOperationException($"「{address}」는 그림이 아닙니다.");
+            int slideId = 0;
+            try { slideId = (int)slide.SlideID; } catch { }
+            BoxF frame = new((float)pic.Left, (float)pic.Top, (float)pic.Width, (float)pic.Height);
+            int shapeId = (int)pic.Id;
+            return (info, frame, slideId, shapeId);
+        });
+        float ratio = info.FullWidth / info.FullHeight;
+        bool SameShape((int W, int H)? px) => px is { } p && p.H > 0 && Math.Abs((float)p.W / p.H / ratio - 1) < 0.03f;
+
+        // ① 넣을 때 적어 둔 원본 파일. 비율이 다르면(파일이 바뀌었으면) 쓰지 않는다.
+        if (info.SourcePath is { } src && Path.IsPathFullyQualified(src) && File.Exists(src))
+        {
+            var bytes = File.ReadAllBytes(src);
+            using var ms = new MemoryStream(bytes);
+            if (SameShape(PptxPictureReader.ReadImageSize(ms)))
+                return new PictureSource(bytes, "원본 파일", src, info, frame);
+        }
+        // ② 디스크에 저장된 판의 그림. 저장 뒤 그림을 바꿨으면 비율로 거른다.
+        if (slideId > 0 && PptxPictureReader.ReadImageBytes(presentationPath, slideId, shapeId) is { } saved)
+        {
+            using var ms = new MemoryStream(saved);
+            if (SameShape(PptxPictureReader.ReadImageSize(ms)))
+                return new PictureSource(saved, "저장된 문서의 그림", info.SourcePath, info, frame);
+        }
+        // ③ 복제본의 자르기를 풀어 PowerPoint로 뽑는다. 문서에 잠깐 도형이 생겼다 지워진다.
+        string png = Path.Combine(Path.GetTempPath(), $"bckppt-picture-{Guid.NewGuid():N}.png");
+        try
+        {
+            OnSlide(presentationPath, slideIndex, save: false, slide =>
+            {
+                dynamic pic = RequireShape(slide, slideIndex, address);
+                dynamic dup = pic.Duplicate().Item(1);
+                try
+                {
+                    dup.LockAspectRatio = MsoFalse;
+                    // 긴 변 1200px(96dpi에서 900pt) 정도로 뽑는다.
+                    float scale = 900f / Math.Max(info.FullWidth, info.FullHeight);
+                    ApplyCrop(dup, new BoxF(0, 0, info.FullWidth * scale, info.FullHeight * scale), CropFractions.None);
+                    dup.Export(png, 2);   // ppShapeFormatPNG
+                }
+                finally { dup.Delete(); }
+                return true;
+            });
+            return new PictureSource(File.ReadAllBytes(png), "PowerPoint에서 뽑은 그림", info.SourcePath, info, frame);
+        }
+        finally { try { File.Delete(png); } catch { } }
+    }
 
     public IReadOnlyList<PlacedPicture> PlacePictures(string presentationPath, int slideIndex, IReadOnlyList<PictureRequest> requests,
         string? replaceAddress = null, bool keepReplacedName = false)
@@ -2288,12 +2380,21 @@ public class PptComService : IPptComService
                 dynamic pic = slide.Shapes.AddPicture(files[i].Full, MsoFalse, MsoTrue, r.Left, r.Top, -1f, -1f);
                 added.Add(pic);
                 float w0 = (float)pic.Width, h0 = (float)pic.Height;
-                var (box, crop) = PictureFitter.Fit(w0, h0, r.Crop, new BoxF(r.Left, r.Top, r.Width, r.Height), r.Fit);
+                var (box, crop) = PictureFitter.Place(r, w0, h0);
                 pic.LockAspectRatio = MsoFalse;
                 ApplyCrop(pic, box, crop);
                 pic.LockAspectRatio = MsoTrue;
                 string? name = r.Name ?? (keepReplacedName && requests.Count == 1 && oldName.Length > 0 ? oldName : null);
                 if (name is not null) pic.Name = name;
+                // 원본 파일을 적어 둔다. list_shapes·picture_preview가 읽는다(보이지 않는 태그).
+                try { pic.Tags.Add(SourceTag, files[i].Full); } catch { }
+                if (r.Border is { } border)
+                {
+                    pic.Line.Visible = MsoTrue;
+                    pic.Line.ForeColor.RGB = OleColor.FromHex(border.Color);
+                    pic.Line.Weight = border.Width;
+                }
+                if (r.Shadow) ApplyShadow(pic);
                 crops.Add(crop);
             }
 
@@ -2307,6 +2408,11 @@ public class PptComService : IPptComService
                     while ((int)added[i].ZOrderPosition > baseZ + 1 + i && guard++ < 1000) added[i].ZOrder(3);   // msoSendBackward
                 }
                 old!.Delete();
+            }
+            foreach (var (pic, r) in added.Zip(requests))
+            {
+                if (r.Z == PictureZ.Front) pic.ZOrder(0);        // msoBringToFront
+                else if (r.Z == PictureZ.Back) pic.ZOrder(1);    // msoSendToBack
             }
 
             List<(dynamic Shape, IReadOnlyList<string> Path)> flat = FlattenShapesWithPath(slide.Shapes);
@@ -2357,7 +2463,21 @@ public class PptComService : IPptComService
             dynamic c = shape.PictureFormat.Crop;
             float pw = (float)c.PictureWidth, ph = (float)c.PictureHeight;
             var crop = PictureFitter.FromCropObject(pw, ph, (float)c.PictureOffsetX, (float)c.PictureOffsetY, (float)c.ShapeWidth, (float)c.ShapeHeight);
-            return new PictureInfo(crop, pw, ph);
+            string? source = null;
+            try { if ((string)shape.Tags.Item(SourceTag) is { Length: > 0 } tag) source = tag; } catch { }
+            if (source is null)
+            {
+                // PowerPoint로 넣은 그림은 대체 텍스트에 파일 이름이 남기도 한다.
+                try
+                {
+                    string alt = ((string)shape.AlternativeText).Trim();
+                    if (alt.Length is > 0 and < 260 && alt.IndexOfAny(['\r', '\n']) < 0 &&
+                        Path.GetExtension(alt).ToLowerInvariant() is ".png" or ".jpg" or ".jpeg" or ".gif" or ".bmp" or ".tif" or ".tiff" or ".emf" or ".wmf" or ".svg")
+                        source = alt;
+                }
+                catch { }
+            }
+            return new PictureInfo(crop, pw, ph, SourcePath: source);
         }
         catch { return null; }
     }

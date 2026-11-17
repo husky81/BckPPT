@@ -92,6 +92,14 @@ public sealed class McpToolCatalog
                 ["right"] = new JsonObject { ["type"] = "number" }, ["bottom"] = new JsonObject { ["type"] = "number" },
             },
         };
+        var focusSchema = new JsonObject
+        {
+            ["type"] = "object",
+            ["description"] = "가운데 둘 점(원본 기준 0~1, 0,0이 왼쪽 위). 칸 비율로 자를 창을 그 점 가운데에 두고 가장자리를 넘으면 안쪽으로 민다. picture_preview·image_preview의 눈금으로 정한다",
+            ["properties"] = new JsonObject { ["x"] = new JsonObject { ["type"] = "number" }, ["y"] = new JsonObject { ["type"] = "number" } },
+        };
+        const string ZoomDescription = "확대(1 이상). 1 = 칸을 겨우 채움(cover와 같음), 2 = 두 배 확대(창이 절반). focus 없이 주면 가운데";
+        const string CropFocusOrder = "crop과 focus·zoom을 같이 주면 crop을 먼저 적용하고 남은 부분에서 focus·zoom을 잡는다";
         JsonObject FitSchema(string note) => new()
         {
             ["type"] = "string", ["enum"] = new JsonArray("cover", "contain", "stretch"),
@@ -99,6 +107,7 @@ public sealed class McpToolCatalog
         };
         Add("add_picture",
             "그림 파일을 쪽에 넣는다(문서에 포함). 칸(left·top·width·height, pt)에 fit으로 맞춘다. 열린 창의 문서면 그 자리에 넣고 저장은 사용자가 한다. " +
+            "자르기는 PowerPoint 자르기라 원본이 남고 set_picture_crop으로 다시 고칠 수 있다. focus·zoom으로 보여 줄 부분을 고른다(" + CropFocusOrder + "). " +
             "결과에 도형 주소·실제 자리·크기·자른 양·원본 픽셀을 준다 (문서를 고친다)",
             WithFile(new JsonObject
             {
@@ -111,11 +120,20 @@ public sealed class McpToolCatalog
                     ["width"] = new JsonObject { ["type"] = "number" }, ["height"] = new JsonObject { ["type"] = "number" },
                     ["fit"] = FitSchema("기본 cover"),
                     ["crop"] = cropSchema.DeepClone(),
+                    ["focus"] = focusSchema.DeepClone(),
+                    ["zoom"] = new JsonObject { ["type"] = "number", ["description"] = ZoomDescription },
                     ["name"] = new JsonObject { ["type"] = "string", ["description"] = "도형 이름" },
+                    ["z"] = new JsonObject { ["type"] = "string", ["enum"] = new JsonArray("front", "back"), ["description"] = "front: 맨 앞(기본, 큰 그림 위 inset), back: 맨 뒤" },
+                    ["border"] = new JsonObject
+                    {
+                        ["type"] = "object", ["description"] = "테두리. 예: {\"color\":\"#FFFFFF\",\"width\":1.5}",
+                        ["properties"] = new JsonObject { ["color"] = new JsonObject { ["type"] = "string", ["description"] = "#RRGGBB(기본 #FFFFFF)" }, ["width"] = new JsonObject { ["type"] = "number", ["description"] = "pt(기본 1.5)" } },
+                    },
+                    ["shadow"] = new JsonObject { ["type"] = "boolean", ["description"] = "true면 옅은 바깥 그림자(큰 그림 위에 올린 inset이 떠 보이게)" },
                 },
             }, "slide", "path", "left", "top", "width", "height"), AddPicture);
         Add("add_pictures_in_box",
-            "칸 하나를 그림 수만큼 나눠(가로로 긴 칸은 좌우, 세로로 긴 칸은 위아래) gap 간격으로 나란히 넣는다. " +
+            "칸 하나를 그림 수만큼 나눠(가로로 긴 칸은 좌우, 세로로 긴 칸은 위아래) gap 간격으로 나란히 넣는다. rows·columns를 주면 격자(왼쪽 위부터 줄 단위)로 넣는다. " +
             "box는 {left,top,width,height} 또는 기존 도형 주소(그 도형 자리·크기를 쓴다). replace_placeholder=true면 그 도형(예: 「[그림 삽입]」 글상자)을, " +
             "도형 주소면 그 도형을 지우고 그 Z순서 자리에 넣는다 (문서를 고친다)",
             WithFile(new JsonObject
@@ -129,7 +147,12 @@ public sealed class McpToolCatalog
                     ["gap"] = new JsonObject { ["type"] = "number", ["description"] = "그림 사이 간격 pt(기본 3)" },
                     ["direction"] = new JsonObject { ["type"] = "string", ["enum"] = new JsonArray("auto", "horizontal", "vertical"), ["description"] = "나누는 방향(기본 auto)" },
                     ["fit"] = FitSchema("기본 cover"),
+                    ["rows"] = new JsonObject { ["type"] = "integer", ["description"] = "격자 줄 수. columns만 주면 그림 수로 정한다" },
+                    ["columns"] = new JsonObject { ["type"] = "integer", ["description"] = "격자 칸 수. rows만 주면 그림 수로 정한다. 예: 6장을 rows 2, columns 3" },
                     ["crops"] = new JsonObject { ["type"] = "array", ["items"] = cropSchema.DeepClone(), ["description"] = "그림마다 crop(paths 순서). 없으면 null" },
+                    ["focuses"] = new JsonObject { ["type"] = "array", ["items"] = focusSchema.DeepClone(), ["description"] = "그림마다 focus(paths 순서). 없으면 null. " + CropFocusOrder },
+                    ["zoom"] = new JsonObject { ["type"] = "number", ["description"] = "모든 그림의 zoom. " + ZoomDescription },
+                    ["zooms"] = new JsonObject { ["type"] = "array", ["items"] = new JsonObject { ["type"] = "number" }, ["description"] = "그림마다 zoom(zoom보다 먼저)" },
                     ["names"] = new JsonObject { ["type"] = "array", ["items"] = new JsonObject { ["type"] = "string" }, ["description"] = "그림마다 도형 이름" },
                     ["replace_placeholder"] = new JsonObject
                     {
@@ -150,9 +173,71 @@ public sealed class McpToolCatalog
                     ["path"] = new JsonObject { ["type"] = "string", ["description"] = "새 그림 파일 절대 경로" },
                     ["fit"] = FitSchema("기본 cover"),
                     ["crop"] = cropSchema.DeepClone(),
+                    ["focus"] = focusSchema.DeepClone(),
+                    ["zoom"] = new JsonObject { ["type"] = "number", ["description"] = ZoomDescription },
                     ["name"] = new JsonObject { ["type"] = "string", ["description"] = "새 이름. 비우면 원래 이름" },
                 },
             }, "slide", "shape", "path"), ReplacePicture);
+        JsonObject CropChange(bool forPreview) => new()
+        {
+            ["crop"] = new JsonObject
+            {
+                ["type"] = "object",
+                ["description"] = "원본 기준 잘라 낼 비율(0~1) {left,top,right,bottom}. keep_frame이면 남은 부분을 칸 비율에 맞춰 가운데 기준으로 더 자른다",
+                ["properties"] = cropSchema["properties"]!.DeepClone(),
+            },
+            ["focus"] = focusSchema.DeepClone(),
+            ["zoom"] = new JsonObject { ["type"] = "number", ["description"] = ZoomDescription },
+            ["reset"] = new JsonObject { ["type"] = "boolean", ["description"] = "true면 자르기를 없앤다(keep_frame이면 칸 안에 그림 전체가 들어가게 줄인다)" },
+            ["keep_frame"] = new JsonObject
+            {
+                ["type"] = "boolean",
+                ["description"] = "기본 true: 도형 자리·크기 그대로 자른 영역만 바꾼다. false: 지금 배율·그림 자리를 지키고 도형이 새 자른 영역을 따라간다(PowerPoint 자르기 도구처럼)" +
+                                  "",
+            },
+        };
+        Add("set_picture_crop",
+            "이미 넣은 그림의 자른 영역을 바꾼다(PowerPoint 자르기, 원본 보존). crop(원본 기준 비율) 또는 focus+zoom(칸 비율로 그 점이 가운데 오게) 또는 reset. " +
+            CropFocusOrder + ". 고치기 전에 picture_preview로 원본과 지금 자른 영역을 보고 값을 정한다 (문서를 고친다)",
+            WithFile(new JsonObject
+            {
+                ["type"] = "object",
+                ["properties"] = Merge(new JsonObject
+                {
+                    ["slide"] = new JsonObject { ["type"] = "integer", ["description"] = "쪽 번호(1부터)" },
+                    ["shape"] = new JsonObject { ["type"] = "string", ["description"] = "그림 도형 주소(list_shapes의 값)" },
+                }, CropChange(false)),
+            }, "slide", "shape"), SetPictureCrop);
+        Add("picture_preview",
+            "넣은 그림의 원본 전체를 줄인 PNG로 돌려준다. 원본 기준 0.1 간격 격자·눈금(0~1), 지금 자른 영역(빨간 실선, 바깥은 어둡게)을 그린다. " +
+            "crop·focus·zoom·reset을 주면 set_picture_crop이 만들 영역을 노란 점선으로 미리 그린다(문서는 고치지 않는다). 결과에 원본 픽셀·지금 crop 비율·같은 영역의 focus/zoom 값",
+            WithFile(new JsonObject
+            {
+                ["type"] = "object",
+                ["properties"] = Merge(new JsonObject
+                {
+                    ["slide"] = new JsonObject { ["type"] = "integer", ["description"] = "쪽 번호(1부터)" },
+                    ["shape"] = new JsonObject { ["type"] = "string", ["description"] = "그림 도형 주소(list_shapes의 값)" },
+                }, CropChange(true)),
+            }, "slide", "shape"), PicturePreviewTool);
+        Add("image_preview",
+            "넣기 전 그림 파일을 줄인 PNG로 돌려준다. 원본 기준 0.1 간격 격자·눈금(0~1)을 그린다. width·height(넣을 칸 pt)를 주면 add_picture가 " +
+            "fit·crop·focus·zoom으로 잘라 낼 영역을 노란 점선으로 미리 그린다. 결과에 원본 픽셀",
+            new JsonObject
+            {
+                ["type"] = "object",
+                ["properties"] = new JsonObject
+                {
+                    ["path"] = new JsonObject { ["type"] = "string", ["description"] = "그림 파일 절대 경로" },
+                    ["width"] = new JsonObject { ["type"] = "number", ["description"] = "넣을 칸 너비(pt, 비율만 쓴다)" },
+                    ["height"] = new JsonObject { ["type"] = "number", ["description"] = "넣을 칸 높이(pt)" },
+                    ["fit"] = FitSchema("기본 cover"),
+                    ["crop"] = cropSchema.DeepClone(),
+                    ["focus"] = focusSchema.DeepClone(),
+                    ["zoom"] = new JsonObject { ["type"] = "number", ["description"] = ZoomDescription },
+                },
+                ["required"] = new JsonArray("path"),
+            }, ImagePreviewTool);
         Add("import_slides",
             "다른 PPT 파일의 쪽을 이 문서 after 쪽 뒤에 붙인다(클립보드를 쓰지 않는다). 붙인 쪽은 이 문서의 디자인(테마)을 따른다. " +
             "source가 창에 열려 있어도 디스크에 저장된 판을 읽으니, 고친 내용이 있으면 사용자에게 먼저 저장해 달라고 한다 (문서를 고친다)",
@@ -601,7 +686,17 @@ public sealed class McpToolCatalog
             ToolArgs.OptionalFloat(args, "top") ?? throw new AgentToolException("인자 'top'이 필요합니다."),
             ToolArgs.OptionalFloat(args, "width") ?? throw new AgentToolException("인자 'width'가 필요합니다."),
             ToolArgs.OptionalFloat(args, "height") ?? throw new AgentToolException("인자 'height'가 필요합니다."),
-            ParseFit(ToolArgs.OptionalString(args, "fit")), ParseCrop(args, "crop"), ToolArgs.OptionalString(args, "name"));
+            ParseFit(ToolArgs.OptionalString(args, "fit")), ParseCrop(args, "crop"), ToolArgs.OptionalString(args, "name"))
+        {
+            Z = ToolArgs.OptionalString(args, "z")?.Trim().ToLowerInvariant() switch
+            {
+                null or "" => PictureZ.None, "front" => PictureZ.Front, "back" => PictureZ.Back,
+                _ => throw new AgentToolException("z는 front·back 중 하나입니다."),
+            },
+            Border = ParseBorder(args),
+            Shadow = ToolArgs.OptionalBool(args, "shadow") == true,
+        };
+        request = WithFocus(request, ParseFocus(args), ParseZoom(args));
         if (request.Width <= 0 || request.Height <= 0) throw new AgentToolException("width·height는 0보다 커야 합니다.");
         return WriteAsync(path, async () =>
         {
@@ -633,21 +728,46 @@ public sealed class McpToolCatalog
             null or "" or "auto" => null, "horizontal" => true, "vertical" => false,
             _ => throw new AgentToolException("direction은 auto·horizontal·vertical 중 하나입니다."),
         };
+        int? rows = ToolArgs.OptionalInt(args, "rows"), columns = ToolArgs.OptionalInt(args, "columns");
         IReadOnlyList<BoxF> cells;
-        try { cells = PictureFitter.Split(box, files.Count, gap, horizontal); }
+        string layout;
+        try
+        {
+            if (rows is not null || columns is not null)
+            {
+                int r = rows ?? (files.Count + columns!.Value - 1) / Math.Max(1, columns.Value);
+                int cols = columns ?? (files.Count + r - 1) / Math.Max(1, r);
+                if (r < 1 || cols < 1) throw new AgentToolException("rows·columns는 1 이상입니다.");
+                if (files.Count > r * cols) throw new AgentToolException($"그림 {files.Count}장이 {r}×{cols} 격자({r * cols}칸)에 다 들어가지 않습니다.");
+                cells = PictureFitter.Grid(box, r, cols, gap);
+                layout = $"{r}×{cols} 격자";
+            }
+            else
+            {
+                cells = PictureFitter.Split(box, files.Count, gap, horizontal);
+                layout = "나란히";
+            }
+        }
         catch (ArgumentException ex) { throw new AgentToolException(ex.Message); }
         var fit = ParseFit(ToolArgs.OptionalString(args, "fit"));
         var crops = args.TryGetProperty("crops", out var c) && c.ValueKind == JsonValueKind.Array ? c.EnumerateArray().Select(ParseCrop).ToList() : [];
         var names = args.TryGetProperty("names", out var n) && n.ValueKind == JsonValueKind.Array
             ? n.EnumerateArray().Select(e => e.ValueKind == JsonValueKind.String ? e.GetString() : null).ToList() : [];
-        var requests = files.Select((f, i) => new PictureRequest(f, cells[i].Left, cells[i].Top, cells[i].Width, cells[i].Height, fit,
-            i < crops.Count ? crops[i] : null, i < names.Count && !string.IsNullOrWhiteSpace(names[i]) ? names[i] : null)).ToList();
+        var focuses = args.TryGetProperty("focuses", out var fo) && fo.ValueKind == JsonValueKind.Array
+            ? fo.EnumerateArray().Select(e => e.ValueKind is JsonValueKind.Null ? (FocusPoint?)null : ParseFocusValue(e)).ToList() : [];
+        float? zoomAll = ParseZoom(args);
+        var zooms = args.TryGetProperty("zooms", out var zo) && zo.ValueKind == JsonValueKind.Array
+            ? zo.EnumerateArray().Select(e => e.ValueKind == JsonValueKind.Number ? CheckZoom(e.GetSingle()) : (float?)null).ToList() : [];
+        var requests = files.Select((f, i) => WithFocus(
+            new PictureRequest(f, cells[i].Left, cells[i].Top, cells[i].Width, cells[i].Height, fit,
+                i < crops.Count ? crops[i] : null, i < names.Count && !string.IsNullOrWhiteSpace(names[i]) ? names[i] : null),
+            i < focuses.Count ? focuses[i] : null, (i < zooms.Count ? zooms[i] : null) ?? zoomAll)).ToList();
 
         return await WriteAsync(path, async () =>
         {
             var placed = await Task.Run(() => _ppt.PlacePictures(path, slide, requests, remove), ct);
             return McpToolResult.Ok(
-                $"{slide}쪽 칸 {box.Left:0.##},{box.Top:0.##} {box.Width:0.##}×{box.Height:0.##}에 {placed.Count}장을 넣었습니다({FitName(fit)}, 간격 {gap:0.##}pt)" +
+                $"{slide}쪽 칸 {box.Left:0.##},{box.Top:0.##} {box.Width:0.##}×{box.Height:0.##}에 {placed.Count}장을 {layout} 넣었습니다({FitName(fit)}, 간격 {gap:0.##}pt)" +
                 (remove is not null ? $". 「{remove}」는 지웠습니다" : "") + ".\n" + string.Join("\n", placed.Select(Describe)));
         });
     }
@@ -659,8 +779,9 @@ public sealed class McpToolCatalog
         string shape = ToolArgs.String(args, "shape");
         string file = ImagePath(ToolArgs.OptionalString(args, "path"));
         var entry = await FindShapeAsync(path, slide, shape, ct);
-        var request = new PictureRequest(file, entry.Left, entry.Top, entry.Width, entry.Height,
-            ParseFit(ToolArgs.OptionalString(args, "fit")), ParseCrop(args, "crop"), ToolArgs.OptionalString(args, "name"));
+        var request = WithFocus(new PictureRequest(file, entry.Left, entry.Top, entry.Width, entry.Height,
+            ParseFit(ToolArgs.OptionalString(args, "fit")), ParseCrop(args, "crop"), ToolArgs.OptionalString(args, "name")),
+            ParseFocus(args), ParseZoom(args));
         return await WriteAsync(path, async () =>
         {
             var placed = await Task.Run(() => _ppt.PlacePictures(path, slide, [request], shape, keepReplacedName: true), ct);
@@ -668,6 +789,151 @@ public sealed class McpToolCatalog
                                     (entry.Picture is null ? ". 원래 도형은 그림이 아니었습니다" : "") + ".\n" +
                                     string.Join("\n", placed.Select(Describe)));
         });
+    }
+
+    private static FocusPoint ParseFocusValue(JsonElement f)
+    {
+        if (f.ValueKind != JsonValueKind.Object) throw new AgentToolException("focus는 {x,y}(원본 기준 0~1) 객체입니다.");
+        float x = ToolArgs.OptionalFloat(f, "x") ?? throw new AgentToolException("focus.x가 필요합니다.");
+        float y = ToolArgs.OptionalFloat(f, "y") ?? throw new AgentToolException("focus.y가 필요합니다.");
+        if (x is < 0 or > 1 || y is < 0 or > 1) throw new AgentToolException("focus의 x·y는 0~1(원본 기준 비율)입니다.");
+        return new FocusPoint(x, y);
+    }
+
+    private static FocusPoint? ParseFocus(JsonElement args) =>
+        args.TryGetProperty("focus", out var f) && f.ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined) ? ParseFocusValue(f) : null;
+
+    private static float CheckZoom(float zoom) => zoom is >= 1 and <= 20 ? zoom
+        : throw new AgentToolException("zoom은 1~20입니다(1 = 칸을 겨우 채움, 2 = 두 배 확대).");
+
+    private static float? ParseZoom(JsonElement args) => ToolArgs.OptionalFloat(args, "zoom") is float z ? CheckZoom(z) : null;
+
+    private static PictureRequest WithFocus(PictureRequest r, FocusPoint? focus, float? zoom)
+    {
+        if (focus is null && zoom is null) return r;
+        if (r.Fit != PictureFit.Cover) throw new AgentToolException("focus·zoom은 fit=cover일 때만 씁니다.");
+        return r with { Focus = focus, Zoom = zoom };
+    }
+
+    private static PictureBorder? ParseBorder(JsonElement args)
+    {
+        if (!args.TryGetProperty("border", out var b) || b.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined) return null;
+        if (b.ValueKind == JsonValueKind.True) return new PictureBorder("#FFFFFF", 1.5f);
+        if (b.ValueKind != JsonValueKind.Object) throw new AgentToolException("border는 {color,width} 객체입니다.");
+        string color = ToolArgs.OptionalString(b, "color")?.Trim() is { Length: > 0 } c ? (c.StartsWith('#') ? c : "#" + c) : "#FFFFFF";
+        if (!System.Text.RegularExpressions.Regex.IsMatch(color, "^#[0-9A-Fa-f]{6}$")) throw new AgentToolException("border.color는 #RRGGBB입니다.");
+        float width = ToolArgs.OptionalFloat(b, "width") ?? 1.5f;
+        if (width is <= 0 or > 20) throw new AgentToolException("border.width는 0보다 크고 20pt 이하입니다.");
+        return new PictureBorder(color, width);
+    }
+
+    /// <summary>set_picture_crop·picture_preview의 crop/focus/zoom/reset/keep_frame. 아무것도 없으면 null.</summary>
+    private static PictureCropRequest? ParseCropRequest(JsonElement args)
+    {
+        var crop = ParseCrop(args, "crop");
+        var focus = ParseFocus(args);
+        var zoom = ParseZoom(args);
+        bool reset = ToolArgs.OptionalBool(args, "reset") == true;
+        bool keepFrame = ToolArgs.OptionalBool(args, "keep_frame") ?? true;
+        if (reset && (crop is not null || focus is not null || zoom is not null))
+            throw new AgentToolException("reset은 crop·focus·zoom과 같이 쓰지 않습니다.");
+        if (!reset && crop is null && focus is null && zoom is null) return null;
+        return new PictureCropRequest(crop, focus, zoom, reset, keepFrame);
+    }
+
+    private async Task<ShapeEntry> FindPictureAsync(string path, int slide, string address, CancellationToken ct)
+    {
+        var entry = await FindShapeAsync(path, slide, address, ct);
+        return entry.Picture is null
+            ? throw new AgentToolException($"{slide}쪽 「{entry.Address}」는 그림이 아닙니다. list_shapes(type:\"picture\")로 그림 주소를 확인하세요.")
+            : entry;
+    }
+
+    private async Task<McpToolResult> SetPictureCrop(JsonElement args, CancellationToken ct)
+    {
+        var path = ResolveFile(args);
+        int slide = ToolArgs.Int(args, "slide");
+        var request = ParseCropRequest(args) ?? throw new AgentToolException("crop, focus·zoom, reset 중 하나를 주세요.");
+        var entry = await FindPictureAsync(path, slide, ToolArgs.String(args, "shape"), ct);
+        return await WriteAsync(path, async () =>
+        {
+            var placed = await Task.Run(() => _ppt.SetPictureCrop(path, slide, entry.Address, request), ct);
+            return McpToolResult.Ok(
+                $"{slide}쪽 「{placed.Address}」의 자르기를 바꿨습니다({(request.KeepFrame ? "도형 자리·크기 그대로" : "도형이 자른 영역을 따라감")}).\n" +
+                $"  전: {DescribeCrop(entry.Picture!.Crop)}\n  후: {DescribeCrop(placed.Crop)}\n" + Describe(placed) +
+                "\npicture_preview로 원본 위의 자른 영역을, render_slide로 쪽을 확인하세요.");
+        });
+    }
+
+    private static string DescribeCrop(CropFractions c) => c.IsNone ? "자르지 않음" : $"{c} (남은 영역 {PicturePreview.Range(c)})";
+
+    private async Task<McpToolResult> PicturePreviewTool(JsonElement args, CancellationToken ct)
+    {
+        var path = ResolveFile(args);
+        int slide = ToolArgs.Int(args, "slide");
+        var request = ParseCropRequest(args);
+        var entry = await FindPictureAsync(path, slide, ToolArgs.String(args, "shape"), ct);
+        var source = await Task.Run(() => _ppt.GetPictureSource(path, slide, entry.Address), ct);
+        var info = source.Info;
+        CropFractions? proposed = null;
+        if (request is not null)
+        {
+            try { proposed = PictureFitter.Recrop(source.Frame, info.FullWidth, info.FullHeight, info.Crop, request).Crop; }
+            catch (ArgumentException ex) { throw new AgentToolException(ex.Message); }
+        }
+        var (png, pw, ph) = PicturePreview.Render(source.Bytes, info.Crop, proposed);
+        bool exported = source.Origin.StartsWith("PowerPoint");
+        int? pixelW = exported ? entry.Picture?.PixelWidth : pw, pixelH = exported ? entry.Picture?.PixelHeight : ph;
+        float ratio = source.Frame.Width / source.Frame.Height;
+        var (focus, zoom) = PicturePreview.AsFocus(info.Crop, info.FullWidth, info.FullHeight, ratio);
+        var sb = new StringBuilder();
+        sb.AppendLine($"{Path.GetFileName(path)} {slide}쪽 「{entry.Address}」 원본 전체 — 출처: {source.Origin}{(source.SourcePath is { } sp ? $" ({sp})" : "")}");
+        sb.AppendLine(pixelW is int w && pixelH is int h ? $"원본 {w}×{h}px" : "원본 픽셀: 모름(저장하지 않은 그림을 PowerPoint에서 뽑았다)");
+        sb.AppendLine($"도형 {source.Frame.Left:0.##},{source.Frame.Top:0.##} {source.Frame.Width:0.##}×{source.Frame.Height:0.##}pt (가로:세로 {ratio:0.##})");
+        sb.AppendLine($"지금 자름(빨간 실선, 바깥 어둡게): {DescribeCrop(info.Crop)}");
+        sb.AppendLine($"  같은 영역을 focus·zoom으로: focus {{x:{focus.X:0.###}, y:{focus.Y:0.###}}}, zoom {zoom:0.##}");
+        if (proposed is not null)
+            sb.AppendLine($"바꿔 볼 영역(노란 점선): {DescribeCrop(proposed)} — set_picture_crop에 같은 인자를 주면 이렇게 됩니다");
+        sb.Append("격자: 원본 기준 0.1 간격, 가운데 0.5는 굵은 선. 눈금은 위(x)·왼쪽(y)");
+        return new([McpContent.FromText(sb.ToString()), McpContent.FromImage(png)], false);
+    }
+
+    private async Task<McpToolResult> ImagePreviewTool(JsonElement args, CancellationToken ct)
+    {
+        string file = ImagePath(ToolArgs.OptionalString(args, "path"));
+        var bytes = await File.ReadAllBytesAsync(file, ct);
+        float? width = ToolArgs.OptionalFloat(args, "width"), height = ToolArgs.OptionalFloat(args, "height");
+        var crop = ParseCrop(args, "crop");
+        var focus = ParseFocus(args);
+        var zoom = ParseZoom(args);
+        var fit = ParseFit(ToolArgs.OptionalString(args, "fit"));
+        int pw, ph;
+        using (var ms = new MemoryStream(bytes))
+            (pw, ph) = PptxPictureReader.ReadImageSize(ms) ?? (0, 0);
+        CropFractions? proposed = crop;
+        string? note = null;
+        if (width is float bw && height is float bh)
+        {
+            if (bw <= 0 || bh <= 0) throw new AgentToolException("width·height는 0보다 커야 합니다.");
+            if (pw <= 0 || ph <= 0)
+            {
+                // 머리에서 크기를 못 읽는 형식(emf·tif 등)은 그려 보며 잰다.
+                (_, pw, ph) = PicturePreview.Render(bytes, null, null);
+            }
+            var request = WithFocus(new PictureRequest(file, 0, 0, bw, bh, fit, crop), focus, zoom);
+            try { proposed = PictureFitter.Place(request, pw, ph).Crop; }
+            catch (ArgumentException ex) { throw new AgentToolException(ex.Message); }
+            note = $"칸 {bw:0.##}×{bh:0.##}pt(가로:세로 {bw / bh:0.##})에 {FitName(fit)}" + (focus is not null || zoom is not null ? $", focus·zoom" : "");
+        }
+        else if (focus is not null || zoom is not null)
+            throw new AgentToolException("focus·zoom을 미리 보려면 넣을 칸의 width·height를 주세요.");
+        var (png, rw, rh) = PicturePreview.Render(bytes, null, proposed is { IsNone: false } ? proposed : null);
+        var sb = new StringBuilder();
+        sb.AppendLine($"{Path.GetFileName(file)} 원본 {rw}×{rh}px (가로:세로 {(float)rw / rh:0.##})");
+        if (proposed is not null)
+            sb.AppendLine((note is null ? "" : note + " → ") + $"잘라 낼 영역(노란 점선): {DescribeCrop(proposed)}");
+        sb.Append("격자: 원본 기준 0.1 간격, 가운데 0.5는 굵은 선. 눈금은 위(x)·왼쪽(y)");
+        return new([McpContent.FromText(sb.ToString()), McpContent.FromImage(png)], false);
     }
 
     private static string FitName(PictureFit fit) => fit switch
@@ -701,6 +967,12 @@ public sealed class McpToolCatalog
     }
 
     // ── 스키마 ──────────────────────────────────────────────
+
+    private static JsonObject Merge(JsonObject a, JsonObject b)
+    {
+        foreach (var (k, v) in b.ToList()) { b.Remove(k); a[k] = v; }
+        return a;
+    }
 
     private void Add(string name, string description, JsonObject schema,
         Func<JsonElement, CancellationToken, Task<McpToolResult>> call, params string[] required)

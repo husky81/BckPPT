@@ -155,18 +155,65 @@ if ($InstallLocal) {
         try { if (-not $_.HasExited) { $_.Kill(); $null = $_.WaitForExit(5000) } } catch { }
     }
 
-    # 폴더 교체는 이름 변경 → 전개 → 되돌리기. 중간에 실패해도 이전 버전이 남는다.
-    $backup = "$target.old"
-    if (Test-Path -LiteralPath $backup) { Remove-Item -LiteralPath $backup -Recurse -Force }
-    if (Test-Path -LiteralPath $target) { Rename-Item -LiteralPath $target -NewName (Split-Path -Leaf $backup) }
+    # 파일 단위로 바꾼다. 폴더 이름 바꾸기(Rename-Item)는 CellBox2 트레이가 플러그인 폴더를 쥐고 있으면
+    # 「사용 중」으로 실패했다(2026-11-17). 새 판을 임시 폴더에 풀고 → 지금 판을 임시 백업으로 복사하고 →
+    # 파일을 덮어쓴 뒤 → 새 판에 없는 옛 파일을 지운다. 덮어쓰기가 실패하면 백업에서 되돌린다.
+    # 백업은 덮어쓸 파일만, 임시 폴더에 둔다.
+    $stamp   = [Guid]::NewGuid().ToString("N").Substring(0, 8)
+    $staging = Join-Path ([IO.Path]::GetTempPath()) "bckppt-install-$stamp"
+    $backup  = Join-Path ([IO.Path]::GetTempPath()) "bckppt-backup-$stamp"
+    Expand-Archive -LiteralPath $zipPath -DestinationPath $staging -Force
+    New-Item -ItemType Directory -Path $target -Force | Out-Null
+
+    function Copy-Tree([string]$From, [string]$To) {
+        # robocopy: 같은 파일도 덮어쓰고(/IS /IT) 잠긴 파일은 몇 번 다시 시도한다. 8 이상이 실패.
+        $null = robocopy $From $To /E /IS /IT /R:3 /W:1 /NFL /NDL /NJH /NJS /NP
+        if ($LASTEXITCODE -ge 8) { throw "파일 복사 실패(robocopy $LASTEXITCODE): $From → $To" }
+        $global:LASTEXITCODE = 0
+    }
+
     try {
-        New-Item -ItemType Directory -Path $target -Force | Out-Null
-        Expand-Archive -LiteralPath $zipPath -DestinationPath $target -Force
-        if (Test-Path -LiteralPath $backup) { Remove-Item -LiteralPath $backup -Recurse -Force }
-    } catch {
-        if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Recurse -Force }
-        if (Test-Path -LiteralPath $backup) { Rename-Item -LiteralPath $backup -NewName (Split-Path -Leaf $target) }
-        throw
+        # 덮어쓸 파일만 백업한다. 새 판에 없는 파일은 트레이가 잠가 둘 수 있어 읽지 않는다.
+        # 덮어쓸 파일을 못 읽으면 아무것도 바꾸기 전에 멈춘다.
+        $stagingFull = [IO.Path]::GetFullPath($staging).TrimEnd('\') + '\'
+        Get-ChildItem -LiteralPath $staging -Recurse -File | ForEach-Object {
+            $relative = $_.FullName.Substring($stagingFull.Length)
+            $existing = Join-Path $target $relative
+            if (Test-Path -LiteralPath $existing) {
+                $dest = Join-Path $backup $relative
+                New-Item -ItemType Directory -Path (Split-Path -Parent $dest) -Force | Out-Null
+                Copy-Item -LiteralPath $existing -Destination $dest -Force -ErrorAction Stop
+            }
+        }
+        try {
+            Copy-Tree $staging $target
+        } catch {
+            Write-Warning "덮어쓰기 실패 — 이전 판으로 되돌립니다: $_"
+            # 잠겨서 못 덮어쓴 파일은 옛 판 그대로라 되돌리기도 실패할 수 있다. 원래 오류를 알린다.
+            if (Test-Path -LiteralPath $backup) { try { Copy-Tree $backup $target } catch { Write-Warning "되돌리기 일부 실패: $_" } }
+            throw
+        }
+        # 새 판에 없는 옛 파일(이전 버전 DLL 등)을 지운다. 잠겨 있으면 남기고 알린다(실행에는 쓰이지 않는다).
+        $stagingRoot = [IO.Path]::GetFullPath($staging).TrimEnd('\') + '\'
+        $targetRoot  = [IO.Path]::GetFullPath($target).TrimEnd('\') + '\'
+        $leftover = 0
+        Get-ChildItem -LiteralPath $target -Recurse -File | ForEach-Object {
+            $relative = $_.FullName.Substring($targetRoot.Length)
+            if (-not (Test-Path -LiteralPath (Join-Path $stagingRoot $relative))) {
+                try { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction Stop }
+                catch { $leftover++; Write-Warning "  옛 파일을 지우지 못했습니다(남겨 둠): $relative" }
+            }
+        }
+        Get-ChildItem -LiteralPath $target -Recurse -Directory | Sort-Object { $_.FullName.Length } -Descending | ForEach-Object {
+            if (-not (Get-ChildItem -LiteralPath $_.FullName -Force | Select-Object -First 1)) {
+                try { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction Stop } catch { }
+            }
+        }
+        if ($leftover -gt 0) { Write-Host "  옛 파일 $($leftover)개는 잠겨 있어 남겼습니다." -ForegroundColor Yellow }
+    } finally {
+        foreach ($dir in @($staging, $backup)) {
+            if (Test-Path -LiteralPath $dir) { Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue }
+        }
     }
     Write-Host "  설치: $target" -ForegroundColor Green
 } else {

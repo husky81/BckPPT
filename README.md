@@ -108,8 +108,11 @@ bckhwp 레포 `src/BckHwpMcp/McpClientRegistration.cs`의 사본입니다
   `list_presentations`, `open_presentation`, `go_to_slide`, `list_fonts`(글꼴 찾기), `export_markdown`,
   `render_slide`(PNG 그림 반환), `render_slides`(여러 쪽·축소판)가 있습니다. LLM이 필요한 카드 채우기·원문 요약은 내보내지 않습니다.
 - 그림: `add_picture`(칸에 cover·contain·stretch, crop 비율), `add_pictures_in_box`(칸을 n등분해 나란히,
-  「[그림 삽입]」 글상자 자리에 바꿔 넣기), `replace_picture`(같은 자리·크기·Z순서·이름). `list_shapes`는
-  `in_box`·`type` 필터와 그림의 자른 양·문서에 든 그림 픽셀을 보여 줍니다.
+  `rows`·`columns` 격자, 「[그림 삽입]」 글상자 자리에 바꿔 넣기), `replace_picture`(같은 자리·크기·Z순서·이름).
+  자르기는 PowerPoint 자르기라 원본이 남습니다. `focus`·`zoom`으로 보여 줄 부분을 고르고, `set_picture_crop`으로
+  나중에 다시 자릅니다. `picture_preview`(넣은 그림)·`image_preview`(넣기 전 파일)는 원본 전체에 0.1 격자·눈금과
+  자른 영역을 그린 PNG를 돌려줍니다. `add_picture`는 `z`·`border`·`shadow`로 큰 그림 위 inset을 올립니다.
+  `list_shapes`는 `in_box`·`type` 필터와 그림의 자른 양·문서에 든 그림 픽셀·원본 파일 이름을 보여 줍니다.
 - `open_presentation`은 문서가 올라올 때까지 기다리고, 메일·인터넷에서 받은 파일이 「제한된 보기」로 열리면
   알립니다(`unblock=true`면 받은 파일 표시를 지우고 편집 모드로 다시 엽니다).
 - localhost에서만 열리고, localhost가 아닌 Origin(브라우저 페이지)의 요청은 거절합니다.

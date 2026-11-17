@@ -20,11 +20,12 @@ public sealed class PictureLiveTests
         var dir = Environment.GetEnvironmentVariable("BCKPPT_LIVE_PICTURES");
         if (string.IsNullOrEmpty(dir)) return;
         PptDiagnosticLog.Directory = Path.Combine(dir, "logs");
-        var deck = Path.Combine(dir, "live-run.pptx");
+        var deck = Path.Combine(dir, $"live-run-{DateTime.Now:HHmmss}.pptx");   // 지난 사본을 PowerPoint가 쥐고 있을 수 있다
         File.Copy(Path.Combine(dir, "live-pictures.pptx"), deck, overwrite: true);
         var ppt = new PptComService();
         var server = new McpServer(new McpToolCatalog(ppt));
         var log = new StringBuilder();
+        int callNo = 0;
 
         async Task<JsonNode> Call(string tool, JsonObject args)
         {
@@ -36,12 +37,13 @@ public sealed class PictureLiveTests
             };
             var reply = (await server.HandleBodyAsync(body.ToJsonString(), CancellationToken.None))!;
             int image = 0;
+            callNo++;
             log.AppendLine($"## {tool} {args.ToJsonString()}");
             foreach (var c in reply["result"]!["content"]!.AsArray())
             {
                 if (c!["type"]!.GetValue<string>() == "image")
                 {
-                    var png = Path.Combine(dir, $"out-{tool}-{++image}.png");
+                    var png = Path.Combine(dir, $"out-{callNo:00}-{tool}-{++image}.png");
                     await File.WriteAllBytesAsync(png, Convert.FromBase64String(c["data"]!.GetValue<string>()));
                     log.AppendLine($"(그림 {png})");
                 }
@@ -92,6 +94,62 @@ public sealed class PictureLiveTests
             Assert.True(Ok(await Call("render_slide", new JsonObject { ["slide"] = 1 })));
             Assert.True(Ok(await Call("render_slides", new JsonObject { ["slides"] = new JsonArray(1, 2), ["sheet"] = true })));
             Assert.True(Ok(await Call("render_slides", new JsonObject { ["from"] = 1, ["to"] = 2 })));
+
+            // ── 2026-11-17b: 자르기 바꾸기·미리보기·격자·inset ──
+            Assert.True(Ok(await Call("picture_preview", new JsonObject { ["slide"] = 1, ["shape"] = "큰 사진 cover" })));   // ① 태그의 원본 파일
+            Assert.True(Ok(await Call("picture_preview", new JsonObject
+            {
+                ["slide"] = 1, ["shape"] = "큰 사진 cover", ["focus"] = new JsonObject { ["x"] = 0.3, ["y"] = 0.7 }, ["zoom"] = 2,
+            })));
+            Assert.True(Ok(await Call("set_picture_crop", new JsonObject
+            {
+                ["slide"] = 1, ["shape"] = "큰 사진 cover", ["focus"] = new JsonObject { ["x"] = 0.3, ["y"] = 0.7 }, ["zoom"] = 2,
+            })));
+            Assert.True(Ok(await Call("picture_preview", new JsonObject { ["slide"] = 1, ["shape"] = "큰 사진 cover" })));
+            Assert.True(Ok(await Call("set_picture_crop", new JsonObject
+            {
+                ["slide"] = 1, ["shape"] = "오른쪽 절반 cover", ["crop"] = new JsonObject { ["left"] = 0.25, ["top"] = 0.1 }, ["keep_frame"] = false,
+            })));
+            Assert.True(Ok(await Call("set_picture_crop", new JsonObject { ["slide"] = 1, ["shape"] = "작은 사진 contain", ["reset"] = true })));
+            Assert.True(Ok(await Call("image_preview", new JsonObject
+            {
+                ["path"] = Path.Combine(dir, "big43.png"), ["width"] = 281.52, ["height"] = 93.6, ["focus"] = new JsonObject { ["x"] = 0.5, ["y"] = 0.25 },
+            })));
+            Assert.True(Ok(await Call("add_picture", new JsonObject
+            {
+                ["slide"] = 1, ["path"] = Path.Combine(dir, "small43.png"), ["left"] = 300, ["top"] = 350, ["width"] = 70, ["height"] = 52.5,
+                ["z"] = "front", ["border"] = new JsonObject { ["color"] = "#FFFFFF", ["width"] = 2 }, ["shadow"] = true, ["name"] = "inset",
+            })));
+            Assert.True(Ok(await Call("add_pictures_in_box", new JsonObject
+            {
+                ["slide"] = 2, ["paths"] = new JsonArray(Enumerable.Range(0, 6).Select(i => (JsonNode)Path.Combine(dir, i % 2 == 0 ? "big43.png" : "tall.png")).ToArray()),
+                ["box"] = new JsonObject { ["left"] = 480, ["top"] = 120, ["width"] = 420, ["height"] = 300 }, ["rows"] = 2, ["columns"] = 3,
+                ["focuses"] = new JsonArray(null, new JsonObject { ["x"] = 0.5, ["y"] = 0.1 }), ["zoom"] = 1.2,
+            })));
+            await Call("list_shapes", new JsonObject { ["slide"] = 1, ["type"] = "picture" });
+            Assert.True(Ok(await Call("render_slides", new JsonObject { ["slides"] = new JsonArray(1, 2) })));
+
+            // ② 원본 파일이 없어진 그림 → 저장된 문서의 그림
+            var gone = Path.Combine(dir, "gone.png");
+            File.Copy(Path.Combine(dir, "small43.png"), gone, overwrite: true);
+            Assert.True(Ok(await Call("add_picture", new JsonObject
+            {
+                ["slide"] = 2, ["path"] = gone, ["left"] = 40, ["top"] = 300, ["width"] = 120, ["height"] = 60, ["name"] = "사라진 원본",
+            })));
+            File.Delete(gone);
+            Assert.True(Ok(await Call("picture_preview", new JsonObject { ["slide"] = 2, ["shape"] = "사라진 원본" })));
+            // ③ 저장하지 않은 그림 + 원본 없음 → PowerPoint에서 뽑는다
+            using (ppt.KeepOpen(deck, readOnly: false))
+            {
+                File.Copy(Path.Combine(dir, "tall.png"), gone, overwrite: true);
+                Assert.True(Ok(await Call("add_picture", new JsonObject
+                {
+                    ["slide"] = 2, ["path"] = gone, ["left"] = 200, ["top"] = 300, ["width"] = 120, ["height"] = 60, ["name"] = "저장 안 한 그림",
+                })));
+                File.Delete(gone);
+                Assert.True(Ok(await Call("picture_preview", new JsonObject { ["slide"] = 2, ["shape"] = "저장 안 한 그림" })));
+                await Call("list_shapes", new JsonObject { ["slide"] = 2, ["type"] = "picture" });
+            }
 
             if (Environment.GetEnvironmentVariable("BCKPPT_LIVE_PROTECTED") == "1")
             {

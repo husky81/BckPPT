@@ -138,5 +138,11 @@ public interface IPptComService
     /// </summary>
     IReadOnlyList<PlacedPicture> PlacePictures(string presentationPath, int slideIndex, IReadOnlyList<PictureRequest> requests,
         string? replaceAddress = null, bool keepReplacedName = false);
+    /// <summary>넣은 그림의 자른 영역을 바꾼다. 결과는 바꾼 뒤의 도형 자리·자른 비율.</summary>
+    PlacedPicture SetPictureCrop(string presentationPath, int slideIndex, string address, PictureCropRequest request);
+    /// <summary>
+    /// 그림의 자르기 전 원본. BckPPT가 넣을 때 적어 둔 원본 파일 → 저장된 pptx 안의 그림 → PowerPoint에서 뽑은 PNG(복제본을 잠깐 만들었다 지운다) 순으로 찾는다.
+    /// </summary>
+    PictureSource GetPictureSource(string presentationPath, int slideIndex, string address);
     int    ReplaceTextInShape(string presentationPath, int slideIndex, string address, string find, string replace);
 }

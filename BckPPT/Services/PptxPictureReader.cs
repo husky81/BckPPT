@@ -20,7 +20,31 @@ public static class PptxPictureReader
     public static IReadOnlyDictionary<int, (int Width, int Height)> ReadPixelSizes(string pptxPath, int slideId, IReadOnlyCollection<int> shapeIds)
     {
         var result = new Dictionary<int, (int, int)>();
-        if (shapeIds.Count == 0 || !File.Exists(pptxPath) || !pptxPath.EndsWith(".pptx", StringComparison.OrdinalIgnoreCase)) return result;
+        WithMedia(pptxPath, slideId, shapeIds, (id, entry) =>
+        {
+            if (ReadImageSize(entry) is { } size) result[id] = size;
+        });
+        return result;
+    }
+
+    /// <summary>그림 도형 하나의 그림 파일 바이트(저장된 판). 없으면 null.</summary>
+    public static byte[]? ReadImageBytes(string pptxPath, int slideId, int shapeId)
+    {
+        byte[]? bytes = null;
+        WithMedia(pptxPath, slideId, [shapeId], (_, entry) =>
+        {
+            using var raw = entry.Open();
+            using var ms = new MemoryStream();
+            raw.CopyTo(ms);
+            bytes = ms.ToArray();
+        });
+        return bytes;
+    }
+
+    /// <summary>쪽(SlideID)의 그림 도형(cNvPr id) 중 shapeIds에 든 것마다 그 그림 파일 항목으로 action을 부른다.</summary>
+    private static void WithMedia(string pptxPath, int slideId, IReadOnlyCollection<int> shapeIds, Action<int, ZipArchiveEntry> action)
+    {
+        if (shapeIds.Count == 0 || !File.Exists(pptxPath) || !pptxPath.EndsWith(".pptx", StringComparison.OrdinalIgnoreCase)) return;
         try
         {
             // PowerPoint가 연 파일도 읽기는 된다(쓰기만 잠근다).
@@ -30,28 +54,26 @@ public static class PptxPictureReader
             var presentation = Load(zip, "ppt/presentation.xml");
             var slideRid = presentation?.Root?.Element(P + "sldIdLst")?.Elements(P + "sldId")
                 .FirstOrDefault(e => (string?)e.Attribute("id") == slideId.ToString())?.Attribute(R + "id")?.Value;
-            if (slideRid is null) return result;
+            if (slideRid is null) return;
             var slidePart = Target(zip, "ppt/presentation.xml", slideRid);
-            if (slidePart is null || Load(zip, slidePart) is not { } slide) return result;
+            if (slidePart is null || Load(zip, slidePart) is not { } slide) return;
 
-            foreach (var pic in slide.Descendants(P + "pic"))
+            var done = new HashSet<int>();
+            void Visit(XElement? cNvPr, XElement? blipFill)
             {
-                if (!int.TryParse((string?)pic.Element(P + "nvPicPr")?.Element(P + "cNvPr")?.Attribute("id"), out int id) || !shapeIds.Contains(id)) continue;
-                var embed = pic.Element(P + "blipFill")?.Element(A + "blip")?.Attribute(R + "embed")?.Value;
-                if (embed is null || Target(zip, slidePart, embed) is not { } media) continue;
-                if (zip.GetEntry(media) is { } entry && ReadImageSize(entry) is { } size) result[id] = size;
+                if (!int.TryParse((string?)cNvPr?.Attribute("id"), out int id) || !shapeIds.Contains(id) || done.Contains(id)) return;
+                var embed = blipFill?.Element(A + "blip")?.Attribute(R + "embed")?.Value;
+                if (embed is null || Target(zip, slidePart, embed) is not { } media || zip.GetEntry(media) is not { } entry) return;
+                done.Add(id);
+                action(id, entry);
             }
+            foreach (var pic in slide.Descendants(P + "pic"))
+                Visit(pic.Element(P + "nvPicPr")?.Element(P + "cNvPr"), pic.Element(P + "blipFill"));
             // 그림 개체 틀(placeholder)에 넣은 그림은 p:sp의 blipFill에 있다.
             foreach (var sp in slide.Descendants(P + "sp"))
-            {
-                if (!int.TryParse((string?)sp.Element(P + "nvSpPr")?.Element(P + "cNvPr")?.Attribute("id"), out int id) || !shapeIds.Contains(id) || result.ContainsKey(id)) continue;
-                var embed = sp.Element(P + "spPr")?.Element(A + "blipFill")?.Element(A + "blip")?.Attribute(R + "embed")?.Value;
-                if (embed is null || Target(zip, slidePart, embed) is not { } media) continue;
-                if (zip.GetEntry(media) is { } entry && ReadImageSize(entry) is { } size) result[id] = size;
-            }
+                Visit(sp.Element(P + "nvSpPr")?.Element(P + "cNvPr"), sp.Element(P + "spPr")?.Element(A + "blipFill"));
         }
         catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException or System.Xml.XmlException) { }
-        return result;
     }
 
     private static XDocument? Load(ZipArchive zip, string part)

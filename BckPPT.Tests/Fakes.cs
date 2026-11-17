@@ -157,7 +157,11 @@ public sealed class FakePptComService : IPptComService
     public IReadOnlyList<ShapeEntry> ListShapes(string presentationPath, int slideIndex) =>
         Read(presentationPath, slideIndex).Select(s => new ShapeEntry(s.Group == "" ? s.Name : $"{s.Group}/{s.Name}", s.Name, s.Group, s.PictureCrop is null ? 1 : 13, s.Left, s.Top, s.Width, s.Height,
             s.Paragraphs.Any(p => p.Length > 0), string.Join(" ", s.Paragraphs), s.Id,
-            Picture: s.PictureCrop is { } c ? new PictureInfo(c, s.Width, s.Height, 400, 300) : null)).ToList();
+            Picture: s.PictureCrop is { } c ? FakePicture(s, c) : null)).ToList();
+
+    /// <summary>그림 도형 정보. 원본은 400×300(4:3)으로 보고 지금 배율의 전체 크기를 자른 비율에서 되짚는다.</summary>
+    private static PictureInfo FakePicture(FakeShape s, CropFractions c) =>
+        new(c, s.Width / (1 - c.Left - c.Right), s.Height / (1 - c.Top - c.Bottom), 400, 300, (s.Spec as PictureRequest)?.ImagePath);
 
     public TextFormatInfo GetTextFormat(string presentationPath, int slideIndex, string address) =>
         Read(presentationPath, slideIndex).First(s => s.Is(address)).Format;
@@ -291,7 +295,7 @@ public sealed class FakePptComService : IPptComService
         var placed = new List<PlacedPicture>();
         foreach (var r in requests)
         {
-            var (box, crop) = PictureFitter.Fit(400, 300, r.Crop, new BoxF(r.Left, r.Top, r.Width, r.Height), r.Fit);
+            var (box, crop) = PictureFitter.Place(r, 400, 300);
             string name = r.Name ?? (keepReplacedName && requests.Count == 1 && oldName.Length > 0 ? oldName : $"Picture {list.Count + 1}");
             var shape = new FakeShape(name, box.Left, box.Top, box.Width, box.Height, 100) { Spec = r, PictureCrop = crop };
             list.Insert(at++, shape);
@@ -300,6 +304,28 @@ public sealed class FakePptComService : IPptComService
         }
         return placed;
     }
+    public PlacedPicture SetPictureCrop(string presentationPath, int slideIndex, string address, PictureCropRequest request)
+    {
+        ThrowIfEditing();
+        var s = Shape(slideIndex, address);
+        var info = FakePicture(s, s.PictureCrop ?? throw new InvalidOperationException("그림이 아닙니다."));
+        var (box, crop) = PictureFitter.Recrop(new BoxF(s.Left, s.Top, s.Width, s.Height), info.FullWidth, info.FullHeight, info.Crop, request);
+        (s.Left, s.Top, s.Width, s.Height, s.PictureCrop) = (box.Left, box.Top, box.Width, box.Height, crop);
+        Calls.Add($"crop {s.Name} {crop}");
+        return new PlacedPicture(s.Name, s.Name, box.Left, box.Top, box.Width, box.Height, crop);
+    }
+
+    public PictureSource GetPictureSource(string presentationPath, int slideIndex, string address)
+    {
+        var s = Shape(slideIndex, address);
+        var info = FakePicture(s, s.PictureCrop ?? throw new InvalidOperationException("그림이 아닙니다."));
+        using var bmp = new System.Drawing.Bitmap(400, 300);
+        using (var g = System.Drawing.Graphics.FromImage(bmp)) g.Clear(System.Drawing.Color.SteelBlue);
+        using var ms = new MemoryStream();
+        bmp.Save(ms, System.Drawing.Imaging.ImageFormat.Png);
+        return new PictureSource(ms.ToArray(), "원본 파일", info.SourcePath, info, new BoxF(s.Left, s.Top, s.Width, s.Height));
+    }
+
     public IDisposable KeepOpen(string presentationPath, bool readOnly) => new MemoryStream();
 
     /// <summary>대상 문서가 PowerPoint 창에 열려 있는 것으로 볼지.</summary>
