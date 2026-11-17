@@ -2168,8 +2168,11 @@ public class PptComService : IPptComService
 
     /// <summary>그룹 안까지 펼친 도형 목록. 이름이 겹치면 주소에 "#n"을 붙여 구분한다.</summary>
     public IReadOnlyList<ShapeEntry> ListShapes(string presentationPath, int slideIndex)
-        => OnSlide(presentationPath, slideIndex, save: false, slide =>
+    {
+        var (entries, slideId) = OnSlide(presentationPath, slideIndex, save: false, slide =>
         {
+            int slideId = 0;
+            try { slideId = (int)slide.SlideID; } catch { }
             List<(dynamic Shape, IReadOnlyList<string> Path)> shapes = FlattenShapesWithPath(slide.Shapes);
             List<string> names = shapes.Select(s => (string)s.Shape.Name).ToList();
             var seen   = new Dictionary<string, int>();
@@ -2207,13 +2210,22 @@ public class PptComService : IPptComService
                 // 모델이 엉뚱한 상자를 고쳤다(2026-10-06 실측).
                 int sameName = names.Count(n => n == name);
                 string address = id > 0 ? ShapeAddress.FormatStable(name, sameName, id) : ShapeAddress.Format(name, seen[name], sameName);
+                PictureInfo? picture = ReadPictureInfo(shape);
                 result.Add(new ShapeEntry(
                     address, name, string.Join("/", shapes[i].Path), type,
                     (float)shape.Left, (float)shape.Top, (float)shape.Width, (float)shape.Height,
-                    hasText, preview, id, rows, columns));
+                    hasText, preview, id, rows, columns, picture));
             }
-            return (IReadOnlyList<ShapeEntry>)result;
+            return ((IReadOnlyList<ShapeEntry>)result, slideId);
         });
+        // 원본 픽셀은 COM이 알려 주지 않는다. 디스크에 저장된 판에서 같은 쪽(SlideID)·도형(Id)을 찾아 읽는다.
+        var pictureIds = entries.Where(e => e.Picture is not null && e.Id > 0).Select(e => e.Id).ToList();
+        if (pictureIds.Count == 0 || slideId == 0) return entries;
+        var pixels = PptxPictureReader.ReadPixelSizes(presentationPath, slideId, pictureIds);
+        if (pixels.Count == 0) return entries;
+        return entries.Select(e => e.Picture is { } p && pixels.TryGetValue(e.Id, out var px)
+            ? e with { Picture = p with { PixelWidth = px.Width, PixelHeight = px.Height } } : e).ToList();
+    }
 
     public void RenameShape(string presentationPath, int slideIndex, string address, string newName)
         => OnSlide(presentationPath, slideIndex, save: true, slide =>
@@ -2241,6 +2253,221 @@ public class PptComService : IPptComService
             RequireShape(slide, slideIndex, address).Delete();
             return true;
         });
+
+    // ── 그림 ─────────────────────────────────────────────────────
+
+    private const int MsoPicture = 13, MsoLinkedPicture = 11, MsoPlaceholder = 14;
+
+    public IReadOnlyList<PlacedPicture> PlacePictures(string presentationPath, int slideIndex, IReadOnlyList<PictureRequest> requests,
+        string? replaceAddress = null, bool keepReplacedName = false)
+    {
+        // 파일 확인과 픽셀 읽기는 COM 밖에서 한다.
+        var files = requests.Select(r =>
+        {
+            string full = Path.GetFullPath(r.ImagePath);
+            if (!File.Exists(full)) throw new FileNotFoundException($"그림 파일이 없습니다: {full}");
+            (int Width, int Height)? px = null;
+            try { using var s = File.OpenRead(full); px = PptxPictureReader.ReadImageSize(s); } catch (IOException) { }
+            return (Full: full, Pixels: px);
+        }).ToList();
+
+        return OnSlide(presentationPath, slideIndex, save: true, slide =>
+        {
+            dynamic? old = replaceAddress is null ? null : RequireShape(slide, slideIndex, replaceAddress);
+            string oldName = old is null ? "" : (string)old.Name;
+            // 그룹 안 도형이면 그룹 자리(최상위 Z순서)에 넣는다.
+            dynamic? anchor = old;
+            if (old is not null) try { anchor = old.ParentGroup; } catch { }
+
+            var added = new List<dynamic>();
+            var crops = new List<CropFractions>();
+            for (int i = 0; i < requests.Count; i++)
+            {
+                var r = requests[i];
+                // 원래 크기로 넣고(-1) 그 비율로 맞춘다. 큰 그림은 PowerPoint가 쪽 크기로 줄여 넣지만 비율은 같다.
+                dynamic pic = slide.Shapes.AddPicture(files[i].Full, MsoFalse, MsoTrue, r.Left, r.Top, -1f, -1f);
+                added.Add(pic);
+                float w0 = (float)pic.Width, h0 = (float)pic.Height;
+                var (box, crop) = PictureFitter.Fit(w0, h0, r.Crop, new BoxF(r.Left, r.Top, r.Width, r.Height), r.Fit);
+                pic.LockAspectRatio = MsoFalse;
+                ApplyCrop(pic, box, crop);
+                pic.LockAspectRatio = MsoTrue;
+                string? name = r.Name ?? (keepReplacedName && requests.Count == 1 && oldName.Length > 0 ? oldName : null);
+                if (name is not null) pic.Name = name;
+                crops.Add(crop);
+            }
+
+            if (anchor is not null)
+            {
+                // 새 그림은 맨 위에 생긴다. 지울 도형 바로 위까지 내린다(순서대로).
+                int baseZ = (int)anchor.ZOrderPosition;
+                for (int i = 0; i < added.Count; i++)
+                {
+                    int guard = 0;
+                    while ((int)added[i].ZOrderPosition > baseZ + 1 + i && guard++ < 1000) added[i].ZOrder(3);   // msoSendBackward
+                }
+                old!.Delete();
+            }
+
+            List<(dynamic Shape, IReadOnlyList<string> Path)> flat = FlattenShapesWithPath(slide.Shapes);
+            List<string> names = flat.Select(s => (string)s.Shape.Name).ToList();
+            var result = new List<PlacedPicture>();
+            for (int i = 0; i < added.Count; i++)
+            {
+                dynamic pic = added[i];
+                string name = (string)pic.Name;
+                int id = (int)pic.Id;
+                PictureInfo? info = ReadPictureInfo(pic);
+                result.Add(new PlacedPicture(name, ShapeAddress.FormatStable(name, names.Count(n => n == name), id),
+                    (float)pic.Left, (float)pic.Top, (float)pic.Width, (float)pic.Height,
+                    info?.Crop ?? crops[i], files[i].Pixels?.Width, files[i].Pixels?.Height));
+            }
+            return (IReadOnlyList<PlacedPicture>)result;
+        });
+    }
+
+    /// <summary>
+    /// Crop 개체로 도형 자리와 자를 부분을 한 번에 정한다. 옛 CropLeft 등은 「원래 크기」 기준이라
+    /// PowerPoint가 큰 그림을 줄여 넣으면 단위가 어긋난다(4032px 사진이 720pt로 들어왔다, 2026-11-17 실측).
+    /// </summary>
+    private static void ApplyCrop(dynamic pic, BoxF box, CropFractions crop)
+    {
+        var (pw, ph, ox, oy) = PictureFitter.ToCropObject(box, crop);
+        dynamic c = pic.PictureFormat.Crop;
+        c.PictureWidth = pw;
+        c.PictureHeight = ph;
+        c.ShapeWidth = box.Width;
+        c.ShapeHeight = box.Height;
+        c.ShapeLeft = box.Left;
+        c.ShapeTop = box.Top;
+        c.PictureOffsetX = ox;
+        c.PictureOffsetY = oy;
+    }
+
+    /// <summary>그림 도형(그림·연결된 그림·그림이 든 개체 틀)이면 자른 비율과 전체 그림 크기. 아니면 null.</summary>
+    private static PictureInfo? ReadPictureInfo(dynamic shape)
+    {
+        try
+        {
+            int type = (int)shape.Type;
+            bool picture = type is MsoPicture or MsoLinkedPicture;
+            if (!picture && type == MsoPlaceholder)
+                try { picture = (int)shape.PlaceholderFormat.ContainedType == MsoPicture; } catch { }
+            if (!picture) return null;
+            dynamic c = shape.PictureFormat.Crop;
+            float pw = (float)c.PictureWidth, ph = (float)c.PictureHeight;
+            var crop = PictureFitter.FromCropObject(pw, ph, (float)c.PictureOffsetX, (float)c.PictureOffsetY, (float)c.ShapeWidth, (float)c.ShapeHeight);
+            return new PictureInfo(crop, pw, ph);
+        }
+        catch { return null; }
+    }
+
+    // ── 열기·제한된 보기 ─────────────────────────────────────────
+
+    /// <summary>인터넷·메일에서 받은 파일 표시(NTFS 대체 스트림 Zone.Identifier)가 있는지.</summary>
+    public static bool HasDownloadMark(string path)
+    {
+        try { return File.Exists(path + ":Zone.Identifier"); } catch { return false; }
+    }
+
+    public IReadOnlyList<ProtectedViewInfo> ListProtectedViews()
+        => RunOnSta(() =>
+        {
+            var list = new List<ProtectedViewInfo>();
+            if (TryGetActiveInstance() is not { } app) return (IReadOnlyList<ProtectedViewInfo>)list;
+            try
+            {
+                foreach (dynamic pvw in app.ProtectedViewWindows)
+                {
+                    try
+                    {
+                        dynamic prs = pvw.Presentation;
+                        list.Add(new ProtectedViewInfo((string)prs.Name, (string)prs.FullName));
+                    }
+                    catch
+                    {
+                        try { list.Add(new ProtectedViewInfo((string)pvw.Caption, "")); } catch { }
+                    }
+                }
+            }
+            catch { }
+            return (IReadOnlyList<ProtectedViewInfo>)list;
+        });
+
+    private static void CloseProtectedView(string path)
+        => RunOnSta(() =>
+        {
+            if (TryGetActiveInstance() is not { } app) return;
+            var matches = new List<dynamic>();
+            try
+            {
+                foreach (dynamic pvw in app.ProtectedViewWindows)
+                    try { if (string.Equals((string)pvw.Presentation.FullName, path, StringComparison.OrdinalIgnoreCase)) matches.Add(pvw); } catch { }
+            }
+            catch { }
+            foreach (var pvw in matches) try { pvw.Close(); } catch { }
+        });
+
+    /// <summary>문서가 지금 어떤 상태로 올라와 있는지. 아직이면 null. PowerPoint가 파일을 읽는 중이면 호출이 거절될 수 있어 실패는 null로 본다.</summary>
+    private static (OpenedState State, int Slides)? ProbeOpened(string path)
+    {
+        try
+        {
+            return RunOnSta(() =>
+            {
+                if (TryGetActiveInstance() is not { } app) return ((OpenedState, int)?)null;
+                if (FindOpenPresentation(app, path) is { } prs && (int)prs.Windows.Count > 0)
+                {
+                    bool readOnly = false;
+                    try { readOnly = (int)prs.ReadOnly == MsoTrue; } catch { }
+                    return (readOnly ? OpenedState.ReadOnly : OpenedState.Editable, (int)prs.Slides.Count);
+                }
+                try
+                {
+                    foreach (dynamic pvw in app.ProtectedViewWindows)
+                        try { if (string.Equals((string)pvw.Presentation.FullName, path, StringComparison.OrdinalIgnoreCase)) return (OpenedState.ProtectedView, 0); } catch { }
+                }
+                catch { }
+                return null;
+            });
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException) { return null; }
+    }
+
+    public OpenPresentationResult OpenAndWait(string filePath, bool unblock, TimeSpan timeout, CancellationToken cancellationToken = default)
+    {
+        var watch = Stopwatch.StartNew();
+        string path = Path.GetFullPath(filePath);
+        bool hadMark = HasDownloadMark(path), unblocked = false;
+        if (unblock)
+        {
+            CloseProtectedView(path);
+            if (hadMark)
+            {
+                File.Delete(path + ":Zone.Identifier");
+                unblocked = !HasDownloadMark(path);
+            }
+        }
+
+        var now = ProbeOpened(path);
+        if (now is { State: not OpenedState.ProtectedView } opened)
+        {
+            ActivatePresentation(path);
+            return new OpenPresentationResult(opened.State, hadMark, unblocked, watch.Elapsed, opened.Slides);
+        }
+        if (now is { State: OpenedState.ProtectedView })
+            return new OpenPresentationResult(OpenedState.ProtectedView, hadMark, unblocked, watch.Elapsed);
+
+        PptDiagnosticLog.Event("open-and-wait", new { path, hadMark, unblocked });
+        OpenPptxInPowerPoint(path);
+        while (watch.Elapsed < timeout)
+        {
+            if (cancellationToken.WaitHandle.WaitOne(500)) cancellationToken.ThrowIfCancellationRequested();
+            if (ProbeOpened(path) is { } state)
+                return new OpenPresentationResult(state.State, hadMark, unblocked, watch.Elapsed, state.Slides);
+        }
+        return new OpenPresentationResult(OpenedState.NotYet, hadMark, unblocked, watch.Elapsed);
+    }
 
     public string AddTextShape(string presentationPath, int slideIndex, TextShapeRequest request)
         => OnSlide(presentationPath, slideIndex, save: true, slide => AddTextShapeOn(slide, request));

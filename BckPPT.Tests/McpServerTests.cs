@@ -4,6 +4,7 @@ using BckPPT.Models;
 
 namespace BckPPT.Tests;
 
+[Collection("PptDiagnosticLog")]
 public sealed class McpServerTests
 {
     private const string DeckPath = @"C:\Decks\보고.pptx";
@@ -175,8 +176,9 @@ public sealed class McpServerTests
         ppt.Active = null;
         await Rpc(server, "tools/call", """{"name":"list_slides","arguments":{"file":"보고"}}""");
         var log = File.ReadAllText(Path.Combine(LogDir, $"com-{DateTime.Now:yyyyMMdd}.log"));
-        Assert.Contains("[mcp] list_slides file=보고", log);
-        Assert.Contains("[state] fake 2쪽", log);
+        // 줄 머리에 run·host·seq 등이 붙는다(6f284ee). 종류 표시와 본문을 따로 본다.
+        Assert.Matches(@"\[mcp\] .* list_slides file=보고", log);
+        Assert.Matches(@"\[state\] .* fake 2쪽", log);
     }
 
     [Fact]

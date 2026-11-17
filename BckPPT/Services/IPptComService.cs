@@ -34,6 +34,13 @@ public interface IPptComService
     Task NavigateToShapeAsync(string presentationPath, int slideIndex, string shapeName);
     void NavigateToSlide(string presentationPath, int slideIndex);
     void OpenPptxInPowerPoint(string filePath);
+    /// <summary>
+    /// 파일을 PowerPoint 창에 열고 문서가 Presentations(편집) 또는 「제한된 보기」 창에 올라올 때까지 기다린다.
+    /// unblock이면 인터넷에서 받은 파일 표시(Zone.Identifier)를 지우고, 이미 제한된 보기로 열려 있으면 닫고 다시 연다.
+    /// </summary>
+    OpenPresentationResult OpenAndWait(string filePath, bool unblock, TimeSpan timeout, CancellationToken cancellationToken = default);
+    /// <summary>「제한된 보기」로 열린 창들. PowerPoint가 없으면 빈 목록.</summary>
+    IReadOnlyList<ProtectedViewInfo> ListProtectedViews();
 
     /// <summary>문서를 창 없이 열어 두고 핸들을 해제하면 닫는다. 이미 열린 문서는 그대로 둔다.</summary>
     IDisposable KeepOpen(string presentationPath, bool readOnly);
@@ -125,5 +132,11 @@ public interface IPptComService
     int    SetTextColor(string presentationPath, int slideIndex, string address, string find, string color);
     void   SetTextFormat(string presentationPath, int slideIndex, string address, TextFormatPatch patch);
     TextFormatInfo GetTextFormat(string presentationPath, int slideIndex, string address);
+    /// <summary>
+    /// 그림들을 넣는다(문서에 포함, 링크 아님). replaceAddress를 주면 그 도형의 Z순서 자리에 넣고 그 도형을 지운다.
+    /// keepReplacedName이면 한 장일 때 지운 도형 이름을 이어받는다.
+    /// </summary>
+    IReadOnlyList<PlacedPicture> PlacePictures(string presentationPath, int slideIndex, IReadOnlyList<PictureRequest> requests,
+        string? replaceAddress = null, bool keepReplacedName = false);
     int    ReplaceTextInShape(string presentationPath, int slideIndex, string address, string find, string replace);
 }

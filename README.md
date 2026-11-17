@@ -106,7 +106,12 @@ bckhwp 레포 `src/BckHwpMcp/McpClientRegistration.cs`의 사본입니다
   도형·글을 선택하면 멈춥니다. 창 없는 파일은 고친 뒤 저장합니다.
 - 내부 에이전트의 PPT 도구(슬라이드·도형 읽기, 줄 측정, 문단 교체, 도형·표·선 추가 등)에 더해
   `list_presentations`, `open_presentation`, `go_to_slide`, `list_fonts`(글꼴 찾기), `export_markdown`,
-  `render_slide`(PNG 그림 반환)가 있습니다. LLM이 필요한 카드 채우기·원문 요약은 내보내지 않습니다.
+  `render_slide`(PNG 그림 반환), `render_slides`(여러 쪽·축소판)가 있습니다. LLM이 필요한 카드 채우기·원문 요약은 내보내지 않습니다.
+- 그림: `add_picture`(칸에 cover·contain·stretch, crop 비율), `add_pictures_in_box`(칸을 n등분해 나란히,
+  「[그림 삽입]」 글상자 자리에 바꿔 넣기), `replace_picture`(같은 자리·크기·Z순서·이름). `list_shapes`는
+  `in_box`·`type` 필터와 그림의 자른 양·문서에 든 그림 픽셀을 보여 줍니다.
+- `open_presentation`은 문서가 올라올 때까지 기다리고, 메일·인터넷에서 받은 파일이 「제한된 보기」로 열리면
+  알립니다(`unblock=true`면 받은 파일 표시를 지우고 편집 모드로 다시 엽니다).
 - localhost에서만 열리고, localhost가 아닌 Origin(브라우저 페이지)의 요청은 거절합니다.
 
 ## 직접 빌드

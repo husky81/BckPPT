@@ -52,9 +52,11 @@ public sealed class FakeShape(string name, float left, float top, float width, f
     public string Group { get; set; } = "";
     /// <summary>추가할 때 받은 요청(TextShapeRequest·LineRequest·TableRequest).</summary>
     public object? Spec { get; set; }
+    /// <summary>그림이면 원본 기준 자른 비율(그림이 아니면 null).</summary>
+    public CropFractions? PictureCrop { get; set; }
 
     public FakeShape Clone() => new(Name, Left, Top, Width, Height, CharsPerLine, Paragraphs.ToArray())
-        { Format = Format, Id = Id, Group = Group, Spec = Spec };
+        { Format = Format, Id = Id, Group = Group, Spec = Spec, PictureCrop = PictureCrop };
 
     /// <summary>글자 수로 자동 줄바꿈을 흉내 낸다. \v는 Shift+Enter, 문단 끝은 Enter.</summary>
     public IReadOnlyList<TextLineInfo> Lines()
@@ -153,8 +155,9 @@ public sealed class FakePptComService : IPptComService
         Read(presentationPath, slideIndex).FirstOrDefault(s => s.Is(shapeName))?.Lines() ?? [];
 
     public IReadOnlyList<ShapeEntry> ListShapes(string presentationPath, int slideIndex) =>
-        Read(presentationPath, slideIndex).Select(s => new ShapeEntry(s.Group == "" ? s.Name : $"{s.Group}/{s.Name}", s.Name, s.Group, 1, s.Left, s.Top, s.Width, s.Height,
-            s.Paragraphs.Any(p => p.Length > 0), string.Join(" ", s.Paragraphs), s.Id)).ToList();
+        Read(presentationPath, slideIndex).Select(s => new ShapeEntry(s.Group == "" ? s.Name : $"{s.Group}/{s.Name}", s.Name, s.Group, s.PictureCrop is null ? 1 : 13, s.Left, s.Top, s.Width, s.Height,
+            s.Paragraphs.Any(p => p.Length > 0), string.Join(" ", s.Paragraphs), s.Id,
+            Picture: s.PictureCrop is { } c ? new PictureInfo(c, s.Width, s.Height, 400, 300) : null)).ToList();
 
     public TextFormatInfo GetTextFormat(string presentationPath, int slideIndex, string address) =>
         Read(presentationPath, slideIndex).First(s => s.Is(address)).Format;
@@ -256,6 +259,47 @@ public sealed class FakePptComService : IPptComService
     public Task NavigateToShapeAsync(string presentationPath, int slideIndex, string shapeName) => throw new NotSupportedException();
     public void NavigateToSlide(string presentationPath, int slideIndex) => throw new NotSupportedException();
     public void OpenPptxInPowerPoint(string filePath) => throw new NotSupportedException();
+
+    /// <summary>OpenAndWait가 돌려줄 상태와 받은 호출.</summary>
+    public OpenedState OpenState { get; set; } = OpenedState.Editable;
+    public bool DownloadMark { get; set; }
+    public OpenPresentationResult OpenAndWait(string filePath, bool unblock, TimeSpan timeout, CancellationToken cancellationToken = default)
+    {
+        Calls.Add($"open {Path.GetFileName(filePath)} unblock={unblock}");
+        bool unblocked = unblock && DownloadMark;
+        if (unblock) { DownloadMark = false; ProtectedViews.RemoveAll(v => v.Path == filePath); if (OpenState == OpenedState.ProtectedView) OpenState = OpenedState.Editable; }
+        return new OpenPresentationResult(OpenState, DownloadMark || unblocked, unblocked, TimeSpan.FromSeconds(1), Slides.Count);
+    }
+    public List<ProtectedViewInfo> ProtectedViews { get; } = new();
+    public IReadOnlyList<ProtectedViewInfo> ListProtectedViews() => ProtectedViews;
+
+    /// <summary>그림 도형: 넣은 요청을 Spec에 두고 Picture 정보를 붙인다(원본 4:3 가정).</summary>
+    public IReadOnlyList<PlacedPicture> PlacePictures(string presentationPath, int slideIndex, IReadOnlyList<PictureRequest> requests,
+        string? replaceAddress = null, bool keepReplacedName = false)
+    {
+        ThrowIfEditing();
+        var list = Slide(slideIndex);
+        int at = list.Count;
+        string oldName = "";
+        if (replaceAddress is not null)
+        {
+            var old = Shape(slideIndex, replaceAddress);
+            at = list.IndexOf(old);
+            oldName = old.Name;
+            list.Remove(old);
+        }
+        var placed = new List<PlacedPicture>();
+        foreach (var r in requests)
+        {
+            var (box, crop) = PictureFitter.Fit(400, 300, r.Crop, new BoxF(r.Left, r.Top, r.Width, r.Height), r.Fit);
+            string name = r.Name ?? (keepReplacedName && requests.Count == 1 && oldName.Length > 0 ? oldName : $"Picture {list.Count + 1}");
+            var shape = new FakeShape(name, box.Left, box.Top, box.Width, box.Height, 100) { Spec = r, PictureCrop = crop };
+            list.Insert(at++, shape);
+            Calls.Add($"picture {Path.GetFileName(r.ImagePath)} {box.Left:0.##},{box.Top:0.##} {box.Width:0.##}x{box.Height:0.##}");
+            placed.Add(new PlacedPicture(name, name, box.Left, box.Top, box.Width, box.Height, crop, 400, 300));
+        }
+        return placed;
+    }
     public IDisposable KeepOpen(string presentationPath, bool readOnly) => new MemoryStream();
 
     /// <summary>대상 문서가 PowerPoint 창에 열려 있는 것으로 볼지.</summary>

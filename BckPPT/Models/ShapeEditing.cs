@@ -16,7 +16,8 @@ public record ShapeEntry(
     string TextPreview,
     int    Id = 0,    // PowerPoint Shape.Id. 슬라이드 안에서 고유하고 복제해도 유지된다.
     int    TableRows = 0,      // 표면 행·열 수. 칸은 "주소 [R1C2]"로 가리킨다.
-    int    TableColumns = 0);
+    int    TableColumns = 0,
+    PictureInfo? Picture = null);   // 그림이면 자른 비율·원본 픽셀(디스크에 저장된 판에서 읽는다)
 
 /// <summary>값이 있는 항목만 바꾼다. 크기를 먼저 바꾼 뒤 위치를 맞추므로 뒤집힌 도형도 제자리에 둔다.</summary>
 public record ShapeGeometry(float? Left = null, float? Top = null, float? Width = null, float? Height = null);

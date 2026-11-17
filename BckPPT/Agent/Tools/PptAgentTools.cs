@@ -23,8 +23,13 @@ public static class PptAgentTools
         var tools = new List<AgentTool>
         {
             new("list_slides", "작업 문서의 슬라이드 번호와 제목 목록", Schema(""), false, ListSlides),
-            new("list_shapes", "슬라이드의 도형 목록(그룹 안까지). 주소·위치·크기(pt)·텍스트 앞부분",
-                Schema("""{"slide": {"type": "integer"}}""", "slide"), false, ListShapes),
+            new("list_shapes", "슬라이드의 도형 목록(그룹 안까지). 주소·위치·크기(pt)·텍스트 앞부분. 그림은 자른 양과 저장된 파일에 든 그림의 픽셀 크기도 준다. " +
+                "in_box를 주면 중심이 그 영역 안에 있는 도형만, type을 주면 그 종류만 보여 준다",
+                Schema("""
+                    {"slide": {"type": "integer"},
+                     "in_box": {"description": "영역 {left,top,width,height}(pt) 또는 도형 주소. 중심이 그 안에 있는 도형만"},
+                     "type": {"type": "string", "enum": ["picture", "text", "table"], "description": "picture: 그림(그림 개체 틀 포함), text: 글이 있는 도형, table: 표"}}
+                    """, "slide"), false, ListShapes),
             new("read_text", "도형의 문단 목록과 상자 높이·글자 크기. 문단 번호는 1부터",
                 Schema("{" + SlideShape + "}", "slide", "shape"), false, ReadText),
             new("read_table",
@@ -183,7 +188,49 @@ public static class PptAgentTools
     {
         int slide = ToolArgs.Int(args, "slide");
         var shapes = await Task.Run(() => ctx.Ppt.ListShapes(ctx.WorkingPath, slide), ct);
-        return FormatShapeList(slide, shapes);
+        var filters = new List<string>();
+        if (args.TryGetProperty("in_box", out var boxArg) && boxArg.ValueKind is not JsonValueKind.Null)
+        {
+            var (box, label) = BoxOf(boxArg, shapes, slide);
+            shapes = shapes.Where(s => s.Address != label && CenterInside(s, box)).ToList();
+            filters.Add($"영역 {label}");
+        }
+        if (ToolArgs.OptionalString(args, "type")?.Trim().ToLowerInvariant() is { Length: > 0 } type)
+        {
+            Func<ShapeEntry, bool> keep = type switch
+            {
+                "picture" => s => s.Picture is not null,
+                "text" => s => s.HasText,
+                "table" => s => s.TableRows > 0,
+                _ => throw new AgentToolException("type은 picture·text·table 중 하나입니다."),
+            };
+            shapes = shapes.Where(keep).ToList();
+            filters.Add($"종류 {type}");
+        }
+        var text = FormatShapeList(slide, shapes);
+        return filters.Count == 0 ? text : $"[걸러 봄: {string.Join(", ", filters)}]\n" + text;
+    }
+
+    /// <summary>in_box 인자: {left,top,width,height} 또는 도형 주소. 영역과 표시 이름.</summary>
+    private static ((float Left, float Top, float Width, float Height) Box, string Label) BoxOf(JsonElement arg, IReadOnlyList<ShapeEntry> shapes, int slide)
+    {
+        if (arg.ValueKind == JsonValueKind.String)
+        {
+            string address = arg.GetString()!.Trim();
+            var e = shapes.FirstOrDefault(s => s.Address == address) ?? shapes.FirstOrDefault(s => s.Name == address)
+                ?? throw new AgentToolException($"{slide}쪽에서 도형 '{address}'를 찾지 못했습니다.");
+            return ((e.Left, e.Top, e.Width, e.Height), e.Address);
+        }
+        if (arg.ValueKind != JsonValueKind.Object) throw new AgentToolException("in_box는 {left,top,width,height} 또는 도형 주소입니다.");
+        float Need(string n) => ToolArgs.OptionalFloat(arg, n) ?? throw new AgentToolException($"in_box.{n}가 필요합니다.");
+        var b = (Need("left"), Need("top"), Need("width"), Need("height"));
+        return (b, $"{b.Item1:0.#},{b.Item2:0.#} {b.Item3:0.#}×{b.Item4:0.#}");
+    }
+
+    private static bool CenterInside(ShapeEntry s, (float Left, float Top, float Width, float Height) box)
+    {
+        float cx = s.Left + s.Width / 2, cy = s.Top + s.Height / 2;
+        return cx >= box.Left && cx <= box.Left + box.Width && cy >= box.Top && cy <= box.Top + box.Height;
     }
 
     /// <summary>
@@ -223,6 +270,13 @@ public static class PptAgentTools
             }
             if (s.TableRows > 0)
                 sb.Append($" | 표 {s.TableRows}행×{s.TableColumns}열 (read_table로 칸을 읽는다)");
+            if (s.Picture is { } pic)
+            {
+                sb.Append(" | 그림");
+                sb.Append(pic.Crop.IsNone ? " 자르지 않음" : $" 잘림 {pic.Crop}");
+                // 저장된 파일에서 읽는다. PowerPoint가 저장할 때 그림을 압축하면 넣은 파일보다 작다.
+                if (pic.PixelWidth is int pw && pic.PixelHeight is int ph) sb.Append($" · 문서에 든 그림 {pw}×{ph}px");
+            }
             sb.Append('\n');
         }
 
