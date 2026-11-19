@@ -75,10 +75,15 @@ public sealed class StaDispatcher : IDisposable
     /// <summary>동기 래퍼 (호출 스레드를 블록한다).</summary>
     public void Invoke(Action action)  => WaitWithTimeout(InvokeAsync(action));
 
-    private T WaitWithTimeout<T>(Task<T> task)
+    /// <summary>시간 제한을 따로 준다(큰 문서 PDF 내보내기처럼 45초를 넘는 것이 정상인 작업).</summary>
+    public T Invoke<T>(Func<T> func, TimeSpan timeout) => WaitWithTimeout(InvokeAsync(func), timeout);
+
+    private T WaitWithTimeout<T>(Task<T> task) => WaitWithTimeout(task, DefaultTimeout);
+
+    private T WaitWithTimeout<T>(Task<T> task, TimeSpan timeout)
     {
-        try { return task.WaitAsync(DefaultTimeout).GetAwaiter().GetResult(); }
-        catch (TimeoutException ex) { Quarantine(task); throw new PptComTimeoutException(DefaultTimeout, ex); }
+        try { return task.WaitAsync(timeout).GetAwaiter().GetResult(); }
+        catch (TimeoutException ex) { Quarantine(task); throw new PptComTimeoutException(timeout, ex); }
     }
 
     private void WaitWithTimeout(Task task)

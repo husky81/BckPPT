@@ -27,6 +27,12 @@ public interface IPptComService
     MarkdownExportResult ExportMarkdown(string presentationPath, string outputPath,
         CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// PowerPoint로 PDF를 만든다(ExportAsFixedFormat, 인쇄 품질). 이미 열린 문서는 그대로(저장 안 된 고침 포함) 내보내고,
+    /// 아니면 읽기 전용·창 없이 열었다 닫는다. PowerPoint를 새로 띄웠으면 끝에 끈다.
+    /// </summary>
+    PdfExportResult ExportPdf(PdfExportRequest request);
+
     Task<AutoFitResult> AutoFitAsync(string presentationPath, IProgress<string>? progress = null);
     Task FixShapeAsync(string presentationPath, int slideIndex, string shapeName,
         IProgress<string>? progress = null);

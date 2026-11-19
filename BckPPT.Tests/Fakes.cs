@@ -293,6 +293,9 @@ public sealed class FakePptComService : IPptComService
     // ── 에이전트 도구가 쓰지 않는 멤버 ──
     public IReadOnlyList<PptPresentation> GetOpenPresentations() => [];
     public MarkdownExportResult ExportMarkdown(string presentationPath, string outputPath, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+    public PdfExportRequest? LastPdfRequest;
+    public Func<PdfExportRequest, PdfExportResult>? OnExportPdf;
+    public PdfExportResult ExportPdf(PdfExportRequest request) { LastPdfRequest = request; return OnExportPdf?.Invoke(request) ?? throw new NotSupportedException(); }
     public Task<AutoFitResult> AutoFitAsync(string presentationPath, IProgress<string>? progress = null) => throw new NotSupportedException();
     public Task FixShapeAsync(string presentationPath, int slideIndex, string shapeName, IProgress<string>? progress = null) => throw new NotSupportedException();
     public Task NavigateToShapeAsync(string presentationPath, int slideIndex, string shapeName) => throw new NotSupportedException();

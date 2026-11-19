@@ -234,6 +234,21 @@ public class PptComService : IPptComService
         finally { ReportIfSlow(caller, watch.Elapsed); }
     }
 
+    /// <summary>RunOnSta와 같되 시간 제한을 따로 준다(45초를 넘는 것이 정상인 긴 작업).</summary>
+    private static T RunOnStaLong<T>(Func<T> func, TimeSpan timeout, [System.Runtime.CompilerServices.CallerMemberName] string caller = "")
+    {
+        var watch = Stopwatch.StartNew();
+        string operation = Guid.NewGuid().ToString("N");
+        PptDiagnosticLog.Event("com-dispatch", new { operation, caller, healthy = StaDispatcher.Instance.IsHealthy, timeoutSeconds = timeout.TotalSeconds });
+        try { return StaDispatcher.Instance.Invoke(() => ExecuteLogged(func, operation, caller), timeout); }
+        catch (Exception ex)
+        {
+            PptDiagnosticLog.Event("com-wait-failed", new { operation, caller, elapsedMs = watch.ElapsedMilliseconds, error = ex.ToString() });
+            throw;
+        }
+        finally { ReportIfSlow(caller, watch.Elapsed); }
+    }
+
     private static void RunOnSta(Action action, [System.Runtime.CompilerServices.CallerMemberName] string caller = "")
         => RunOnSta(() => { action(); return true; }, caller);
 
@@ -1016,6 +1031,212 @@ public class PptComService : IPptComService
 
     private static string EscapeMarkdown(string value)
         => value.Replace("\\", "\\\\").Replace("*", "\\*").Replace("_", "\\_").Replace("[", "\\[").Replace("]", "\\]");
+
+    // ── PDF 내보내기 ──────────────────────────────────────────────
+
+    private const int PpFixedFormatTypePdf = 2;
+    private const int PpFixedFormatIntentPrint = 2;
+    private const int PpPrintOutputSlides = 1;
+    private const int PpPrintAll = 1;
+    private const int PpPrintSlideRange = 4;
+
+    public static TimeSpan DefaultPdfTimeout { get; set; } = TimeSpan.FromMinutes(10);
+
+    /// <summary>
+    /// ExportAsFixedFormat(PDF·인쇄 품질)으로 내보낸다. SaveAs(…, 32)는 쪽 범위·숨긴 쪽을 고를 수 없고 품질(화면/인쇄)도
+    /// 마지막 설정을 따라가서 쓰지 않는다. 이미 열린 문서(창 없이 남은 것 포함)는 그대로 내보내 저장 안 된 고침도 들어간다.
+    /// 쪽을 고르면 PrintOptions.Ranges를 잠깐 바꾸고 되돌린다(그 문서의 저장 표시도 원래대로).
+    /// </summary>
+    public PdfExportResult ExportPdf(PdfExportRequest request)
+    {
+        string source = Path.GetFullPath(request.PresentationPath);
+        string output = Path.GetFullPath(request.OutputPath);
+        if (!string.Equals(Path.GetExtension(output), ".pdf", StringComparison.OrdinalIgnoreCase))
+            throw new ArgumentException("PDF 경로는 .pdf로 끝나야 합니다.");
+        if (File.Exists(output) && !request.Overwrite)
+            throw new IOException($"같은 이름의 PDF가 이미 있습니다: {output}. 덮어쓰려면 overwrite=true를 주세요.");
+        Directory.CreateDirectory(Path.GetDirectoryName(output)!);
+
+        return RunOnStaLong(() =>
+        {
+            var watch = Stopwatch.StartNew();
+            dynamic? app = TryGetActiveInstance();
+            bool started = false;
+            if (app is null)
+            {
+                var pptType = Type.GetTypeFromProgID("PowerPoint.Application")
+                    ?? throw new InvalidOperationException("PowerPoint가 설치되어 있지 않습니다.");
+                // 보이지 않게 띄운다. 끝에 끄므로 사용자 문서가 이 숨은 PowerPoint에 열려 갇히지 않는다.
+                app = Activator.CreateInstance(pptType)!;
+                started = true;
+                PptDiagnosticLog.Event("pdf-started-powerpoint", new { source });
+            }
+
+            bool quit = false;
+            string? note = null;
+            dynamic? prs = null;
+            bool ownedByUs = false;
+            try
+            {
+                dynamic? existing = FindOpenPresentation(app, source);
+                int windows = 0;
+                bool unsaved = false;
+                if (existing is not null)
+                {
+                    prs = existing;
+                    try { windows = (int)existing.Windows.Count; } catch { }
+                    try { unsaved = (int)existing.Saved != MsoTrue; } catch { }
+                }
+                else
+                {
+                    prs = OpenOwned(app, source, MsoTrue, MsoFalse, MsoFalse);
+                    ownedByUs = true;
+                }
+
+                int total = (int)prs.Slides.Count;
+                var chosen = request.Slides is { Count: > 0 }
+                    ? request.Slides.Distinct().OrderBy(i => i).ToList()
+                    : Enumerable.Range(1, total).ToList();
+                var outOfRange = chosen.Where(i => i < 1 || i > total).ToList();
+                if (outOfRange.Count > 0)
+                    throw new ArgumentException($"없는 쪽 번호입니다: {string.Join(", ", outOfRange)} (문서는 {total}쪽).");
+                var visible = chosen;
+                if (!request.IncludeHidden)
+                    visible = chosen.Where(i =>
+                    {
+                        try { return (int)prs.Slides[i].SlideShowTransition.Hidden != MsoTrue; } catch { return true; }
+                    }).ToList();
+                int hidden = chosen.Count - visible.Count;
+                int pages = visible.Count;
+                if (pages == 0)
+                    throw new ArgumentException("고른 쪽이 모두 숨긴 쪽입니다. include_hidden=true로 다시 부르세요.");
+
+                bool all = request.Slides is not { Count: > 0 } || chosen.Count == total;
+                if (all)
+                {
+                    ExportFixedFormat(prs, output, request.IncludeHidden, null, PpPrintAll);
+                }
+                else
+                {
+                    ExportPdfRuns(prs, output, visible, request.IncludeHidden);
+                }
+
+                var info = new FileInfo(output);
+                if (!info.Exists) throw new IOException("PowerPoint가 PDF를 만들지 않았습니다.");
+
+                if (ownedByUs)
+                {
+                    SafeClose(prs);
+                    prs = null;
+                    if (!started && FindOpenPresentation(app, source) is not null)
+                        note = "PowerPoint가 내보내려고 연 문서를 아직 닫지 않았습니다(창 없이 남음). 다음 bckppt 작업 때 다시 닫습니다.";
+                }
+                if (started) { (bool Quit, string? Note) q = QuitStartedPowerPoint(app); quit = q.Quit; note = q.Note; }
+
+                return new PdfExportResult(output, pages, total, hidden, info.Length, watch.Elapsed,
+                    FromOpenDocument: !ownedByUs, OpenWindows: windows, HadUnsavedChanges: unsaved,
+                    StartedPowerPoint: started, QuitPowerPoint: quit, Note: note);
+            }
+            catch
+            {
+                if (ownedByUs && prs is not null) { try { SafeClose(prs); } catch { } }
+                if (started) { try { QuitStartedPowerPoint(app); } catch { } }
+                throw;
+            }
+        }, request.Timeout ?? DefaultPdfTimeout);
+    }
+
+    /// <summary>
+    /// 고른 쪽만 내보낸다(slides는 숨긴 쪽을 이미 뺀 목록). PowerPoint는 PrintOptions.Ranges에 범위를 여럿 넣어도
+    /// 첫 범위만 내보내므로(2026-11-19 확인), 이어진 쪽 묶음마다 따로 내보내 PdfPig로 합친다.
+    /// 문서를 고치지 않는다 — 범위를 넣었던 PrintOptions와 저장 표시는 되돌린다.
+    /// </summary>
+    private static void ExportPdfRuns(dynamic prs, string output, IReadOnlyList<int> slides, bool includeHidden)
+    {
+        var runs = new List<(int From, int To)>();
+        foreach (int i in slides)
+        {
+            if (runs.Count > 0 && runs[^1].To == i - 1) runs[^1] = (runs[^1].From, i);
+            else runs.Add((i, i));
+        }
+
+        bool wasSaved = true;
+        try { wasSaved = (int)prs.Saved == MsoTrue; } catch { }
+        dynamic options = prs.PrintOptions;
+        var oldRanges = new List<(int, int)>();
+        int oldRangeType = PpPrintAll;
+        try
+        {
+            oldRangeType = (int)options.RangeType;
+            dynamic ranges = options.Ranges;
+            for (int r = 1; r <= (int)ranges.Count; r++) oldRanges.Add(((int)ranges.Item(r).Start, (int)ranges.Item(r).End));
+        }
+        catch { }
+        var parts = new List<string>();
+        try
+        {
+            foreach (var (from, to) in runs)
+            {
+                string target = runs.Count == 1 ? output
+                    : Path.Combine(Path.GetTempPath(), $"bckppt-pdf-{Guid.NewGuid():N}.pdf");
+                if (runs.Count > 1) parts.Add(target);
+                options.Ranges.ClearAll();
+                dynamic range = options.Ranges.Add(from, to);
+                ExportFixedFormat(prs, target, includeHidden, range, PpPrintSlideRange);
+            }
+            if (runs.Count > 1)
+                File.WriteAllBytes(output, UglyToad.PdfPig.Writer.PdfMerger.Merge(parts.ToArray()));
+        }
+        finally
+        {
+            foreach (var part in parts) { try { File.Delete(part); } catch { } }
+            try
+            {
+                options.Ranges.ClearAll();
+                foreach (var (from, to) in oldRanges) options.Ranges.Add(from, to);
+                options.RangeType = oldRangeType;
+            }
+            catch (Exception ex) { PptDiagnosticLog.Event("pdf-restore-ranges-failed", new { error = ex.GetBaseException().Message }); }
+            if (wasSaved) { try { prs.Saved = MsoTrue; } catch { } }
+        }
+    }
+
+    /// <summary>
+    /// ExportAsFixedFormat을 인자를 모두 채워 부른다. 이름 붙인 인자로 일부만 주면 늦은 바인딩이 형 변환에 실패한다
+    /// ("Could not convert argument 4").
+    /// </summary>
+    private static void ExportFixedFormat(dynamic prs, string output, bool includeHidden, object? printRange, int rangeType)
+    {
+        prs.ExportAsFixedFormat(output, PpFixedFormatTypePdf, PpFixedFormatIntentPrint,
+            MsoFalse,                // FrameSlides
+            1,                       // HandoutOrder: ppPrintHandoutVerticalFirst
+            PpPrintOutputSlides,
+            includeHidden ? MsoTrue : MsoFalse,
+            printRange ?? new DispatchWrapper(null), // PrintRange: 이어진 한 묶음일 때만(null은 형 변환 실패라 빈 IDispatch로)
+            rangeType,
+            "",                      // SlideShowName
+            true,                    // IncludeDocProperties
+            true,                    // KeepIRMSettings
+            true,                    // DocStructureTags
+            true,                    // BitmapMissingFonts
+            false);                  // UseISO19005_1
+    }
+
+    /// <summary>BckPPT가 PDF 때문에 새로 띄운 PowerPoint를 끈다. 그 사이 다른 문서가 열렸으면 끄지 않고 보이게 한다.</summary>
+    private static (bool Quit, string? Note) QuitStartedPowerPoint(dynamic app)
+    {
+        int count = 0;
+        try { count = (int)app.Presentations.Count; } catch { }
+        if (count > 0)
+        {
+            try { app.Visible = MsoTrue; } catch { }
+            PptDiagnosticLog.Event("pdf-powerpoint-kept", new { presentations = count });
+            return (false, $"내보내는 동안 PowerPoint에 다른 문서 {count}개가 열려 PowerPoint를 끄지 않고 창을 보이게 했습니다.");
+        }
+        app.Quit();
+        PptDiagnosticLog.Event("pdf-powerpoint-quit", new { });
+        return (true, null);
+    }
 
     // ── AutoFit (상세 결과 반환) ──────────────────────────────────
 

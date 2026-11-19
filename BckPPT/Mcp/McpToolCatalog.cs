@@ -64,6 +64,28 @@ public sealed class McpToolCatalog
             WithFile(Schema(("font_name", "string", "찾을 글꼴 이름(정확히). 비우면 목록"))), ListFonts);
         Add("export_markdown", "문서를 슬라이드별 Markdown으로 내보낸다(쪽마다 PNG 미리보기를 _assets 폴더에 함께 저장)",
             WithFile(Schema(("output_path", "string", "저장할 .md 절대 경로. 비우면 PPT 옆에 같은 이름으로"))), ExportMarkdown);
+        Add("export_pdf",
+            "PowerPoint로 PDF를 만든다(인쇄 품질, 숨긴 쪽은 기본 제외). PowerPoint에 이미 열린 문서는 그 상태 그대로(저장 안 된 고침 포함) 내보내고, " +
+            "안 열린 파일은 읽기 전용·창 없이 열어 내보낸 뒤 닫는다. PowerPoint가 꺼져 있었으면 띄웠다가 끝에 끈다. " +
+            "수백 MB 문서는 몇 분 걸릴 수 있다(그동안 다른 bckppt 도구는 기다린다). 결과에 쪽 수·PDF 크기·걸린 시간",
+            WithFile(new JsonObject
+            {
+                ["type"] = "object",
+                ["properties"] = new JsonObject
+                {
+                    ["output_path"] = Str("저장할 .pdf 절대 경로. 비우면 PPT 옆에 같은 이름(.pdf)"),
+                    ["slides"] = new JsonObject
+                    {
+                        ["description"] = "이 쪽들만. 쪽 번호 배열([1,2,5]) 또는 글(\"1-5,8\"). 비우면 전체",
+                        ["anyOf"] = new JsonArray(
+                            new JsonObject { ["type"] = "array", ["items"] = new JsonObject { ["type"] = "integer" } },
+                            new JsonObject { ["type"] = "string" }),
+                    },
+                    ["include_hidden"] = new JsonObject { ["type"] = "boolean", ["description"] = "숨긴 쪽도 넣기(기본 false)" },
+                    ["overwrite"] = new JsonObject { ["type"] = "boolean", ["description"] = "같은 이름의 PDF가 있으면 덮어쓰기(기본 false — 있으면 멈춘다)" },
+                    ["timeout_seconds"] = new JsonObject { ["type"] = "integer", ["description"] = "최대 기다릴 초(기본 600, 30~3600)" },
+                },
+            }), ExportPdf);
         Add("render_slide", "슬라이드를 PNG로 렌더해 그림으로 돌려준다. 고친 뒤 넘침·겹침을 눈으로 확인할 때 쓴다",
             WithFile(Schema(("slide", "integer", "쪽 번호(1부터)")), "slide"), RenderSlide);
         Add("render_slides",
@@ -707,6 +729,127 @@ public sealed class McpToolCatalog
         var result = await Task.Run(() => _ppt.ExportMarkdown(path, output, ct), ct);
         return McpToolResult.Ok($"{result.SlideCount}쪽을 내보냈습니다: {result.OutputPath}" +
                                 (result.WarningCount > 0 ? $" (경고 {result.WarningCount}건)" : ""));
+    }
+
+    private async Task<McpToolResult> ExportPdf(JsonElement args, CancellationToken ct)
+    {
+        var path = ResolveFile(args);
+        var output = ToolArgs.OptionalString(args, "output_path") is { Length: > 0 } o ? o.Trim().Trim('"') : Path.ChangeExtension(path, ".pdf");
+        if (!Path.IsPathFullyQualified(output)) throw new AgentToolException("output_path는 절대 경로여야 합니다.");
+        if (!string.Equals(Path.GetExtension(output), ".pdf", StringComparison.OrdinalIgnoreCase))
+            throw new AgentToolException("output_path는 .pdf로 끝나야 합니다.");
+        bool overwrite = ToolArgs.OptionalBool(args, "overwrite") == true;
+        if (File.Exists(output) && !overwrite)
+            return McpToolResult.Error($"같은 이름의 PDF가 이미 있습니다: {output} ({FormatBytes(new FileInfo(output).Length)}, {File.GetLastWriteTime(output):yyyy-MM-dd HH:mm}). " +
+                                       "덮어쓰려면 overwrite=true, 아니면 다른 output_path를 주세요.");
+        int seconds = Math.Clamp(ToolArgs.OptionalInt(args, "timeout_seconds") ?? 600, 30, 3600);
+        var request = new PdfExportRequest(path, output, ParseSlideList(args, "slides"),
+            IncludeHidden: ToolArgs.OptionalBool(args, "include_hidden") == true, Overwrite: overwrite,
+            Timeout: TimeSpan.FromSeconds(seconds));
+
+        PdfExportResult r;
+        try { r = await Task.Run(() => _ppt.ExportPdf(request), ct); }
+        catch (PptComTimeoutException)
+        {
+            return McpToolResult.Error($"PDF 내보내기가 {seconds}초 안에 끝나지 않았습니다. PowerPoint는 계속 내보내는 중일 수 있고, 끝날 때까지 다른 bckppt 도구는 기다립니다. " +
+                                       $"잠시 뒤 {output}이 생겼는지 확인하세요(다시 부르지 말 것). 더 긴 시간이 필요하면 timeout_seconds를 늘립니다.");
+        }
+        catch (Exception ex) when (ex is ArgumentException or IOException)
+        {
+            return McpToolResult.Error(ex.Message);
+        }
+        catch (System.Runtime.InteropServices.COMException ex)
+        {
+            string hint = File.Exists(output) ? " 같은 이름의 PDF가 다른 프로그램(PDF 뷰어 등)에 열려 있으면 닫고 다시 하세요." : "";
+            return McpToolResult.Error($"PowerPoint가 PDF를 만들지 못했습니다: {ex.GetBaseException().Message}{hint}");
+        }
+
+        var text = new StringBuilder();
+        text.AppendLine($"PDF를 만들었습니다: {r.OutputPath}");
+        text.Append($"- {r.Pages}쪽 (문서 {r.TotalSlides}쪽");
+        if (request.Slides is { Count: > 0 }) text.Append($", 고른 쪽 {FormatSlideList(request.Slides)}");
+        if (r.HiddenSkipped > 0) text.Append($", 숨긴 쪽 {r.HiddenSkipped}개 뺌 — 넣으려면 include_hidden=true");
+        text.AppendLine(")");
+        text.AppendLine($"- PDF 크기 {FormatBytes(r.Bytes)} (원본 PPT {FormatBytes(SafeLength(path))}), 걸린 시간 {r.Elapsed.TotalSeconds:0.0}초");
+        if (r.FromOpenDocument)
+        {
+            string where = r.OpenWindows > 0 ? "PowerPoint 창에 열린 문서" : "PowerPoint에 창 없이 남은 문서";
+            text.AppendLine(r.HadUnsavedChanges
+                ? $"- {where}를 그대로 내보냈습니다. 저장 안 된 고침이 있어 PDF에 그 고침이 들어갔습니다(디스크의 PPT 파일과 다를 수 있음)."
+                : $"- {where}를 그대로 내보냈습니다(저장된 상태와 같음).");
+        }
+        else text.AppendLine("- 디스크의 파일을 읽기 전용·창 없이 열어 내보내고 닫았습니다.");
+        if (r.StartedPowerPoint)
+            text.AppendLine(r.QuitPowerPoint ? "- PowerPoint가 꺼져 있어 띄웠다가 끝나고 껐습니다." : $"- {r.Note}");
+        else if (r.Note is { Length: > 0 }) text.AppendLine($"- {r.Note}");
+        return McpToolResult.Ok(text.ToString().TrimEnd());
+    }
+
+    private static long SafeLength(string path)
+    {
+        try { return new FileInfo(path).Length; } catch { return 0; }
+    }
+
+    private static string FormatBytes(long bytes) => bytes switch
+    {
+        >= 1024L * 1024 * 1024 => $"{bytes / (1024.0 * 1024 * 1024):0.00}GB",
+        >= 1024L * 1024 => $"{bytes / (1024.0 * 1024):0.0}MB",
+        >= 1024 => $"{bytes / 1024.0:0}KB",
+        _ => $"{bytes}B",
+    };
+
+    /// <summary>쪽 목록: 정수 배열 또는 "1-5,8" 같은 글. 비면 null.</summary>
+    internal static IReadOnlyList<int>? ParseSlideList(JsonElement args, string name)
+    {
+        if (!args.TryGetProperty(name, out var v) || v.ValueKind == JsonValueKind.Null) return null;
+        var list = new List<int>();
+        if (v.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var e in v.EnumerateArray())
+            {
+                if (e.ValueKind == JsonValueKind.Number && e.TryGetInt32(out int n)) list.Add(n);
+                else if (e.ValueKind == JsonValueKind.String) list.AddRange(ParseSlideText(e.GetString() ?? "", name));
+                else throw new AgentToolException($"인자 '{name}'는 쪽 번호 배열이거나 \"1-5,8\" 같은 글이어야 합니다.");
+            }
+        }
+        else if (v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out int one)) list.Add(one);
+        else if (v.ValueKind == JsonValueKind.String) list.AddRange(ParseSlideText(v.GetString() ?? "", name));
+        else throw new AgentToolException($"인자 '{name}'는 쪽 번호 배열이거나 \"1-5,8\" 같은 글이어야 합니다.");
+        return list.Count == 0 ? null : list.Distinct().OrderBy(i => i).ToList();
+    }
+
+    private static IEnumerable<int> ParseSlideText(string text, string name)
+    {
+        text = text.Trim();
+        if (text.StartsWith('[')) // 배열을 글로 한 번 더 감싼 경우
+        {
+            try { return JsonSerializer.Deserialize<int[]>(text) ?? []; }
+            catch (JsonException) { throw new AgentToolException($"인자 '{name}'를 읽지 못했습니다: {text}"); }
+        }
+        var result = new List<int>();
+        foreach (var part in text.Split([',', ' ', ';'], StringSplitOptions.RemoveEmptyEntries))
+        {
+            var bounds = part.Split(['-', '~'], StringSplitOptions.TrimEntries);
+            if (bounds.Length == 1 && int.TryParse(bounds[0], out int n)) result.Add(n);
+            else if (bounds.Length == 2 && int.TryParse(bounds[0], out int a) && int.TryParse(bounds[1], out int b) && a <= b)
+                result.AddRange(Enumerable.Range(a, b - a + 1));
+            else throw new AgentToolException($"인자 '{name}'의 '{part}'를 읽지 못했습니다. 예: \"1-5,8\"");
+        }
+        return result;
+    }
+
+    private static string FormatSlideList(IReadOnlyList<int> slides)
+    {
+        var parts = new List<string>();
+        int i = 0;
+        while (i < slides.Count)
+        {
+            int j = i;
+            while (j + 1 < slides.Count && slides[j + 1] == slides[j] + 1) j++;
+            parts.Add(i == j ? $"{slides[i]}" : $"{slides[i]}-{slides[j]}");
+            i = j + 1;
+        }
+        return string.Join(",", parts);
     }
 
     private Task<McpToolResult> ImportSlides(JsonElement args, CancellationToken ct)

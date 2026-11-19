@@ -107,6 +107,10 @@ bckhwp 레포 `src/BckHwpMcp/McpClientRegistration.cs`의 사본입니다
 - 내부 에이전트의 PPT 도구(슬라이드·도형 읽기, 줄 측정, 문단 교체, 도형·표·선 추가 등)에 더해
   `list_presentations`, `open_presentation`, `go_to_slide`, `list_fonts`(글꼴 찾기), `export_markdown`,
   `render_slide`(PNG 그림 반환), `render_slides`(여러 쪽·축소판)가 있습니다. LLM이 필요한 카드 채우기·원문 요약은 내보내지 않습니다.
+- `export_pdf`는 PowerPoint의 ExportAsFixedFormat(인쇄 품질)으로 PDF를 만듭니다. 이미 열린 문서는 그 상태(저장 안 된 고침 포함)로,
+  안 열린 파일은 읽기 전용·창 없이 열어 내보내고 닫습니다. 숨긴 쪽은 기본 제외, `slides`("1-5,8")로 일부만(떨어진 묶음은
+  묶음마다 내보내 PdfPig로 합침), 같은 이름 PDF가 있으면 `overwrite` 없이는 멈춥니다. PowerPoint가 꺼져 있었으면 띄웠다 끕니다.
+  시간 제한은 기본 600초(`timeout_seconds`)로 다른 COM 작업의 45초와 따로입니다.
 - 그림: `add_picture`(칸에 cover·contain·stretch, crop 비율), `add_pictures_in_box`(칸을 n등분해 나란히,
   `rows`·`columns` 격자, 「[그림 삽입]」 글상자 자리에 바꿔 넣기), `replace_picture`(같은 자리·크기·Z순서·이름).
   자르기는 PowerPoint 자르기라 원본이 남습니다. `focus`·`zoom`으로 보여 줄 부분을 고르고, `set_picture_crop`으로
